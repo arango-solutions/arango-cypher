@@ -1,0 +1,256 @@
+version: 1
+cases:
+  - id: C019
+    name: with group by and order
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH u.city AS city, count(*) AS c
+      RETURN city, c
+      ORDER BY c DESC
+      LIMIT 10
+    expected:
+      aql: |
+        FOR u IN @@collection
+          COLLECT city = u.city AGGREGATE c = COUNT(1)
+          SORT c DESC
+          LIMIT 10
+          RETURN {city: city, c: c}
+      bind_vars:
+        "@collection": users
+
+  - id: C020
+    name: with degree aggregation
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS]->(v:User)
+      WITH u, count(v) AS degree
+      RETURN u.id, degree
+      ORDER BY degree DESC
+      LIMIT 10
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          COLLECT u_1 = u AGGREGATE degree = COUNT(v)
+          SORT degree DESC
+          LIMIT 10
+          RETURN {id: u_1.id, degree: degree}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C021
+    name: with then filter
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH u.city AS city
+      WHERE city IS NOT NULL
+      RETURN city
+    expected:
+      aql: |
+        FOR u IN @@collection
+          LET city = u.city
+          FILTER (city != null)
+          RETURN city
+      bind_vars:
+        "@collection": users
+
+  - id: C022
+    name: with distinct projection
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH DISTINCT u.city AS city
+      RETURN city
+      ORDER BY city
+    expected:
+      aql: |
+        FOR u IN @@collection
+          COLLECT city = u.city
+          SORT city
+          RETURN city
+      bind_vars:
+        "@collection": users
+
+  - id: C023
+    name: collect and size
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH u.city AS city, collect(u.id) AS ids
+      RETURN city, size(ids) AS n
+    expected:
+      aql: |
+        FOR u IN @@collection
+          COLLECT city = u.city INTO ids = u.id
+          RETURN {city: city, n: LENGTH(ids)}
+      bind_vars:
+        "@collection": users
+
+  - id: C024
+    name: count only
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH count(*) AS n
+      RETURN n
+    expected:
+      aql: |
+        FOR u IN @@collection
+          COLLECT AGGREGATE n = COUNT(1)
+          RETURN n
+      bind_vars:
+        "@collection": users
+
+  - id: C025
+    name: avg aggregation
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH u.state AS s, avg(u.age) AS a
+      RETURN s, a
+      ORDER BY a DESC
+    expected:
+      aql: |
+        FOR u IN @@collection
+          COLLECT s = u.state AGGREGATE a = AVG(u.age)
+          SORT a DESC
+          RETURN {s: s, a: a}
+      bind_vars:
+        "@collection": users
+
+  - id: C026
+    name: group by end node property
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS]->(v:User)
+      WITH v.city AS city, count(*) AS c
+      RETURN city, c
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          COLLECT city = v.city AGGREGATE c = COUNT(1)
+          RETURN {city: city, c: c}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C033
+    name: multi-stage with filter and skip
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH u.city AS city, count(*) AS c
+      WITH city, c WHERE c > 1
+      RETURN city, c
+      ORDER BY c DESC
+      SKIP 1
+      LIMIT 1
+    expected:
+      aql: |
+        FOR u IN @@collection
+          COLLECT city = u.city AGGREGATE c = COUNT(1)
+          FILTER (c > 1)
+          SORT c DESC
+          LIMIT 1, 1
+          RETURN {city: city, c: c}
+      bind_vars:
+        "@collection": users
+
+  - id: C034
+    name: multi-stage collect then size + skip
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH u.city AS city, collect(u.id) AS ids
+      WITH city, size(ids) AS n
+      RETURN city, n
+      ORDER BY n DESC
+      SKIP 0
+      LIMIT 2
+    expected:
+      aql: |
+        FOR u IN @@collection
+          COLLECT city = u.city INTO ids = u.id
+          LET n = LENGTH(ids)
+          SORT n DESC
+          LIMIT 0, 2
+          RETURN {city: city, n: n}
+      bind_vars:
+        "@collection": users
+
+  - id: C035
+    name: sum aggregation
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH u.state AS s, sum(u.age) AS total
+      RETURN s, total
+      ORDER BY total DESC
+      LIMIT 2
+    expected:
+      aql: |
+        FOR u IN @@collection
+          COLLECT s = u.state AGGREGATE total = SUM(u.age)
+          SORT total DESC
+          LIMIT 2
+          RETURN {s: s, total: total}
+      bind_vars:
+        "@collection": users
+
+  - id: C036
+    name: min max aggregation
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH min(u.age) AS mn, max(u.age) AS mx
+      RETURN mn, mx
+    expected:
+      aql: |
+        FOR u IN @@collection
+          COLLECT AGGREGATE mn = MIN(u.age), mx = MAX(u.age)
+          RETURN {mn: mn, mx: mx}
+      bind_vars:
+        "@collection": users
+
+  - id: C069
+    name: with filter is null
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH u, null AS x
+      WHERE x IS NULL
+      RETURN u.id
+      ORDER BY u.id
+      LIMIT 2
+    expected:
+      aql: |
+        FOR u IN @@collection
+          LET x = null
+          FILTER (x == null)
+          SORT u.id
+          LIMIT 2
+          RETURN u.id
+      bind_vars:
+        "@collection": users
+

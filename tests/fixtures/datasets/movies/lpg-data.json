@@ -1,0 +1,91 @@
+{
+  "nodes": [
+    {
+      "_key": "1",
+      "type": "Actor",
+      "labels": [
+        "Actor",
+        "Person"
+      ],
+      "name": "Tom Hanks",
+      "born": 1956
+    },
+    {
+      "_key": "2",
+      "type": "Director",
+      "labels": [
+        "Director",
+        "Person"
+      ],
+      "name": "Robert Zemeckis",
+      "born": 1951
+    },
+    {
+      "_key": "3",
+      "type": "Movie",
+      "labels": [
+        "Movie"
+      ],
+      "title": "Forrest Gump",
+      "released": 1994
+    },
+    {
+      "_key": "4",
+      "type": "Actor",
+      "labels": [
+        "Actor",
+        "Person"
+      ],
+      "name": "Robin Wright",
+      "born": 1966
+    }
+  ],
+  "edges": [
+    {
+      "_key": "r1",
+      "_from": "nodes/1",
+      "_to": "nodes/3",
+      "relation": "ACTED_IN",
+      "role": "Forrest"
+    },
+    {
+      "_key": "r2",
+      "_from": "nodes/2",
+      "_to": "nodes/3",
+      "relation": "DIRECTED"
+    },
+    {
+      "_key": "r3",
+      "_from": "nodes/4",
+      "_to": "nodes/3",
+      "relation": "ACTED_IN",
+      "role": "Jenny"
+    }
+  ],
+  "vciIndexes": [
+    {
+      "type": "vertex_centric",
+      "name": "vci_acted_in",
+      "relationshipType": "ACTED_IN",
+      "direction": "OUTBOUND",
+      "properties": [
+        "_key"
+      ]
+    },
+    {
+      "type": "vertex_centric",
+      "name": "vci_directed",
+      "relationshipType": "DIRECTED",
+      "direction": "OUTBOUND",
+      "properties": [
+        "_key"
+      ]
+    }
+  ],
+  "metadata": {
+    "format": "LPG",
+    "vciOptimization": true,
+    "preservedMultiLabels": 3
+  }
+}
+

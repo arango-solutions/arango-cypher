@@ -1,0 +1,96 @@
+{
+  "conceptualSchema": {
+    "entities": [
+      {
+        "labels": [
+          "Doc"
+        ],
+        "name": "Doc",
+        "properties": []
+      },
+      {
+        "labels": [
+          "Note"
+        ],
+        "name": "Note",
+        "properties": []
+      },
+      {
+        "labels": [
+          "User"
+        ],
+        "name": "User",
+        "properties": []
+      }
+    ],
+    "properties": [],
+    "relationships": [
+      {
+        "fromEntity": "Any",
+        "properties": [],
+        "toEntity": "Any",
+        "type": "FOLLOWS"
+      },
+      {
+        "fromEntity": "Any",
+        "properties": [],
+        "toEntity": "Any",
+        "type": "LIKES"
+      }
+    ]
+  },
+  "metadata": {
+    "analyzedCollectionCounts": {
+      "documentCollections": 1,
+      "edgeCollections": 1
+    },
+    "assumptions": [],
+    "confidence": 0.1,
+    "detectedPatterns": [],
+    "model": null,
+    "provider": null,
+    "repairAttempts": 0,
+    "reviewRequired": true,
+    "timestamp": "2026-02-18T22:47:36Z",
+    "usedBaseline": true,
+    "warnings": [
+      "LLM provider not configured; returning deterministic baseline inference"
+    ]
+  },
+  "physicalMapping": {
+    "entities": {
+      "Doc": {
+        "collectionName": "vertices",
+        "style": "LABEL",
+        "typeField": "type",
+        "typeValue": "Doc"
+      },
+      "Note": {
+        "collectionName": "vertices",
+        "style": "LABEL",
+        "typeField": "type",
+        "typeValue": "Note"
+      },
+      "User": {
+        "collectionName": "vertices",
+        "style": "LABEL",
+        "typeField": "type",
+        "typeValue": "User"
+      }
+    },
+    "relationships": {
+      "FOLLOWS": {
+        "collectionName": "edges",
+        "style": "GENERIC_WITH_TYPE",
+        "typeField": "type",
+        "typeValue": "FOLLOWS"
+      },
+      "LIKES": {
+        "collectionName": "edges",
+        "style": "GENERIC_WITH_TYPE",
+        "typeField": "type",
+        "typeValue": "LIKES"
+      }
+    }
+  }
+}

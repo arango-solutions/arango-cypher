@@ -1,0 +1,25 @@
+version: 1
+cases:
+  - id: C066
+    name: two hop follows traversal
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS]->(v:User)-[:FOLLOWS]->(w:User)
+      RETURN u.id, w.id
+      ORDER BY u.id, w.id
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          FOR w, r_1 IN 1..1 OUTBOUND v @@edgeCollection2
+            FILTER IS_SAME_COLLECTION(@vCollection2, w)
+          SORT u.id, w.id
+          RETURN {id: u.id, w_id: w.id}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+        "@edgeCollection2": follows
+        vCollection2: users

@@ -1,0 +1,81 @@
+{
+  "conceptualSchema": {
+    "entities": [
+      {
+        "labels": ["Actor"],
+        "name": "Actor",
+        "properties": []
+      },
+      {
+        "labels": ["Director"],
+        "name": "Director",
+        "properties": []
+      },
+      {
+        "labels": ["Movie"],
+        "name": "Movie",
+        "properties": []
+      }
+    ],
+    "properties": [],
+    "relationships": [
+      {
+        "fromEntity": "Any",
+        "properties": [],
+        "toEntity": "Any",
+        "type": "ACTED_IN"
+      },
+      {
+        "fromEntity": "Any",
+        "properties": [],
+        "toEntity": "Any",
+        "type": "DIRECTED"
+      }
+    ]
+  },
+  "metadata": {
+    "provider": "fixture",
+    "model": null,
+    "timestamp": "2026-02-26T00:00:00Z",
+    "confidence": 0.1,
+    "reviewRequired": true,
+    "warnings": ["Minimal mapping fixture for movies LPG dataset"]
+  },
+  "physicalMapping": {
+    "entities": {
+      "Actor": {
+        "collectionName": "nodes",
+        "style": "LABEL",
+        "typeField": "type",
+        "typeValue": "Actor"
+      },
+      "Director": {
+        "collectionName": "nodes",
+        "style": "LABEL",
+        "typeField": "type",
+        "typeValue": "Director"
+      },
+      "Movie": {
+        "collectionName": "nodes",
+        "style": "LABEL",
+        "typeField": "type",
+        "typeValue": "Movie"
+      }
+    },
+    "relationships": {
+      "ACTED_IN": {
+        "edgeCollectionName": "edges",
+        "style": "GENERIC_WITH_TYPE",
+        "typeField": "relation",
+        "typeValue": "ACTED_IN"
+      },
+      "DIRECTED": {
+        "edgeCollectionName": "edges",
+        "style": "GENERIC_WITH_TYPE",
+        "typeField": "relation",
+        "typeValue": "DIRECTED"
+      }
+    }
+  }
+}
+

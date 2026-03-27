@@ -1,0 +1,87 @@
+{
+  "conceptualSchema": {
+    "entities": [
+      {
+        "labels": [
+          "Doc"
+        ],
+        "name": "Doc",
+        "properties": []
+      },
+      {
+        "labels": [
+          "Person"
+        ],
+        "name": "Person",
+        "properties": []
+      },
+      {
+        "labels": [
+          "Place"
+        ],
+        "name": "Place",
+        "properties": []
+      },
+      {
+        "labels": [
+          "User"
+        ],
+        "name": "User",
+        "properties": []
+      }
+    ],
+    "properties": [],
+    "relationships": [
+      {
+        "fromEntity": "Any",
+        "properties": [],
+        "toEntity": "Any",
+        "type": "FOLLOWS"
+      }
+    ]
+  },
+  "metadata": {
+    "analyzedCollectionCounts": {
+      "documentCollections": 4,
+      "edgeCollections": 1
+    },
+    "assumptions": [],
+    "confidence": 0.1,
+    "detectedPatterns": [],
+    "model": null,
+    "provider": null,
+    "repairAttempts": 0,
+    "reviewRequired": true,
+    "timestamp": "2026-02-18T22:47:35Z",
+    "usedBaseline": true,
+    "warnings": [
+      "LLM provider not configured; returning deterministic baseline inference"
+    ]
+  },
+  "physicalMapping": {
+    "entities": {
+      "Doc": {
+        "collectionName": "docs",
+        "style": "COLLECTION"
+      },
+      "Person": {
+        "collectionName": "persons",
+        "style": "COLLECTION"
+      },
+      "Place": {
+        "collectionName": "places",
+        "style": "COLLECTION"
+      },
+      "User": {
+        "collectionName": "users",
+        "style": "COLLECTION"
+      }
+    },
+    "relationships": {
+      "FOLLOWS": {
+        "edgeCollectionName": "follows",
+        "style": "DEDICATED_COLLECTION"
+      }
+    }
+  }
+}

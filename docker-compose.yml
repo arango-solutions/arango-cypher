@@ -1,0 +1,27 @@
+services:
+  arangodb:
+    image: arangodb/arangodb:3.11
+    environment:
+      - ARANGO_ROOT_PASSWORD=openSesame
+    ports:
+      - "28529:8529"
+    volumes:
+      - arangodb_data:/var/lib/arangodb3
+    healthcheck:
+      # Auth is enabled and this image uses BusyBox wget (no --user/--password).
+      # POSTing to /_open/auth works as a credentialed liveness check.
+      # NOTE: use $$ to prevent docker-compose from expanding $ARANGO_ROOT_PASSWORD on the host.
+      test:
+        [
+          "CMD",
+          "sh",
+          "-c",
+          "wget -qO- --header=\"Content-Type: application/json\" --post-data \"{\\\"username\\\":\\\"root\\\",\\\"password\\\":\\\"$$ARANGO_ROOT_PASSWORD\\\"}\" http://127.0.0.1:8529/_open/auth >/dev/null 2>&1",
+        ]
+      interval: 3s
+      timeout: 2s
+      retries: 40
+
+volumes:
+  arangodb_data:
+

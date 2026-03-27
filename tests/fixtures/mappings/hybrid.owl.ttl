@@ -1,0 +1,53 @@
+@prefix : <http://arangodb.com/schema/hybrid#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix phys: <http://arangodb.com/schema/physical#> .
+
+: a owl:Ontology ;
+  rdfs:label "Conceptual Schema" ;
+  rdfs:comment "Conceptual schema inferred from ArangoDB physical schema." .
+
+phys:mappingStyle a owl:AnnotationProperty .
+phys:collectionName a owl:AnnotationProperty .
+phys:typeField a owl:AnnotationProperty .
+phys:typeValue a owl:AnnotationProperty .
+phys:edgeCollectionName a owl:AnnotationProperty .
+
+:User a owl:Class ;
+  rdfs:label "User" .
+:User phys:mappingStyle "COLLECTION" .
+:User phys:collectionName "users" .
+
+:Doc a owl:Class ;
+  rdfs:label "Doc" .
+:Doc phys:mappingStyle "LABEL" .
+:Doc phys:collectionName "vertices" .
+:Doc phys:typeField "type" .
+:Doc phys:typeValue "Doc" .
+
+:Note a owl:Class ;
+  rdfs:label "Note" .
+:Note phys:mappingStyle "LABEL" .
+:Note phys:collectionName "vertices" .
+:Note phys:typeField "type" .
+:Note phys:typeValue "Note" .
+
+:FOLLOWS a owl:ObjectProperty ;
+  rdfs:label "FOLLOWS" ;
+  rdfs:domain :Any ;
+  rdfs:range :Any  .
+:FOLLOWS phys:mappingStyle "GENERIC_WITH_TYPE" .
+:FOLLOWS phys:collectionName "edges" .
+:FOLLOWS phys:typeField "type" .
+:FOLLOWS phys:typeValue "FOLLOWS" .
+
+:LIKES a owl:ObjectProperty ;
+  rdfs:label "LIKES" ;
+  rdfs:domain :Any ;
+  rdfs:range :Any  .
+:LIKES phys:mappingStyle "GENERIC_WITH_TYPE" .
+:LIKES phys:collectionName "edges" .
+:LIKES phys:typeField "type" .
+:LIKES phys:typeValue "LIKES" .

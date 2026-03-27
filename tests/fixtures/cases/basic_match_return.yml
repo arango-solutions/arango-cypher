@@ -1,0 +1,343 @@
+version: 1
+cases:
+  - id: C001
+    name: basic match return limit
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) RETURN n LIMIT 5
+    expected:
+      aql: |
+        FOR n IN @@collection
+          LIMIT 5
+          RETURN n
+      bind_vars:
+        "@collection": users
+
+  - id: C002
+    name: where equals parameter
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.id = $id RETURN n
+    params:
+      id: "u1"
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (n.id == @id)
+          RETURN n
+      bind_vars:
+        "@collection": users
+        id: u1
+
+  - id: C003
+    name: is not null
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.email IS NOT NULL RETURN n.email
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (n.email != null)
+          RETURN n.email
+      bind_vars:
+        "@collection": users
+
+  - id: C004
+    name: numeric comparison
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.age >= 21 RETURN n.name, n.age
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (n.age >= 21)
+          RETURN {name: n.name, age: n.age}
+      bind_vars:
+        "@collection": users
+
+  - id: C005
+    name: function toLower comparison
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE toLower(n.city) = "boston" RETURN n
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (LOWER(n.city) == "boston")
+          RETURN n
+      bind_vars:
+        "@collection": users
+
+  - id: C006
+    name: IN list membership
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.city IN ["Boston","NYC"] RETURN n
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (n.city IN ["Boston","NYC"])
+          RETURN n
+      bind_vars:
+        "@collection": users
+
+  - id: C007
+    name: coalesce boolean predicate
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE coalesce(n.active, false) = true RETURN n
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (FIRST(REMOVE_VALUES([n.active, false], null)) == true)
+          RETURN n
+      bind_vars:
+        "@collection": users
+
+  - id: C008
+    name: return aliases
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) RETURN n.name AS name, n.email AS email
+    expected:
+      aql: |
+        FOR n IN @@collection
+          RETURN {name: n.name, email: n.email}
+      bind_vars:
+        "@collection": users
+
+  - id: C009
+    name: distinct projection
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) RETURN DISTINCT n.city
+    expected:
+      aql: |
+        FOR n IN @@collection
+          COLLECT city = n.city
+          RETURN city
+      bind_vars:
+        "@collection": users
+
+  - id: C010
+    name: is null check
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.missingField IS NULL RETURN n
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (n.missingField == null)
+          RETURN n
+      bind_vars:
+        "@collection": users
+
+  - id: C048
+    name: or expression
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.city = "SF" OR n.city = "NYC" RETURN n.id
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER ((n.city == "SF") OR (n.city == "NYC"))
+          RETURN n.id
+      bind_vars:
+        "@collection": users
+
+  - id: C049
+    name: not expression
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE NOT n.active = true RETURN n.id
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (NOT (n.active == true))
+          RETURN n.id
+      bind_vars:
+        "@collection": users
+
+  - id: C050
+    name: xor expression
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.active = true XOR n.city = "SF" RETURN n.id
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER ((n.active == true) XOR (n.city == "SF"))
+          RETURN n.id
+      bind_vars:
+        "@collection": users
+
+  - id: C051
+    name: return object key collision
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) RETURN n.id, n.id
+    expected:
+      aql: |
+        FOR n IN @@collection
+          RETURN {id: n.id, n_id: n.id}
+      bind_vars:
+        "@collection": users
+
+  - id: C052
+    name: boolean precedence with parentheses
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE (n.city = "SF" OR n.city = "NYC") AND n.active = true RETURN n.id
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (((n.city == "SF") OR (n.city == "NYC")) AND (n.active == true))
+          RETURN n.id
+      bind_vars:
+        "@collection": users
+
+  - id: C054
+    name: double not cancels
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE NOT NOT n.active = true RETURN n.id
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (n.active == true)
+          RETURN n.id
+      bind_vars:
+        "@collection": users
+
+  - id: C055
+    name: IN list membership parameterized
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.city IN $cities RETURN n.id
+    params:
+      cities: ["SF", "NYC"]
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (n.city IN @cities)
+          RETURN n.id
+      bind_vars:
+        "@collection": users
+        cities: ["SF", "NYC"]
+
+  - id: C056
+    name: string escaping in literals
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.name = "Alice \"A\"" RETURN n.name
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (n.name == "Alice \"A\"")
+          RETURN n.name
+      bind_vars:
+        "@collection": users
+
+  - id: C057
+    name: distinct order skip limit (single node path)
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) RETURN DISTINCT n.city ORDER BY n.city SKIP 1 LIMIT 1
+    expected:
+      aql: |
+        FOR n IN @@collection
+          COLLECT city = n.city
+          SORT city
+          LIMIT 1, 1
+          RETURN city
+      bind_vars:
+        "@collection": users
+
+  - id: C061
+    name: skip without limit uses large count
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) RETURN n.id ORDER BY n.id SKIP 2
+    expected:
+      aql: |
+        FOR n IN @@collection
+          SORT n.id
+          LIMIT 2, 1000000000
+          RETURN n.id
+      bind_vars:
+        "@collection": users
+
+  - id: C062
+    name: function toUpper comparison
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE toUpper(n.city) = "SF" RETURN n
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (UPPER(n.city) == "SF")
+          RETURN n
+      bind_vars:
+        "@collection": users
+
+  - id: C063
+    name: size over list literal
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) RETURN size([1,2,3]) AS n
+    expected:
+      aql: |
+        FOR n IN @@collection
+          RETURN {n: LENGTH([1,2,3])}
+      bind_vars:
+        "@collection": users
+
+  - id: C064
+    name: size over property
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) RETURN size(n.city) AS len
+    expected:
+      aql: |
+        FOR n IN @@collection
+          RETURN {len: LENGTH(n.city)}
+      bind_vars:
+        "@collection": users
+
+  - id: C065
+    name: inline node properties in MATCH
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User {id: "u1"}) RETURN n.id
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (n.id == "u1")
+          RETURN n.id
+      bind_vars:
+        "@collection": users
+

@@ -1,0 +1,210 @@
+version: 1
+cases:
+  - id: C037
+    name: with passthrough then traversal
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH u
+      MATCH (u)-[:FOLLOWS]->(v:User)
+      RETURN u.id, v.id
+      ORDER BY u.id, v.id
+    expected:
+      aql: |
+        FOR u IN @@collection
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          SORT u.id, v.id
+          RETURN {id: u.id, v_id: v.id}
+      bind_vars:
+        "@collection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C038
+    name: with where then distinct traversal cities skip
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH u WHERE u.active = true
+      MATCH (u)-[:FOLLOWS]->(v:User)
+      RETURN DISTINCT v.city
+      ORDER BY v.city
+      SKIP 1
+      LIMIT 1
+    expected:
+      aql: |
+        FOR u IN @@collection
+          FILTER (u.active == true)
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          COLLECT city = v.city
+          SORT city
+          LIMIT 1, 1
+          RETURN city
+      bind_vars:
+        "@collection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C039
+    name: with alias and passthrough then traversal
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH u.name AS name, u
+      MATCH (u)-[:FOLLOWS]->(v:User)
+      RETURN name, v.name
+      ORDER BY name, v.name
+      LIMIT 5
+    expected:
+      aql: |
+        FOR u IN @@collection
+          LET name = u.name
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          SORT name, v.name
+          LIMIT 5
+          RETURN {name: name, v_name: v.name}
+      bind_vars:
+        "@collection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C040
+    name: with aggregation then traversal
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS]->(v:User)
+      WITH u, count(v) AS degree
+      MATCH (u)-[:FOLLOWS]->(w:User)
+      RETURN u.id, degree, w.id
+      ORDER BY u.id, w.id
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          COLLECT u_1 = u AGGREGATE degree = COUNT(v)
+          FOR w, r_1 IN 1..1 OUTBOUND u_1 @@edgeCollection2
+            FILTER IS_SAME_COLLECTION(@vCollection2, w)
+          SORT u_1.id, w.id
+          RETURN {id: u_1.id, degree: degree, w_id: w.id}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+        "@edgeCollection2": follows
+        vCollection2: users
+
+  - id: C041
+    name: with distinct scalar then fresh match
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH DISTINCT u.city AS city
+      MATCH (x:User)
+      WHERE x.city = city
+      RETURN city, x.id
+      ORDER BY city, x.id
+    expected:
+      aql: |
+        FOR u IN @@collection
+          COLLECT city = u.city
+          FOR x IN @@tailCollection
+          FILTER (x.city == city)
+          SORT city, x.id
+          RETURN {city: city, id: x.id}
+      bind_vars:
+        "@collection": users
+        "@tailCollection": users
+
+  - id: C042
+    name: with distinct scalar then fresh match traversal
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH DISTINCT u.city AS city
+      MATCH (x:User)-[:FOLLOWS]->(y:User)
+      WHERE x.city = city
+      RETURN city, y.id
+      ORDER BY city, y.id
+    expected:
+      aql: |
+        FOR u IN @@collection
+          COLLECT city = u.city
+          FOR x IN @@tailCollection
+          FOR y, r IN 1..1 OUTBOUND x @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, y)
+            FILTER (x.city == city)
+          SORT city, y.id
+          RETURN {city: city, id: y.id}
+      bind_vars:
+        "@collection": users
+        "@tailCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C043
+    name: tail match relationship var type
+    mapping_fixture: lpg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH u
+      MATCH (u)-[r:FOLLOWS]->(v:User)
+      RETURN type(r), u.id, v.id
+      ORDER BY u.id, v.id
+    expected:
+      aql: |
+        FOR u IN @@collection
+          FILTER u[@typeField] == @typeValue
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+            FILTER v[@vTypeField] == @vTypeValue
+            FILTER r[@relTypeField] == @relTypeValue
+          SORT u.id, v.id
+          RETURN {type: r[@relTypeField], id: u.id, v_id: v.id}
+      bind_vars:
+        "@collection": vertices
+        typeField: type
+        typeValue: User
+        "@edgeCollection": edges
+        vCollection: vertices
+        vTypeField: type
+        vTypeValue: User
+        relTypeField: type
+        relTypeValue: FOLLOWS
+
+  - id: C044
+    name: tail match two hop traversal
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)
+      WITH u
+      MATCH (u)-[:FOLLOWS]->(v:User)-[:FOLLOWS]->(w:User)
+      RETURN u.id, w.id
+      ORDER BY u.id, w.id
+    expected:
+      aql: |
+        FOR u IN @@collection
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          FOR w, r_1 IN 1..1 OUTBOUND v @@edgeCollection2
+            FILTER IS_SAME_COLLECTION(@vCollection2, w)
+          SORT u.id, w.id
+          RETURN {id: u.id, w_id: w.id}
+      bind_vars:
+        "@collection": users
+        "@edgeCollection": follows
+        vCollection: users
+        "@edgeCollection2": follows
+        vCollection2: users
+

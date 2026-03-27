@@ -1,0 +1,236 @@
+version: 1
+cases:
+  - id: C011
+    name: outbound follows one hop
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS]->(v:User) RETURN u, v LIMIT 5
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          LIMIT 5
+          RETURN {u: u, v: v}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C012
+    name: inbound follows one hop
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)<-[:FOLLOWS]-(v:User) RETURN u, v
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 INBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          RETURN {u: u, v: v}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C013
+    name: undirected follows one hop
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS]-(v:User) RETURN u, v
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 ANY u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          RETURN {u: u, v: v}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C058
+    name: undirected follows ids with order and limit
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS]-(v:User)
+      RETURN u.id, v.id
+      ORDER BY u.id, v.id
+      LIMIT 3
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 ANY u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          SORT u.id, v.id
+          LIMIT 3
+          RETURN {id: u.id, v_id: v.id}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C059
+    name: type of relationship only
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[r:FOLLOWS]->(v:User)
+      RETURN type(r)
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          RETURN {type: "FOLLOWS"}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C014
+    name: where on bound start node
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS]->(v:User) WHERE u.id = $id RETURN v
+    params:
+      id: "u1"
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+            FILTER (u.id == @id)
+          RETURN v
+      bind_vars:
+        id: u1
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C015
+    name: where on end node property
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS]->(v:User) WHERE v.city = "SF" RETURN u.name, v.name
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+            FILTER (v.city == "SF")
+          RETURN {name: u.name, v_name: v.name}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C016
+    name: relationship variable and type function
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[r:FOLLOWS]->(v:User) RETURN type(r), u.id, v.id
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          RETURN {type: "FOLLOWS", id: u.id, v_id: v.id}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C017
+    name: distinct from relationship traversal
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS]->(v:User) RETURN DISTINCT v.city
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          COLLECT city = v.city
+          RETURN city
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C018
+    name: boolean conjunction across nodes
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS]->(v:User)
+      WHERE u.active = true AND v.active = true
+      RETURN u, v
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+            FILTER ((u.active == true) AND (v.active == true))
+          RETURN {u: u, v: v}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C031
+    name: outbound follows one hop (LPG generic edges)
+    mapping_fixture: lpg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS]->(v:User) RETURN u, v LIMIT 5
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FILTER u[@uTypeField] == @uTypeValue
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+            FILTER v[@vTypeField] == @vTypeValue
+            FILTER r[@relTypeField] == @relTypeValue
+          LIMIT 5
+          RETURN {u: u, v: v}
+      bind_vars:
+        "@uCollection": vertices
+        "@edgeCollection": edges
+        vCollection: vertices
+        uTypeField: type
+        uTypeValue: User
+        vTypeField: type
+        vTypeValue: User
+        relTypeField: type
+        relTypeValue: FOLLOWS
+
+  - id: C032
+    name: outbound follows one hop (hybrid generic edges)
+    mapping_fixture: hybrid
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS]->(v:User) RETURN u, v LIMIT 5
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+            FILTER r[@relTypeField] == @relTypeValue
+          LIMIT 5
+          RETURN {u: u, v: v}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": edges
+        vCollection: users
+        relTypeField: type
+        relTypeValue: FOLLOWS
+

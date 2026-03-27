@@ -1,0 +1,53 @@
+version: 1
+cases:
+  - id: C027
+    name: nested location dot-path
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:Place)
+      WHERE n.location.lat = 45 AND n.location.long = 32
+      RETURN n
+    expected:
+      aql: null
+      bind_vars: {}
+
+  - id: C028
+    name: nested address dot-path projection
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:Person)
+      WHERE n.address.zip = 1234567
+      RETURN n.address.city
+    expected:
+      aql: null
+      bind_vars: {}
+
+  - id: C029
+    name: hybrid mapping traversal + nested state filter
+    mapping_fixture: hybrid
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS]->(v:User)
+      WHERE v.address.state = "MA"
+      RETURN u.id, v.id
+    expected:
+      aql: null
+      bind_vars: {}
+
+  - id: C030
+    name: extension function placeholder (full-text)
+    mapping_fixture: lpg
+    extensions_enabled: true
+    cypher: |
+      MATCH (n:Doc)
+      WHERE arango.text_contains(n.body, $q)
+      RETURN n
+      LIMIT 10
+    params:
+      q: "graph"
+    expected:
+      aql: null
+      bind_vars: {}
+

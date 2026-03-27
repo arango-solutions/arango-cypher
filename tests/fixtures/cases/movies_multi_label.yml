@@ -1,0 +1,166 @@
+version: 1
+cases:
+  - id: C201
+    name: movies multi-label actor match
+    mapping_fixture: movies_lpg
+    extensions_enabled: false
+    cypher: |
+      MATCH (a:Person:Actor)-[:ACTED_IN]->(m:Movie {title: "Forrest Gump"})
+      RETURN a.name
+      ORDER BY a.name
+    expected:
+      aql: |
+        FOR a IN @@uCollection
+          FILTER a[@uTypeField] == @uTypeValue
+          FILTER ("Person" IN a.labels)
+          FOR m, r IN 1..1 OUTBOUND a @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, m)
+            FILTER m[@vTypeField] == @vTypeValue
+            FILTER r[@relTypeField] == @relTypeValue
+            FILTER (m.title == "Forrest Gump")
+          SORT a.name
+          RETURN a.name
+      bind_vars:
+        "@uCollection": nodes
+        "@edgeCollection": edges
+        vCollection: nodes
+        uTypeField: type
+        uTypeValue: Actor
+        vTypeField: type
+        vTypeValue: Movie
+        relTypeField: relation
+        relTypeValue: ACTED_IN
+
+  - id: C203
+    name: movies relationship property match
+    mapping_fixture: movies_lpg
+    extensions_enabled: false
+    cypher: |
+      MATCH (a:Person:Actor)-[:ACTED_IN {role: "Forrest"}]->(m:Movie {title: "Forrest Gump"})
+      RETURN a.name
+      ORDER BY a.name
+    expected:
+      aql: |
+        FOR a IN @@uCollection
+          FILTER a[@uTypeField] == @uTypeValue
+          FILTER ("Person" IN a.labels)
+          FOR m, r IN 1..1 OUTBOUND a @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, m)
+            FILTER m[@vTypeField] == @vTypeValue
+            FILTER r[@relTypeField] == @relTypeValue
+            FILTER (r.role == "Forrest")
+            FILTER (m.title == "Forrest Gump")
+          SORT a.name
+          RETURN a.name
+      bind_vars:
+        "@uCollection": nodes
+        "@edgeCollection": edges
+        vCollection: nodes
+        uTypeField: type
+        uTypeValue: Actor
+        vTypeField: type
+        vTypeValue: Movie
+        relTypeField: relation
+        relTypeValue: ACTED_IN
+
+  - id: C202
+    name: movies multi-label directors and movies
+    mapping_fixture: movies_lpg
+    extensions_enabled: false
+    cypher: |
+      MATCH (d:Person:Director)-[:DIRECTED]->(m:Movie)
+      RETURN d.name, m.title
+      ORDER BY d.name, m.title
+    expected:
+      aql: |
+        FOR d IN @@uCollection
+          FILTER d[@uTypeField] == @uTypeValue
+          FILTER ("Person" IN d.labels)
+          FOR m, r IN 1..1 OUTBOUND d @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, m)
+            FILTER m[@vTypeField] == @vTypeValue
+            FILTER r[@relTypeField] == @relTypeValue
+          SORT d.name, m.title
+          RETURN {name: d.name, title: m.title}
+      bind_vars:
+        "@uCollection": nodes
+        "@edgeCollection": edges
+        vCollection: nodes
+        uTypeField: type
+        uTypeValue: Director
+        vTypeField: type
+        vTypeValue: Movie
+        relTypeField: relation
+        relTypeValue: DIRECTED
+
+  - id: C204
+    name: movies two hop with relationship property
+    mapping_fixture: movies_lpg
+    extensions_enabled: false
+    cypher: |
+      MATCH (a:Person:Actor)-[:ACTED_IN {role: "Forrest"}]->(m:Movie {title: "Forrest Gump"})<-[:ACTED_IN]-(b:Person:Actor)
+      RETURN b.name
+      ORDER BY b.name
+    expected:
+      aql: |
+        FOR a IN @@uCollection
+          FILTER a[@uTypeField] == @uTypeValue
+          FILTER ("Person" IN a.labels)
+          FOR m, r IN 1..1 OUTBOUND a @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, m)
+            FILTER m[@vTypeField] == @vTypeValue
+            FILTER r[@relTypeField] == @relTypeValue
+            FILTER (r.role == "Forrest")
+            FILTER (m.title == "Forrest Gump")
+          FOR b, r_1 IN 1..1 INBOUND m @@edgeCollection2
+            FILTER IS_SAME_COLLECTION(@vCollection2, b)
+            FILTER b[@vTypeField2] == @vTypeValue2
+            FILTER ("Person" IN b.labels)
+            FILTER r_1[@relTypeField2] == @relTypeValue2
+          SORT b.name
+          RETURN b.name
+      bind_vars:
+        "@uCollection": nodes
+        "@edgeCollection": edges
+        vCollection: nodes
+        uTypeField: type
+        uTypeValue: Actor
+        vTypeField: type
+        vTypeValue: Movie
+        relTypeField: relation
+        relTypeValue: ACTED_IN
+        "@edgeCollection2": edges
+        vCollection2: nodes
+        vTypeField2: type
+        vTypeValue2: Actor
+        relTypeField2: relation
+        relTypeValue2: ACTED_IN
+
+  - id: C205
+    name: movies unlabeled start node
+    mapping_fixture: movies_lpg
+    extensions_enabled: false
+    cypher: |
+      MATCH (a)-[:ACTED_IN {role: "Forrest"}]->(m:Movie {title: "Forrest Gump"})
+      RETURN a.name
+      ORDER BY a.name
+    expected:
+      aql: |
+        FOR a IN @@uCollection
+          FOR m, r IN 1..1 OUTBOUND a @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, m)
+            FILTER m[@vTypeField] == @vTypeValue
+            FILTER r[@relTypeField] == @relTypeValue
+            FILTER (r.role == "Forrest")
+            FILTER (m.title == "Forrest Gump")
+          SORT a.name
+          RETURN a.name
+      bind_vars:
+        "@uCollection": nodes
+        "@edgeCollection": edges
+        vCollection: nodes
+        vTypeField: type
+        vTypeValue: Movie
+        relTypeField: relation
+        relTypeValue: ACTED_IN
+
