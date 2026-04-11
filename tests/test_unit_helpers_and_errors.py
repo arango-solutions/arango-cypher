@@ -46,12 +46,9 @@ def test_translate_v0_requires_mapping():
     "cypher,code,msg_sub",
     [
         ("RETURN 1", "UNSUPPORTED", "MATCH is required"),
-        ("UNWIND [1,2] AS x RETURN x", "UNSUPPORTED", "MATCH is required"),
-        ("MATCH (n:User) MATCH (m:User) RETURN n", "UNSUPPORTED", "Multiple MATCH clauses"),
         ("MATCH (n) RETURN n", "UNSUPPORTED", "label is required"),
         ("MATCH (n:User) RETURN DISTINCT n.city, n.id", "UNSUPPORTED", "DISTINCT only supported"),
         ("MATCH (u:User)-[u:FOLLOWS]->(v:User) RETURN u", "UNSUPPORTED", "Relationship variable must not shadow"),
-        ("MATCH (u:User)-[:FOLLOWS*1..2]->(v:User) RETURN u", "UNSUPPORTED", "ranges not supported"),
         (
             "MATCH (u:User)-[:FOLLOWS $props]->(v:User) RETURN u",
             "NOT_IMPLEMENTED",

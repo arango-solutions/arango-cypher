@@ -1,0 +1,28 @@
+# Isolated ArangoDB for pytest integration (host port 28530 → container 8529).
+# Avoids clashing with a dev instance on 28529 (docker-compose.yml) or 8529 (native).
+#
+#   docker compose -f docker-compose.pytest.yml -p arango_cypher_pytest up -d
+#
+services:
+  arangodb:
+    image: arangodb/arangodb:3.11
+    environment:
+      - ARANGO_ROOT_PASSWORD=openSesame
+    ports:
+      - "28530:8529"
+    volumes:
+      - arangodb_pytest_data:/var/lib/arangodb3
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "sh",
+          "-c",
+          "wget -qO- --header=\"Content-Type: application/json\" --post-data \"{\\\"username\\\":\\\"root\\\",\\\"password\\\":\\\"$$ARANGO_ROOT_PASSWORD\\\"}\" http://127.0.0.1:8529/_open/auth >/dev/null 2>&1",
+        ]
+      interval: 3s
+      timeout: 2s
+      retries: 40
+
+volumes:
+  arangodb_pytest_data:

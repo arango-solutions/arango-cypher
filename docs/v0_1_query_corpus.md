@@ -1,5 +1,7 @@
 # v0.1 Cypher query corpus (golden fixtures)
 
+**Planning context:** How this corpus fits into broader language coverage and phased TCK strategy is described in [`python_prd.md`](./python_prd.md) §2A and §8.
+
 This corpus is the **test-first driver** for `arango-cypher-py` v0.1. It is intentionally small but representative, and it is organized as YAML fixtures under:
 
 - `tests/fixtures/cases/*.yml`

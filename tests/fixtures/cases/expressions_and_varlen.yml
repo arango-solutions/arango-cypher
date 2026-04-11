@@ -1,0 +1,93 @@
+version: 1
+cases:
+  - id: C206
+    name: arithmetic in WHERE (addition)
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.age + 1 > 25 RETURN n.name
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER ((n.age + 1) > 25)
+          RETURN n.name
+      bind_vars:
+        "@collection": users
+
+  - id: C207
+    name: arithmetic in RETURN (multiply and add)
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) RETURN n.age * 2 + 1 AS doubled
+    expected:
+      aql: |
+        FOR n IN @@collection
+          RETURN {doubled: ((n.age * 2) + 1)}
+      bind_vars:
+        "@collection": users
+
+  - id: C208
+    name: unary minus in WHERE
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.score > -1 RETURN n.name
+    expected:
+      aql: |
+        FOR n IN @@collection
+          FILTER (n.score > (-1))
+          RETURN n.name
+      bind_vars:
+        "@collection": users
+
+  - id: C209
+    name: bounded variable-length 1..2
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS*1..2]->(v:User) RETURN u.id, v.id
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..2 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          RETURN {id: u.id, v_id: v.id}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C210
+    name: bounded variable-length 1..3
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS*1..3]->(v:User) RETURN u.id, v.id
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..3 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          RETURN {id: u.id, v_id: v.id}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users
+
+  - id: C211
+    name: unbounded variable-length star (defaults to 1..10)
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:FOLLOWS*]->(v:User) RETURN u.id, v.id
+    expected:
+      aql: |
+        FOR u IN @@uCollection
+          FOR v, r IN 1..10 OUTBOUND u @@edgeCollection
+            FILTER IS_SAME_COLLECTION(@vCollection, v)
+          RETURN {id: u.id, v_id: v.id}
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        vCollection: users

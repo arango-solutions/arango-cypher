@@ -78,21 +78,6 @@ from tests.helpers.mapping_fixtures import mapping_bundle_for
 
         # Expression compiler unsupported shapes
         (
-            "MATCH (n:User) WHERE n.age + 1 = 2 RETURN n",
-            "UNSUPPORTED",
-            "Arithmetic not supported",
-        ),
-        (
-            "MATCH (n:User) WHERE -1 = 1 RETURN n",
-            "UNSUPPORTED",
-            "Unary +/- not supported",
-        ),
-        (
-            "MATCH (n:User) WHERE n.name STARTS WITH \"A\" RETURN n",
-            "UNSUPPORTED",
-            "String operators not supported",
-        ),
-        (
             "MATCH (n:User) RETURN {a: 1}",
             "UNSUPPORTED",
             "Map literal not supported",
@@ -124,8 +109,8 @@ from tests.helpers.mapping_fixtures import mapping_bundle_for
         ),
         (
             "MATCH (n:User) WHERE arango.foo(n.city) = \"x\" RETURN n",
-            "NOT_IMPLEMENTED",
-            "arango.* extensions not implemented",
+            "EXTENSIONS_DISABLED",
+            "arango.* extension",
         ),
 
         # Inline node properties guardrails
@@ -160,6 +145,7 @@ from tests.helpers.mapping_fixtures import mapping_bundle_for
             "NOT_IMPLEMENTED",
             "Multi-label node patterns require",
         ),
+
     ],
 )
 def test_translate_fail_fast_errors_extra(cypher: str, code: str, msg_sub: str):

@@ -48,3 +48,5 @@ htmlcov/
 
 # Misc
 *.log
+ui/node_modules/
+ui/dist/

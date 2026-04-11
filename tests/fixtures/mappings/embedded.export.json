@@ -1,0 +1,101 @@
+{
+  "conceptualSchema": {
+    "entities": [
+      {
+        "labels": ["User"],
+        "name": "User",
+        "properties": ["name", "email", "address", "tags"]
+      },
+      {
+        "labels": ["Address"],
+        "name": "Address",
+        "properties": ["zip", "city", "street"]
+      },
+      {
+        "labels": ["Tag"],
+        "name": "Tag",
+        "properties": ["name"]
+      },
+      {
+        "labels": ["Company"],
+        "name": "Company",
+        "properties": ["name"]
+      }
+    ],
+    "properties": [],
+    "relationships": [
+      {
+        "fromEntity": "User",
+        "properties": [],
+        "toEntity": "Address",
+        "type": "HAS_ADDRESS"
+      },
+      {
+        "fromEntity": "User",
+        "properties": [],
+        "toEntity": "Tag",
+        "type": "TAGGED"
+      },
+      {
+        "fromEntity": "User",
+        "properties": [],
+        "toEntity": "Company",
+        "type": "WORKS_AT"
+      }
+    ]
+  },
+  "metadata": {
+    "analyzedCollectionCounts": {
+      "documentCollections": 2,
+      "edgeCollections": 1
+    },
+    "assumptions": [],
+    "confidence": 0.8,
+    "detectedPatterns": ["EMBEDDED"],
+    "model": null,
+    "provider": null,
+    "repairAttempts": 0,
+    "reviewRequired": false,
+    "timestamp": "2026-04-10T12:00:00Z",
+    "usedBaseline": false,
+    "warnings": []
+  },
+  "physicalMapping": {
+    "entities": {
+      "User": {
+        "collectionName": "users",
+        "style": "COLLECTION"
+      },
+      "Address": {
+        "collectionName": "users",
+        "style": "COLLECTION",
+        "note": "virtual entity — embedded in User documents"
+      },
+      "Tag": {
+        "collectionName": "users",
+        "style": "COLLECTION",
+        "note": "virtual entity — embedded array in User documents"
+      },
+      "Company": {
+        "collectionName": "companies",
+        "style": "COLLECTION"
+      }
+    },
+    "relationships": {
+      "HAS_ADDRESS": {
+        "style": "EMBEDDED",
+        "embeddedPath": "address",
+        "embeddedArray": false
+      },
+      "TAGGED": {
+        "style": "EMBEDDED",
+        "embeddedPath": "tags",
+        "embeddedArray": true
+      },
+      "WORKS_AT": {
+        "style": "DEDICATED_COLLECTION",
+        "edgeCollectionName": "works_at"
+      }
+    }
+  }
+}

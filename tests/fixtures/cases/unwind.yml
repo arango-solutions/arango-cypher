@@ -1,0 +1,45 @@
+version: 1
+cases:
+  - id: C222
+    name: Standalone UNWIND list literal
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      UNWIND [1, 2, 3] AS x RETURN x
+    expected:
+      aql: |-
+        FOR x IN [1,2,3]
+          RETURN x
+      bind_vars: {}
+
+  - id: C223
+    name: UNWIND parameter before MATCH
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      UNWIND $ids AS id MATCH (n:User) WHERE n.id = id RETURN n.name AS name
+    params:
+      ids: ["u1", "u2"]
+    expected:
+      aql: |-
+        FOR id IN @ids
+          FOR n IN @@collection
+            FILTER (n.id == id)
+            RETURN {name: n.name}
+      bind_vars:
+        "@collection": users
+        "ids": ["u1", "u2"]
+
+  - id: C224
+    name: MATCH then UNWIND property
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) UNWIND n.tags AS t RETURN n.name AS name, t AS tag
+    expected:
+      aql: |-
+        FOR n IN @@collection
+          FOR t IN n.tags
+          RETURN {name: n.name, tag: t}
+      bind_vars:
+        "@collection": users

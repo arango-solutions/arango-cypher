@@ -1,0 +1,51 @@
+version: 1
+cases:
+  - id: C228
+    name: Standalone CALL arango.fulltext with YIELD
+    mapping_fixture: pg
+    extensions_enabled: true
+    cypher: |
+      CALL arango.fulltext('users', 'name', 'Alice') YIELD doc
+    expected:
+      aql: |-
+        FOR doc IN FULLTEXT('users', 'name', 'Alice')
+          RETURN doc
+      bind_vars: {}
+
+  - id: C229
+    name: In-query CALL with RETURN projection
+    mapping_fixture: pg
+    extensions_enabled: true
+    cypher: |
+      CALL arango.fulltext('posts', 'body', 'graph') YIELD doc RETURN doc.title AS title
+    expected:
+      aql: |-
+        FOR doc IN FULLTEXT('posts', 'body', 'graph')
+          RETURN {title: doc.title}
+      bind_vars: {}
+
+  - id: C230
+    name: MATCH then in-query CALL
+    mapping_fixture: pg
+    extensions_enabled: true
+    cypher: |
+      MATCH (n:User) CALL arango.near('locations', 40.7, -74.0, 10) YIELD loc RETURN n.name AS name, loc
+    expected:
+      aql: |-
+        FOR n IN @@collection
+          FOR loc IN NEAR('locations', 40.7, (-74.0), 10)
+          RETURN {name: n.name, loc: loc}
+      bind_vars:
+        "@collection": users
+
+  - id: C231
+    name: Standalone CALL without YIELD
+    mapping_fixture: pg
+    extensions_enabled: true
+    cypher: |
+      CALL arango.fulltext('users', 'name', 'Bob')
+    expected:
+      aql: |-
+        FOR _call_row IN FULLTEXT('users', 'name', 'Bob')
+          RETURN _call_row
+      bind_vars: {}

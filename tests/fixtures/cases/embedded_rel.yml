@@ -1,0 +1,44 @@
+version: 1
+cases:
+  - id: C232
+    name: Embedded object via relationship pattern
+    mapping_fixture: embedded
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:HAS_ADDRESS]->(a:Address) WHERE a.zip = '12345' RETURN u.name AS name, a.city AS city
+    expected:
+      aql: |-
+        FOR u IN @@uCollection
+          LET a = u.address
+            FILTER (a.zip == '12345')
+          RETURN {name: u.name, city: a.city}
+      bind_vars:
+        "@uCollection": users
+
+  - id: C233
+    name: Embedded array via relationship pattern
+    mapping_fixture: embedded
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User)-[:TAGGED]->(t:Tag) RETURN u.name AS name, t.name AS tag
+    expected:
+      aql: |-
+        FOR u IN @@uCollection
+          FOR t IN TO_ARRAY(u.tags)
+          RETURN {name: u.name, tag: t.name}
+      bind_vars:
+        "@uCollection": users
+
+  - id: C234
+    name: Dot-path nested access without traversal
+    mapping_fixture: embedded
+    extensions_enabled: false
+    cypher: |
+      MATCH (u:User) WHERE u.address.zip = '12345' RETURN u.address.city AS city
+    expected:
+      aql: |-
+        FOR u IN @@collection
+          FILTER (u.address.zip == '12345')
+          RETURN {city: u.address.city}
+      bind_vars:
+        "@collection": users

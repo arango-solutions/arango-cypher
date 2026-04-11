@@ -1,5 +1,6 @@
 # Arango Cypher (Python) — PRD + Implementation Plan
 Date: 2026-02-17  
+Last updated: 2026-04-10  
 Workspace: `arango-cypher-py`  
 Related repos:
 - `~/code/arango-cypher` (Foxx/JS implementation)
@@ -12,15 +13,16 @@ Key decisions:
 - **New project**: keep Foxx `arango-cypher` stable; create a separate Python project.
 - **Name**: repo `arango-cypher-py`, Python import package `arango_cypher`, distributable name `arango-cypher-py` (or `arangodb-cypher-transpiler` if you want to avoid ambiguity).
 - **Schema mapping**: depend on `arangodb-schema-analyzer` as a library and optionally consume/produce OWL Turtle via its tool contract.
-- **Parsing**: prefer a maintained parser binding (`libcypher-parser-python`) to get a real Cypher parse tree; fall back to ANTLR-generated Python parser from openCypher grammar if needed.
-- **Agentic workflow** (optional): provide a stable JSON-in/JSON-out “tool” interface for translate/explain that can be used in agent pipelines, but keep translation correctness deterministic.
+- **NL -> Cypher -> AQL** (prospect-driven): natural-language stacks target **Cypher** (richer model priors than AQL); Arango provides a **deterministic** Cypher->AQL transpiler plus **namespaced `arango.*` extensions** for capabilities Cypher does not standardize (see S2A.0, S7A).
+- **Parsing (as implemented)**: ANTLR4-generated Python parser from the openCypher grammar in-repo (`grammar/Cypher.g4`). Re-evaluating `libcypher-parser-python` remains an optional future migration if native wheels and AST mapping prove worthwhile (see S6).
+- **Agentic workflow** (optional): provide a stable JSON-in/JSON-out "tool" interface for translate/explain that can be used in agent pipelines, but keep translation correctness deterministic.
 
 ---
 
 ## 1) Problem statement
 ArangoDB supports multiple physical graph modeling styles:
-- **PG-ish**: “types-as-collections” (one vertex collection per label/type; one edge collection per relationship type, etc.)
-- **LPG-ish**: “generic collections + type field” (single vertex collection with `type`, single edge collection with `type`, etc.)
+- **PG-ish**: "types-as-collections" (one vertex collection per label/type; one edge collection per relationship type, etc.)
+- **LPG-ish**: "generic collections + type field" (single vertex collection with `type`, single edge collection with `type`, etc.)
 - **Hybrid**: a mixture of both across entities/relationships, sometimes within the same query path.
 
 Cypher is a conceptual (label/type-centric) query language. To execute on ArangoDB, we need:
@@ -31,7 +33,7 @@ Cypher is a conceptual (label/type-centric) query language. To execute on Arango
 The Foxx version runs inside ArangoDB coordinators, which constrains dependencies and runtime. A Python implementation enables:
 - richer parsing toolchains
 - strong typing and better testing ergonomics
-- easy integration into notebooks, CLIs, services, and “agentic workflows”
+- easy integration into notebooks, CLIs, services, and "agentic workflows"
 
 ---
 
@@ -50,7 +52,7 @@ The Foxx version runs inside ArangoDB coordinators, which constrains dependencie
 ### Non-goals (initially)
 - Full openCypher TCK compliance.
 - Writing queries (CREATE/MERGE/DELETE/SET) in the first milestone, unless you explicitly want it.
-- Full query optimizer equivalent to a database planner (we’ll have a small internal logical plan, but not a cost-based optimizer).
+- Full query optimizer equivalent to a database planner (we'll have a small internal logical plan, but not a cost-based optimizer).
 
 ---
 
@@ -60,13 +62,13 @@ The Foxx version runs inside ArangoDB coordinators, which constrains dependencie
 - **Data engineer**: wants to run Cypher for exploration and migrate Neo4j-ish workloads.
 - **Application developer**: wants a Cypher compatibility layer for an app backed by ArangoDB.
 - **Analyst / notebook user**: wants Cypher in Jupyter, quick iteration, shareable queries.
-- **Agent workflow**: tools that need a stable “translate/execute/explain” contract.
+- **Agent workflow**: tools that need a stable "translate/execute/explain" contract.
 
 ### Core user stories
-- **Translate-only**: “Given Cypher, show me AQL and bind vars.”
-- **Translate + execute**: “Run Cypher against database X and return JSON results.”
-- **Explain mapping**: “Show how labels/types were mapped to collections/fields (hybrid-aware).”
-- **Validate**: “Warn if query references unknown labels/types based on inferred conceptual schema.”
+- **Translate-only**: "Given Cypher, show me AQL and bind vars."
+- **Translate + execute**: "Run Cypher against database X and return JSON results."
+- **Explain mapping**: "Show how labels/types were mapped to collections/fields (hybrid-aware)."
+- **Validate**: "Warn if query references unknown labels/types based on inferred conceptual schema."
 
 ---
 
@@ -90,25 +92,196 @@ Commands:
 - `mapping`: prints mapping summary; optionally writes OWL Turtle
 - `doctor`: checks connectivity, required collections/indexes, and config
 
-### 4.3 HTTP service (optional, v0.2+)
-FastAPI service with endpoints:
-- `POST /translate`
-- `POST /execute`
-- `POST /mapping`
-This makes it easy to integrate from non-Python apps and from ArangoDB UI tooling.
+### 4.3 HTTP service (shipped)
+FastAPI service (`arango_cypher.service:app`) with endpoints:
+- `POST /connect` --- authenticate to ArangoDB, returns session token
+- `POST /disconnect` --- tear down session
+- `GET /connections` --- list active sessions (admin/debug)
+- `GET /connect/defaults` --- `.env` defaults for pre-filling the connection dialog (never returns password)
+- `POST /translate` --- Cypher -> AQL + bind vars
+- `POST /execute` --- translate and execute (requires session)
+- `POST /validate` --- syntax-only or parse+translate validation
+- `POST /explain` --- translate Cypher, run AQL EXPLAIN, return execution plan (requires session)
+- `POST /aql-profile` --- translate Cypher, execute with profiling, return runtime stats (requires session)
+- `GET /cypher-profile` --- JSON manifest for agent/NL gateways (S2A.0)
 
-### 4.4 UI (optional)
-Recommendation: **do not build a bespoke UI first**.
-- **v0.1**: CLI + “copy/paste into web UI” is enough.
-- **v0.2**: optionally add a lightweight UI:
-  - fastest: Streamlit (single-file UI)
-  - more “product”: FastAPI + a minimal frontend (HTMX or React)
+Run with: `uvicorn arango_cypher.service:app --host 0.0.0.0 --port 8000`
 
-If you *do* build UI, the key features are:
-- cypher editor + history
-- show mapping + hybrid partitions
-- show generated AQL
-- run and show results
+### 4.4 Cypher Workbench UI
+
+#### 4.4.1 Architecture
+SPA served by FastAPI. The browser does **not** connect to ArangoDB directly; all
+database interaction flows through the service layer.
+
+```
+Browser                          FastAPI service             ArangoDB
++--------------------------+     +--------------------+     +----------+
+| Cypher Editor            |     |                    |     |          |
+| AQL Editor (read-only)   | <-> | arango_cypher      | <-> | Database |
+| Results / Explain / Prof |     | .service:app       |     |          |
++--------------------------+     +--------------------+     +----------+
+```
+
+#### 4.4.2 Cypher editor --- syntax-directed capabilities
+The Cypher editor is a **full syntax-directed editing experience**.
+
+**A) Syntax highlighting and structural awareness**
+- Token-level highlighting: keywords (`MATCH`, `WHERE`, `RETURN`, `WITH`, `CALL`,
+  `YIELD`, `UNION`, `OPTIONAL`, `UNWIND`, `CASE`, ...), labels (`:User`),
+  relationship types (`[:KNOWS]`), properties, parameters (`$name`), strings,
+  numbers, comments, `arango.*` namespace.
+- Clause-level colorization: distinct background tint or gutter icon per clause block.
+- Bracket/paren matching: highlight matching pairs, flash on close.
+- Auto-close: `(`, `[`, `{`, `'` auto-close.
+- Indentation: auto-indent continuation lines; smart indent after `WHERE`, `AND`, `OR`.
+- Code folding: collapse multi-line clause bodies.
+
+**B) Real-time error detection**
+- Parse-error markers: red squiggly underline at exact error token; tooltip shows
+  parse error. Triggered on keystroke debounce (300 ms) via `POST /translate`.
+- Profile-aware warnings: amber squiggly for constructs not yet supported (from
+  `/cypher-profile` `not_yet_supported` list).
+- Bind-var warnings: warn if `$paramName` appears but is not defined in parameter panel.
+
+**C) Autocompletion (context-aware)**
+- After `MATCH (` or `:` -> entity labels from mapping.
+- After `[` or `[:` -> relationship types from mapping.
+- After `.` on a bound variable -> property names from conceptual schema for that label.
+- After `arango.` -> registered extension functions/procedures from profile.
+- After `$` -> parameter names from parameter panel.
+- Start of line -> Cypher keywords appropriate to position.
+- Inside `RETURN`/`WITH` -> aggregation functions, built-in functions.
+
+**D) Navigation and reference**
+- Variable-use highlighting: cursor on variable highlights all occurrences.
+- Go-to-definition: Ctrl/Cmd+click on variable jumps to where it is first bound.
+- Clause outline: minimap/sidebar showing clause structure (`MATCH` -> `WHERE` -> `RETURN`).
+- Hover documentation: keyword descriptions, `arango.*` function signatures and AQL equivalents.
+
+**E) Editing assistance**
+- Snippet templates: `match`+Tab expands to template; customizable.
+- Comment toggle: Ctrl/Cmd+`/`.
+- Multi-cursor support.
+- Query history: up/down in empty editor; history panel with search.
+- Format/prettify: Ctrl/Cmd+Shift+F.
+
+**F) Parameter binding**
+- Auto-detection of `$paramName` tokens.
+- JSON value entry per parameter.
+- Persistence in localStorage per query hash.
+
+Editor library: **CodeMirror 6** with custom Lezer grammar or community Cypher package.
+
+#### 4.4.3 AQL editor --- syntax-directed display with Explain / Profile
+Side-by-side with Cypher editor. CodeMirror 6 instance, read-only by default.
+
+**A) Syntax highlighting**
+- AQL keywords (`FOR`, `IN`, `FILTER`, `RETURN`, `LET`, `SORT`, `LIMIT`,
+  `COLLECT`, ...), bind parameters (`@@collection`, `@param`), functions,
+  strings, numbers, comments.
+- Bind-var references visually distinct (bold + colored).
+- Line numbers always shown.
+
+**B) Live synchronization**
+- Auto-translate on Cypher changes (debounced 500 ms).
+- Bind vars panel below AQL editor.
+- Error state: if translation fails, show error inline instead of stale AQL.
+
+**C) Explain and Profile**
+- **Explain** button -> `POST /explain` -> renders execution plan as interactive
+  tree (type, estimatedCost, estimatedNrItems, index details). Raw JSON toggle.
+- **Profile** button -> `POST /aql-profile` -> executes with profiling, shows
+  runtime stats per plan node (actual time, rows, memory). Color-coded hotspots.
+  Results go to Results panel.
+
+**D) Read-only vs editable mode**
+- Read-only (default): reflects transpiler output exactly.
+- Editable (toggle): user can modify AQL for experimentation. "Modified" indicator.
+  Reset button. Re-translating from Cypher overwrites (with confirmation if modified).
+
+**E) Correspondence hints (v0.4+)**
+- Hovering over Cypher clause highlights corresponding AQL lines (via source-map
+  metadata).
+
+#### 4.4.4 Panels and layout
+Split-pane layout with resizable dividers:
+
+1. **Connection bar** (top).
+2. **Cypher editor** (left) with Translate and Run buttons, parameter panel.
+3. **AQL editor** (right, side-by-side) with Explain and Profile buttons, bind-vars
+   panel, read-only/edit toggle.
+4. **Results panel** (bottom, full width) with tabs: Table, Graph, JSON, Explain,
+   Profile.
+5. **Mapping panel** (drawer/tab).
+6. **Profile panel** (drawer/tab).
+
+#### 4.4.5 Connection and credential model
+- **Browser-supplied** (primary): user enters host, port, database, username,
+  password in the connection dialog. Credentials travel to FastAPI only; the browser
+  never contacts ArangoDB directly.
+- **`.env` defaults** (convenience): `GET /connect/defaults` returns non-secret
+  defaults (host, port, database, username) to pre-fill the dialog. Password is
+  **never** returned.
+- **Security constraints**: credentials are held in server-side session storage
+  (in-process dict keyed by opaque token). No credentials are persisted to disk.
+  Session tokens are short-lived (configurable TTL, default 30 min, sliding).
+
+Service endpoints used by the connection model:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/connect` | Authenticate, return session token |
+| POST | `/disconnect` | Tear down session |
+| GET | `/connections` | List active sessions (admin/debug) |
+| GET | `/connect/defaults` | `.env` defaults for pre-fill |
+| POST | `/translate` | Cypher -> AQL (no session required) |
+| POST | `/execute` | Translate + execute (session required) |
+| POST | `/validate` | Syntax / translation validation |
+| POST | `/explain` | AQL EXPLAIN (session required) |
+| POST | `/aql-profile` | Execute with profiling (session required) |
+| GET | `/cypher-profile` | JSON manifest for agent/NL gateways |
+
+#### 4.4.6 Results display
+- **Table view** (default).
+- **Graph view** (Cytoscape.js).
+- **JSON view**.
+- **Explain view**: interactive tree of AQL execution plan.
+- **Profile view**: annotated plan with runtime metrics, color-coded hotspots.
+- **Export**: CSV or JSON.
+
+#### 4.4.7 Tech stack
+- **Framework**: React (Vite).
+- **Editor**: CodeMirror 6.
+- **Cypher language mode**: Custom Lezer grammar or community package.
+- **AQL language mode**: Custom Lezer grammar.
+- **Graph visualization**: Cytoscape.js.
+- **Execution plan viz**: React tree component (custom or react-d3-tree).
+- **HTTP client**: fetch / axios.
+- **Styling**: Tailwind CSS or CSS modules.
+
+#### 4.4.8 Keyboard shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| Ctrl/Cmd+Enter | Translate |
+| Shift+Enter | Execute |
+| Ctrl/Cmd+Shift+E | Explain |
+| Ctrl/Cmd+Shift+P | Profile |
+| Ctrl+Space | Autocomplete |
+| Ctrl/Cmd+Shift+F | Format |
+| Ctrl/Cmd+/ | Toggle comment |
+| Ctrl/Cmd+D | Select next occurrence |
+| Ctrl/Cmd+Z / Ctrl/Cmd+Y | Undo / Redo |
+| Up/Down (empty editor) | Query history |
+
+#### 4.4.9 Phasing
+
+| Phase | Scope |
+|-------|-------|
+| v0.3-alpha | FastAPI service with all endpoints. Connection dialog. Cypher editor with syntax highlighting (A), bracket matching, auto-close. AQL editor (read-only) with AQL syntax highlighting. Translate button -> AQL preview. No execute. |
+| v0.3-beta | Execute with table results. Cypher parse-error markers (B). AQL Explain button + tree view. Query history. Parameter binding (F). Bind-vars panel. `.env` defaults. Keyboard shortcuts. |
+| v0.3 | AQL Profile button + annotated plan view. Graph view. Variable-use highlighting (D). Clause outline. Mapping panel. Profile panel. AQL editor editable mode toggle. |
+| v0.4 | Context-aware autocompletion (C). Hover documentation (D). Profile-aware warnings (B). Snippet templates (E). Format/prettify. Correspondence hints. Multi-statement. Export. |
 
 ---
 
@@ -123,7 +296,7 @@ If you *do* build UI, the key features are:
   - OWL Turtle (`operation="owl"`)
 
 ### 5.2 Mapping contract we will consume
-We will treat `export` output as the authoritative “transpiler mapping” contract.
+We will treat `export` output as the authoritative "transpiler mapping" contract.
 
 Important: the analyzer already defines mapping styles and even provides injection-safe AQL fragments:
 - Entity mapping styles: `COLLECTION` vs `LABEL` (generic + `typeField/typeValue`)
@@ -134,13 +307,13 @@ This aligns exactly with your hybrid requirement: mapping is per entity type and
 ### 5.3 Detection strategy in `arango-cypher-py`
 We will implement a 3-tier strategy:
 - **Explicit config** (highest priority): user-supplied mapping overrides; useful for unstable databases.
-- **Fast heuristic** (cheap): quickly classify as “pure PG”, “pure LPG”, or “uncertain/hybrid”.
+- **Fast heuristic** (cheap): quickly classify as "pure PG", "pure LPG", or "uncertain/hybrid".
 - **Fallback**: call `arangodb-schema-analyzer` when uncertain/hybrid or when user forces it.
 
-Even if heuristics say “pure PG/LPG”, we should allow `--use-analyzer` to force analyzer mapping (for correctness).
+Even if heuristics say "pure PG/LPG", we should allow `--use-analyzer` to force analyzer mapping (for correctness).
 
 ### 5.4 OWL Turtle usage
-You asked specifically for OWL TTL. We’ll support two flows:
+You asked specifically for OWL TTL. We'll support two flows:
 - **Primary runtime flow**: consume `export` mapping JSON (simpler, stable, already designed for transpilers).
 - **Artifact/explain flow**: also store `owl` Turtle output alongside the export, for:
   - debugging
@@ -160,7 +333,7 @@ Recommended libs:
 We need:
 - correct tokenization and precedence for expressions
 - a parse tree rich enough to build an internal AST
-- maintainability (avoid “hand-rolled” parser for full Cypher)
+- maintainability (avoid "hand-rolled" parser for full Cypher)
 
 ### 6.2 Candidate approaches (ranked)
 
@@ -243,7 +416,7 @@ Never string-interpolate collection names or user expressions directly:
   - `@@collection` for collection names
   - `@param` for values
 
-We should use (or replicate) the analyzer’s `PhysicalMapping.aql_entity_match()` and `aql_relationship_traversal()` patterns where possible, then extend them for:
+We should use (or replicate) the analyzer's `PhysicalMapping.aql_entity_match()` and `aql_relationship_traversal()` patterns where possible, then extend them for:
 - multi-hop expansions
 - OPTIONAL MATCH patterns
 - multiple relationship types
@@ -255,7 +428,7 @@ We should use (or replicate) the analyzer’s `PhysicalMapping.aql_entity_match(
 
 ### 7A.1 Design goals for extensions
 - **Keep core Cypher portable**: standard Cypher should translate without needing Arango-specific constructs.
-- **Namespaced and explicit**: Arango-only features must be clearly marked and easy to lint/deny in “portable mode”.
+- **Namespaced and explicit**: Arango-only features must be clearly marked and easy to lint/deny in "portable mode".
 - **Deterministic translation**: extensions compile to AQL predictably; no hidden runtime prompts.
 - **Security**: no raw AQL injection; enforce bind variables and allowlist capabilities.
 
@@ -273,7 +446,7 @@ Conceptual interfaces:
   - compiler: `compile(call_ast, ctx) -> (aql_subquery: str, bind_vars: dict, yielded_columns: list, warnings: list)`
 
 Policy knobs:
-- `extensions.enabled: bool` (default `false` in “portable mode”; `true` in Arango mode)
+- `extensions.enabled: bool` (default `false` in "portable mode"; `true` in Arango mode)
 - `extensions.allowlist: set[str]` (e.g. allow `arango.search` but disallow `arango.aql`)
 - `extensions.denylist: set[str]`
 
@@ -292,7 +465,7 @@ Constraints:
 - If an extension requires a different FROM (e.g. ArangoSearch view), it must be a procedure (or a clause extension in later versions).
 
 #### B) Procedures (`CALL arango.*`) for source-changing operations
-Some Arango features are fundamentally “source changing” (e.g. querying an ArangoSearch view, vector topK retrieval). Those are better expressed as procedures that yield rows.
+Some Arango features are fundamentally "source changing" (e.g. querying an ArangoSearch view, vector topK retrieval). Those are better expressed as procedures that yield rows.
 
 Shape:
 - `CALL arango.search("viewName", {query: "...", ...}) YIELD doc, score`
@@ -309,7 +482,7 @@ This is powerful but risky. If included at all:
 - **off by default**
 - requires explicit allowlist enablement
 - requires bind vars provided separately
-- must run in a “least privilege” execution mode
+- must run in a "least privilege" execution mode
 
 ### 7A.4 Mapping Arango capabilities (full text, vector, geo)
 High-level mapping targets for the registry:
@@ -321,7 +494,7 @@ High-level mapping targets for the registry:
   - AQL pattern depends on index type/version, but always: (a) query vector (b) topK results (c) return docs + distance/score
 - **Geospatial search**:
   - function form (distance computations)
-  - procedure form if we want geo “near” as a source
+  - procedure form if we want geo "near" as a source
 
 Implementation note:
 - The registry is how we keep these additions from contaminating the core transpiler logic.
@@ -336,7 +509,7 @@ Default semantics:
 - `n.address.zip` is a property access on `n`
 - in AQL, this lowers to `n.address.zip` (with safe handling for missing fields where needed)
 
-This is the recommended default because it matches ArangoDB’s document model and keeps translation predictable.
+This is the recommended default because it matches ArangoDB's document model and keeps translation predictable.
 
 #### Optional (mapping-driven): embedded conceptual entities + embedded relationships
 Some nested objects should behave like conceptual nodes/relationships (without necessarily being physically separate documents).
@@ -346,16 +519,16 @@ We will support this only when the **mapping** (from `arangodb-schema-analyzer` 
 - physical: `User.address` is an embedded object
 
 Lowering strategy:
-- treat the “virtual node” value as a computed value (`LET addr = u.address`)
+- treat the "virtual node" value as a computed value (`LET addr = u.address`)
 - allow property predicates/projections over that value (`addr.zip`, `addr.city`)
 
 Critical constraint:
-- Unless we define a stable identity rule, “virtual nodes” do not have real `_id` and cannot participate in general graph traversal semantics.
+- Unless we define a stable identity rule, "virtual nodes" do not have real `_id` and cannot participate in general graph traversal semantics.
 
-### 7A.6 “Virtual edges” support: v0.1 vs later
+### 7A.6 "Virtual edges" support: v0.1 vs later
 
 #### Definition
-A “virtual edge” is a conceptual relationship where the physical representation is:
+A "virtual edge" is a conceptual relationship where the physical representation is:
 - embedded object/array inside a document, or
 - a foreign-key-like reference field (e.g. `user.companyId`) without an edge collection.
 
@@ -382,7 +555,7 @@ Example of what v0.1 can do:
 #### Later (v0.3+) possible extensions
 If you want richer semantics, we can add one (or more) explicit identity strategies:
 - **Synthetic identity** for embedded objects (e.g. hash of parent `_id` + JSON pointer)
-- **Materialized view** strategy: treat embedded objects as a derived “virtual collection” via AQL views/subqueries
+- **Materialized view** strategy: treat embedded objects as a derived "virtual collection" via AQL views/subqueries
 - **FK expansion** strategy: treat `*_id` fields as joinable references with `DOCUMENT()`
 
 These should be **explicitly configured** because they affect correctness/performance expectations.
@@ -410,7 +583,7 @@ Recommended libs:
 - `docker` / `docker compose` for integration environment
 
 ### 8.2 Converting existing `arango-cypher` tests
-We’ll treat the JS/Foxx test suite as **spec** and migrate in stages:
+We'll treat the JS/Foxx test suite as **spec** and migrate in stages:
 
 #### Step 1: Extract a corpus
 Create a `tests/fixtures/cypher_cases/` directory with files like:
@@ -421,7 +594,7 @@ Create a `tests/fixtures/cypher_cases/` directory with files like:
   - optional `mapping_override`
   - optional `notes`
 
-#### Step 2: Recreate “golden AQL” expectations
+#### Step 2: Recreate "golden AQL" expectations
 For translation parity, snapshot the AQL output of the Foxx version (where applicable) and store as expected outputs for the Python version.
 
 #### Step 3: Add integration semantics incrementally
@@ -441,15 +614,15 @@ This reduces manual porting effort dramatically.
 ## 9) Agentic workflow support (optional, but easy to add)
 Keep deterministic translation as the source of truth.
 
-Add an optional “tool contract” layer similar to the schema analyzer:
+Add an optional "tool contract" layer similar to the schema analyzer:
 - `translate_tool(request_dict) -> response_dict`
   - request fields: cypher, connection (optional), mapping (optional), options
   - response: ok/error, aql, bind_vars, mapping_summary, warnings
 
 Where agentic adds value:
-- “Explain why this label mapped to that collection”
-- “Suggest missing indexes for performance”
-- “Propose a mapping override for ambiguous hybrid areas”
+- "Explain why this label mapped to that collection"
+- "Suggest missing indexes for performance"
+- "Propose a mapping override for ambiguous hybrid areas"
 
 Recommended libs (optional):
 - `pydantic` for tool IO models
@@ -472,14 +645,14 @@ Recommended libs (optional):
   - WHERE predicates (basic boolean + comparisons)
   - RETURN projections
   - LIMIT/SKIP
-- Error reporting: “unsupported clause” and syntax errors
+- Error reporting: "unsupported clause" and syntax errors
 
 ### Phase 2 — Mapping integration (1 week)
 - Implement mapping acquisition:
   - connect via `python-arango`
   - run analyzer `export` (library call or tool contract)
   - store mapping bundle + optional TTL
-- Implement “fast heuristic” classifier to avoid analyzer when clearly pure and user wants speed
+- Implement "fast heuristic" classifier to avoid analyzer when clearly pure and user wants speed
 - Cache mapping by schema fingerprint
 
 ### Phase 3 — Core translation for MATCH/WHERE/RETURN (2–3 weeks)
@@ -498,10 +671,11 @@ Recommended libs (optional):
 - Aggregations and grouping
 - Path length `1..N` (bounded) expansions
 
-### Phase 5 — Service + (optional) UI (1–2 weeks)
-- FastAPI endpoints
-- Optional Streamlit UI
-- Auth story (if needed), rate limits, logging
+### Phase 5 — Service + Cypher Workbench UI (2-3 weeks)
+- FastAPI service with all endpoints (shipped): `/translate`, `/execute`, `/validate`, `/connect`, `/explain`, `/aql-profile`, `/cypher-profile` (see 4.3)
+- Cypher Workbench UI (4.4): syntax-directed Cypher editor + AQL editor side-by-side, Explain/Profile, connection dialog
+- Auth story: session-based token management, `.env` defaults, HTTPS for production
+- Phased UI delivery per 4.4.9: v0.3-alpha through v0.4
 
 ### Phase 6 — Writes + advanced features (future)
 - CREATE/MERGE/SET/DELETE translation
@@ -532,18 +706,23 @@ Recommendation: **not yet**.
 ## 12) Proposed tech stack (summary)
 - **DB**: `python-arango`
 - **Schema mapping**: `arangodb-schema-analyzer` (library + tool contract)
-- **Cypher parsing**: prefer `libcypher-parser-python`; fallback ANTLR4 openCypher grammar
+- **Cypher parsing**: ANTLR4 openCypher grammar (in-repo `grammar/Cypher.g4`)
 - **CLI**: `typer` + `rich`
-- **Service** (optional): `fastapi` + `uvicorn`
+- **Service**: `fastapi` + `uvicorn`
 - **TTL parsing** (optional ingestion): `rdflib`
-- **Testing**: `pytest`, `pytest-cov`, snapshot (`syrupy`)
+- **Testing**: `pytest`, `pytest-cov`, `httpx` (service tests), snapshot (`syrupy`)
 - **Quality**: `ruff` + `mypy` (optional early; recommended by v0.2)
+- **Frontend (Cypher Workbench UI)**:
+  - **Framework**: React + TypeScript (Vite)
+  - **Editor**: CodeMirror 6 (Cypher + AQL language modes via Lezer grammars)
+  - **Graph viz**: Cytoscape.js
+  - **Execution plan viz**: react-d3-tree or custom tree component
+  - **Styling**: Tailwind CSS
 
 ---
 
 ## 13) Open questions (to resolve during Phase 1–2)
 - Exact Cypher subset required for v0.1: do you need `WITH` immediately?
-- Do you want translation parity with Foxx outputs, or “best AQL” even if it differs?
+- Do you want translation parity with Foxx outputs, or "best AQL" even if it differs?
 - Are there established canonical field names for LPG type fields in your environments (`type`, `_type`, `label`, etc.) or do we always rely on analyzer mapping?
 - Any constraints on running native deps (if we choose `libcypher-parser-python`)?
-

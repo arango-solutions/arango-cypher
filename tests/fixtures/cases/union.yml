@@ -1,0 +1,39 @@
+version: 1
+cases:
+  - id: C212
+    name: UNION (distinct) two branches same collection
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.active = true RETURN n.name AS name UNION MATCH (n:User) WHERE n.admin = true RETURN n.name AS name
+    expected:
+      aql: |-
+        FOR _u IN UNION_DISTINCT(
+          (FOR n IN @@collection
+          FILTER (n.active == true)
+          RETURN {name: n.name}),
+          (FOR n IN @@collection
+          FILTER (n.admin == true)
+          RETURN {name: n.name})
+        )
+          RETURN _u
+      bind_vars:
+        "@collection": users
+
+  - id: C213
+    name: UNION ALL two branches same collection
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) RETURN n.name AS name UNION ALL MATCH (n:User) RETURN n.id AS name
+    expected:
+      aql: |-
+        FOR _u IN UNION(
+          (FOR n IN @@collection
+          RETURN {name: n.name}),
+          (FOR n IN @@collection
+          RETURN {name: n.id})
+        )
+          RETURN _u
+      bind_vars:
+        "@collection": users

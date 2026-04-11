@@ -1,0 +1,56 @@
+version: 1
+cases:
+  - id: C217
+    name: STARTS WITH in WHERE
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.name STARTS WITH 'A' RETURN n
+    expected:
+      aql: |-
+        FOR n IN @@collection
+          FILTER STARTS_WITH(n.name, 'A')
+          RETURN n
+      bind_vars:
+        "@collection": users
+
+  - id: C218
+    name: ENDS WITH in WHERE
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.name ENDS WITH 'ce' RETURN n
+    expected:
+      aql: |-
+        FOR n IN @@collection
+          FILTER (RIGHT(n.name, LENGTH('ce')) == 'ce')
+          RETURN n
+      bind_vars:
+        "@collection": users
+
+  - id: C219
+    name: CONTAINS in WHERE
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) WHERE n.name CONTAINS 'li' RETURN n
+    expected:
+      aql: |-
+        FOR n IN @@collection
+          FILTER CONTAINS(n.name, 'li')
+          RETURN n
+      bind_vars:
+        "@collection": users
+
+  - id: C220
+    name: STARTS WITH in RETURN projection
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) RETURN n.name STARTS WITH 'A' AS startsA
+    expected:
+      aql: |-
+        FOR n IN @@collection
+          RETURN {startsA: STARTS_WITH(n.name, 'A')}
+      bind_vars:
+        "@collection": users

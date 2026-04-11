@@ -1,0 +1,40 @@
+version: 1
+cases:
+  - id: C225
+    name: Generic CASE with ELSE in RETURN
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) RETURN CASE WHEN n.age > 18 THEN 'adult' WHEN n.age > 12 THEN 'teen' ELSE 'child' END AS category
+    expected:
+      aql: |-
+        FOR n IN @@collection
+          RETURN {category: CASE WHEN (n.age > 18) THEN 'adult' WHEN (n.age > 12) THEN 'teen' ELSE 'child' END}
+      bind_vars:
+        "@collection": users
+
+  - id: C226
+    name: Simple CASE expanded to generic in RETURN
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) RETURN CASE n.status WHEN 'active' THEN 1 WHEN 'inactive' THEN 0 ELSE -1 END AS code
+    expected:
+      aql: |-
+        FOR n IN @@collection
+          RETURN {code: CASE WHEN (n.status == 'active') THEN 1 WHEN (n.status == 'inactive') THEN 0 ELSE (-1) END}
+      bind_vars:
+        "@collection": users
+
+  - id: C227
+    name: Generic CASE without ELSE
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (n:User) RETURN CASE WHEN n.active = true THEN 'yes' END AS status
+    expected:
+      aql: |-
+        FOR n IN @@collection
+          RETURN {status: CASE WHEN (n.active == true) THEN 'yes' END}
+      bind_vars:
+        "@collection": users

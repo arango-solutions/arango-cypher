@@ -1,0 +1,17 @@
+version: 1
+cases:
+  - id: C221
+    name: Two MATCH clauses cross product
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      MATCH (a:User) MATCH (b:User) WHERE b.active = true RETURN a.name AS a_name, b.name AS b_name
+    expected:
+      aql: |-
+        FOR a IN @@collection
+          FOR b IN @@collection2
+            FILTER (b.active == true)
+          RETURN {a_name: a.name, b_name: b.name}
+      bind_vars:
+        "@collection": users
+        "@collection2": users

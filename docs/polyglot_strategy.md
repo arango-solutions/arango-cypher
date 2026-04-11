@@ -243,7 +243,7 @@ class AqlExecutor:
 ## 7) How front-ends use core (alignment contract)
 
 ### Cypher front-end
-- Parse Cypher → normalize AST
+- Parse Cypher → normalize AST (today: **ANTLR** openCypher grammar in `arango-cypher-py`; long-term IR/plan in [`python_prd.md`](./python_prd.md) §6–§7, §10A)
 - Compile patterns/clauses into core `AqlFragment`s using:
   - `MappingResolver`
   - mapping-based helpers like `aql_match_entity`, `aql_expand_relationship`

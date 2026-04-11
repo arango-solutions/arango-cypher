@@ -1,18 +1,31 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any
 
-from arango_query_core import AqlQuery, CoreError, ExtensionPolicy, MappingBundle, MappingResolver
+from arango_query_core import (
+    AqlQuery,
+    CoreError,
+    ExtensionPolicy,
+    ExtensionRegistry,
+    MappingBundle,
+    MappingResolver,
+)
 
 from ._antlr.CypherParser import CypherParser
 from .parser import parse_cypher
+
+_active_registry: ContextVar[ExtensionRegistry | None] = ContextVar(
+    "_active_registry", default=None,
+)
 
 
 @dataclass(frozen=True)
 class TranslateOptions:
     extensions: ExtensionPolicy = ExtensionPolicy(enabled=False)
+    registry: ExtensionRegistry | None = None
 
 
 def translate_v0(
@@ -32,6 +45,24 @@ def translate_v0(
     if not mapping:
         raise CoreError("mapping is required", code="INVALID_ARGUMENT")
 
+    opts = options or TranslateOptions()
+    registry = opts.registry
+    token = _active_registry.set(registry)
+
+    try:
+        return _translate_v0_inner(
+            cypher, mapping=mapping, params=params,
+        )
+    finally:
+        _active_registry.reset(token)
+
+
+def _translate_v0_inner(
+    cypher: str,
+    *,
+    mapping: MappingBundle,
+    params: dict[str, Any] | None = None,
+) -> AqlQuery:
     bind_vars: dict[str, Any] = dict(params or {})
     resolver = MappingResolver(mapping)
 
@@ -39,18 +70,44 @@ def translate_v0(
     tree = pr.tree
 
     query_ctx = tree.oC_Statement().oC_Query()
+
+    standalone_call = query_ctx.oC_StandaloneCall()
+    if standalone_call is not None:
+        return _translate_standalone_call(standalone_call, bind_vars=bind_vars)
+
     regular = query_ctx.oC_RegularQuery()
     if regular is None:
         raise CoreError("Only regular queries are supported in v0", code="UNSUPPORTED")
 
-    single_query = regular.oC_SingleQuery()
-    mpq = single_query.oC_MultiPartQuery()
-    if mpq is not None:
-        return _translate_multi_part_query(mpq, resolver=resolver, bind_vars=bind_vars)
+    union_clauses = regular.oC_Union()
+    if union_clauses:
+        return _translate_union(
+            regular, resolver=resolver, bind_vars=bind_vars,
+        )
 
-    spq = single_query.oC_SinglePartQuery()
+    single_query = regular.oC_SingleQuery()
+    return _translate_single_query(single_query, resolver=resolver, bind_vars=bind_vars)
+
+def _translate_single_query(
+    sq: CypherParser.OC_SingleQueryContext,
+    *,
+    resolver: MappingResolver,
+    bind_vars: dict[str, Any],
+) -> AqlQuery:
+    """Translate one ``oC_SingleQuery`` (single- or multi-part) into AQL."""
+
+    mpq = sq.oC_MultiPartQuery()
+    if mpq is not None:
+        return _translate_multi_part_query(
+            mpq, resolver=resolver, bind_vars=bind_vars,
+        )
+
+    spq = sq.oC_SinglePartQuery()
     if spq is None:
-        raise CoreError("Only single-part queries are supported in v0", code="UNSUPPORTED")
+        raise CoreError(
+            "Only single-part queries are supported in v0",
+            code="UNSUPPORTED",
+        )
 
     # Fail fast on any updating clause (SET/CREATE/DELETE/etc). v0 is read-only.
     if spq.oC_UpdatingClause():
@@ -61,25 +118,376 @@ def translate_v0(
     if not reading_clauses:
         raise CoreError("MATCH is required in v0 subset", code="UNSUPPORTED")
 
-    match_ctx: CypherParser.OC_MatchContext | None = None
+    mandatory_matches: list[CypherParser.OC_MatchContext] = []
+    optional_matches: list[CypherParser.OC_MatchContext] = []
+    pre_unwinds: list[CypherParser.OC_UnwindContext] = []
+    post_unwinds: list[CypherParser.OC_UnwindContext] = []
+    in_query_calls: list[CypherParser.OC_InQueryCallContext] = []
+    seen_match = False
     for rc in reading_clauses:
         m = rc.oC_Match()
         if m is not None:
-            if match_ctx is not None:
-                raise CoreError("Multiple MATCH clauses not supported yet", code="UNSUPPORTED")
-            match_ctx = m
-    if match_ctx is None:
+            seen_match = True
+            if m.OPTIONAL() is not None:
+                optional_matches.append(m)
+            else:
+                mandatory_matches.append(m)
+            continue
+        uw = rc.oC_Unwind()
+        if uw is not None:
+            if seen_match:
+                post_unwinds.append(uw)
+            else:
+                pre_unwinds.append(uw)
+            continue
+        iqc = rc.oC_InQueryCall()
+        if iqc is not None:
+            in_query_calls.append(iqc)
+    unwind_clauses = pre_unwinds + post_unwinds
+
+    # Standalone in-query CALL (no MATCH, no UNWIND)
+    if not mandatory_matches and not optional_matches and not unwind_clauses:
+        if in_query_calls:
+            return _translate_standalone_in_query_call(
+                in_query_calls, spq=spq, bind_vars=bind_vars,
+            )
         raise CoreError("MATCH is required in v0 subset", code="UNSUPPORTED")
 
-    pattern = match_ctx.oC_Pattern()
-    parts = pattern.oC_PatternPart()
-    if not parts:
-        raise CoreError("MATCH pattern is required", code="UNSUPPORTED")
+    # Standalone UNWIND (no MATCH at all)
+    if not mandatory_matches and not optional_matches:
+        if not unwind_clauses:
+            raise CoreError("MATCH is required in v0 subset", code="UNSUPPORTED")
+        return _translate_standalone_unwind(
+            unwind_clauses, spq=spq, bind_vars=bind_vars,
+        )
 
-    # Multi-pattern-part MATCH: MATCH (u:User), (v:User) ...
-    if len(parts) > 1:
-        lines, forbidden = _compile_match_multi_parts(match_ctx, resolver=resolver, bind_vars=bind_vars)
+    sole_optional = False
+    if not mandatory_matches:
+        if len(optional_matches) > 1:
+            raise CoreError(
+                "Multiple OPTIONAL MATCH without a leading MATCH is not yet supported",
+                code="NOT_IMPLEMENTED",
+            )
+        mandatory_matches.append(optional_matches.pop(0))
+        sole_optional = True
+
+    result = _translate_match_body(
+        mandatory_matches, spq=spq, optional_matches=optional_matches,
+        resolver=resolver, bind_vars=bind_vars,
+    )
+
+    if pre_unwinds or post_unwinds:
+        result_lines = result.text.splitlines()
+        final_lines: list[str] = []
+        if pre_unwinds:
+            for uw in pre_unwinds:
+                expr = _compile_expression(uw.oC_Expression(), bind_vars)
+                var = uw.oC_Variable().getText().strip()
+                final_lines.append(f"FOR {var} IN {expr}")
+            for ln in result_lines:
+                final_lines.append(f"  {ln}")
+        else:
+            return_line = result_lines[-1] if result_lines else ""
+            body_lines = result_lines[:-1]
+            final_lines.extend(body_lines)
+            for uw in post_unwinds:
+                expr = _compile_expression(uw.oC_Expression(), bind_vars)
+                var = uw.oC_Variable().getText().strip()
+                final_lines.append(f"  FOR {var} IN {expr}")
+            final_lines.append(return_line)
+        result = AqlQuery(
+            text="\n".join(final_lines),
+            bind_vars=result.bind_vars,
+        )
+
+    if in_query_calls:
+        result = _inject_in_query_calls(result, in_query_calls, bind_vars)
+
+    if sole_optional:
+        return _wrap_optional_match(result, spq, bind_vars)
+    return result
+
+
+def _wrap_optional_match(
+    inner: AqlQuery,
+    spq: CypherParser.OC_SinglePartQueryContext,
+    bind_vars: dict[str, Any],
+) -> AqlQuery:
+    """Wrap an inner AQL query with OPTIONAL MATCH null-fallback semantics.
+
+    AQL pattern::
+
+        LET _rows = ( <inner AQL> )
+        FOR _r IN (LENGTH(_rows) > 0 ? _rows : [<null-row>])
+          RETURN _r
+    """
+    ret = spq.oC_Return()
+    if ret is None:
+        raise CoreError("RETURN is required in v0 subset", code="UNSUPPORTED")
+    proj = ret.oC_ProjectionBody()
+    items_ctx = proj.oC_ProjectionItems()
+    items = items_ctx.oC_ProjectionItem() or []
+
+    if len(items) == 1 and items[0].oC_Variable() is None:
+        null_row = "null"
+    else:
+        keys = []
+        for it in items:
+            alias = it.oC_Variable()
+            if alias is not None:
+                keys.append(alias.getText().strip())
+            else:
+                keys.append(_infer_key(_compile_expression(it.oC_Expression(), {})))
+        null_row = "{" + ", ".join(f"{k}: null" for k in keys) + "}"
+
+    indented = "\n".join(f"  {ln}" for ln in inner.text.splitlines())
+    aql = (
+        f"LET _rows = (\n{indented}\n)\n"
+        f"FOR _r IN (LENGTH(_rows) > 0 ? _rows : [{null_row}])\n"
+        f"  RETURN _r"
+    )
+    return AqlQuery(text=aql, bind_vars=bind_vars)
+
+
+def _translate_standalone_unwind(
+    unwind_clauses: list[CypherParser.OC_UnwindContext],
+    *,
+    spq: CypherParser.OC_SinglePartQueryContext,
+    bind_vars: dict[str, Any],
+) -> AqlQuery:
+    """Translate one or more UNWIND clauses without any MATCH."""
+    lines: list[str] = []
+    for uw in unwind_clauses:
+        expr = _compile_expression(uw.oC_Expression(), bind_vars)
+        var = uw.oC_Variable().getText().strip()
+        lines.append(f"FOR {var} IN {expr}")
+
+    ret = spq.oC_Return()
+    if ret is None:
+        raise CoreError("RETURN is required in v0 subset", code="UNSUPPORTED")
+    _append_return(ret.oC_ProjectionBody(), lines=lines, bind_vars=bind_vars)
+    return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
+
+
+def _compile_unwind_lines(
+    unwind_clauses: list[CypherParser.OC_UnwindContext],
+    bind_vars: dict[str, Any],
+) -> list[str]:
+    """Compile UNWIND clauses into ``FOR var IN expr`` lines."""
+    lines: list[str] = []
+    for uw in unwind_clauses:
+        expr = _compile_expression(uw.oC_Expression(), bind_vars)
+        var = uw.oC_Variable().getText().strip()
+        lines.append(f"FOR {var} IN {expr}")
+    return lines
+
+
+def _extract_procedure_name(
+    proc_ctx: CypherParser.OC_ExplicitProcedureInvocationContext
+    | CypherParser.OC_ImplicitProcedureInvocationContext,
+) -> str:
+    """Extract the fully-qualified procedure name (e.g. ``arango.search``)."""
+    return proc_ctx.oC_ProcedureName().getText().strip()
+
+
+def _compile_call_aql(
+    proc_name: str,
+    args: list[str],
+    yield_vars: list[tuple[str, str | None]],
+    bind_vars: dict[str, Any],
+) -> list[str]:
+    """Compile a CALL into AQL ``FOR`` / ``LET`` lines.
+
+    Parameters
+    ----------
+    proc_name:
+        Fully-qualified procedure name (e.g. ``arango.search``).
+    args:
+        Already-compiled AQL argument expressions.
+    yield_vars:
+        List of ``(variable, procedure_result_field_or_None)`` from YIELD.
+    bind_vars:
+        Mutable bind-var dict, updated by procedure compilers.
+
+    Returns
+    -------
+    list[str]
+        AQL lines implementing the CALL.
+    """
+    proc_norm = proc_name.lower()
+
+    if proc_norm.startswith("arango."):
+        registry = _active_registry.get()
+        if registry is None:
+            raise CoreError(
+                f"arango.* procedure '{proc_name}' requires a registry "
+                f"(pass TranslateOptions(registry=...) to translate)",
+                code="EXTENSIONS_DISABLED",
+            )
+        aql_expr = registry.compile_procedure(proc_norm, args, bind_vars)
+    else:
+        raise CoreError(
+            f"Unsupported procedure in v0: {proc_name}",
+            code="UNSUPPORTED",
+        )
+
+    lines: list[str] = []
+    if len(yield_vars) == 1:
+        var_name = yield_vars[0][0]
+        lines.append(f"FOR {var_name} IN {aql_expr}")
+    else:
+        lines.append(f"FOR _call_row IN {aql_expr}")
+        for var_name, result_field in yield_vars:
+            key = result_field or var_name
+            lines.append(f"  LET {var_name} = _call_row.{key}")
+    return lines
+
+
+def _extract_yield_vars(
+    yield_items_ctx: CypherParser.OC_YieldItemsContext | None,
+) -> list[tuple[str, str | None]]:
+    """Return ``[(variable, procedureResultField|None), ...]`` from a YIELD clause."""
+    if yield_items_ctx is None:
+        return []
+    items = yield_items_ctx.oC_YieldItem() or []
+    result: list[tuple[str, str | None]] = []
+    for item in items:
+        var = item.oC_Variable().getText().strip()
+        prf = item.oC_ProcedureResultField()
+        field_name = prf.getText().strip() if prf else None
+        result.append((var, field_name))
+    return result
+
+
+def _translate_standalone_call(
+    sc: CypherParser.OC_StandaloneCallContext,
+    *,
+    bind_vars: dict[str, Any],
+) -> AqlQuery:
+    """Translate a top-level ``CALL proc() YIELD ...`` (no RETURN)."""
+    expl = sc.oC_ExplicitProcedureInvocation()
+    impl = sc.oC_ImplicitProcedureInvocation()
+
+    if expl is not None:
+        proc_name = _extract_procedure_name(expl)
+        raw_args = expl.oC_Expression() or []
+        compiled_args = [_compile_expression(a, bind_vars) for a in raw_args]
+    elif impl is not None:
+        proc_name = _extract_procedure_name(impl)
+        compiled_args = []
+    else:
+        raise CoreError("Invalid CALL syntax", code="UNSUPPORTED")
+
+    yield_vars = _extract_yield_vars(sc.oC_YieldItems())
+
+    lines = _compile_call_aql(proc_name, compiled_args, yield_vars, bind_vars)
+
+    if yield_vars:
+        if len(yield_vars) == 1:
+            lines.append(f"  RETURN {yield_vars[0][0]}")
+        else:
+            parts = ", ".join(f"{v}: {v}" for v, _ in yield_vars)
+            lines.append(f"  RETURN {{{parts}}}")
+    else:
+        lines.append("  RETURN _call_row")
+
+    return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
+
+
+def _translate_standalone_in_query_call(
+    calls: list[CypherParser.OC_InQueryCallContext],
+    *,
+    spq: CypherParser.OC_SinglePartQueryContext,
+    bind_vars: dict[str, Any],
+) -> AqlQuery:
+    """Translate in-query CALL(s) that appear without MATCH or UNWIND."""
+    lines: list[str] = []
+    for iqc in calls:
+        expl = iqc.oC_ExplicitProcedureInvocation()
+        if expl is None:
+            raise CoreError(
+                "Only explicit procedure invocations (with parentheses) "
+                "are supported for in-query CALL",
+                code="UNSUPPORTED",
+            )
+        proc_name = _extract_procedure_name(expl)
+        raw_args = expl.oC_Expression() or []
+        compiled_args = [_compile_expression(a, bind_vars) for a in raw_args]
+        yield_vars = _extract_yield_vars(iqc.oC_YieldItems())
+        call_lines = _compile_call_aql(proc_name, compiled_args, yield_vars, bind_vars)
+        lines.extend(call_lines)
+
+    ret = spq.oC_Return()
+    if ret is None:
+        raise CoreError("RETURN is required in v0 subset", code="UNSUPPORTED")
+    _append_return(ret.oC_ProjectionBody(), lines=lines, bind_vars=bind_vars)
+    return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
+
+
+def _inject_in_query_calls(
+    result: AqlQuery,
+    calls: list[CypherParser.OC_InQueryCallContext],
+    bind_vars: dict[str, Any],
+) -> AqlQuery:
+    """Inject in-query CALL lines into an existing AQL result, before the RETURN."""
+    call_lines: list[str] = []
+    for iqc in calls:
+        expl = iqc.oC_ExplicitProcedureInvocation()
+        if expl is None:
+            raise CoreError(
+                "Only explicit procedure invocations are supported for in-query CALL",
+                code="UNSUPPORTED",
+            )
+        proc_name = _extract_procedure_name(expl)
+        raw_args = expl.oC_Expression() or []
+        compiled_args = [_compile_expression(a, bind_vars) for a in raw_args]
+        yield_vars = _extract_yield_vars(iqc.oC_YieldItems())
+        call_lines.extend(
+            _compile_call_aql(proc_name, compiled_args, yield_vars, bind_vars),
+        )
+
+    result_lines = result.text.splitlines()
+    return_line = result_lines[-1] if result_lines else ""
+    body_lines = result_lines[:-1]
+    final_lines = body_lines + [f"  {cl}" for cl in call_lines] + [return_line]
+    return AqlQuery(text="\n".join(final_lines), bind_vars=result.bind_vars)
+
+
+def _translate_match_body(
+    match_ctxs: list[CypherParser.OC_MatchContext],
+    *,
+    spq: CypherParser.OC_SinglePartQueryContext,
+    optional_matches: list[CypherParser.OC_MatchContext],
+    resolver: MappingResolver,
+    bind_vars: dict[str, Any],
+) -> AqlQuery:
+    """Core MATCH translation logic shared by regular and optional-match paths."""
+    all_parts: list = []
+    extra_wheres: list[CypherParser.OC_WhereContext] = []
+    for mc in match_ctxs:
+        pattern = mc.oC_Pattern()
+        pp = pattern.oC_PatternPart()
+        if not pp:
+            raise CoreError("MATCH pattern is required", code="UNSUPPORTED")
+        all_parts.extend(pp)
+        wc = mc.oC_Where()
+        if wc is not None:
+            extra_wheres.append(wc)
+
+    # Multi-pattern-part or multi-MATCH: compile all pattern parts together
+    if len(all_parts) > 1 or len(match_ctxs) > 1:
+        lines, forbidden = _compile_match_multi_parts_from_parts(
+            all_parts, extra_wheres=extra_wheres,
+            resolver=resolver, bind_vars=bind_vars,
+        )
         var_env = {v: v for v in forbidden}
+
+        if optional_matches:
+            opt_env = _compile_optional_matches(
+                optional_matches, resolver=resolver, bind_vars=bind_vars,
+                forbidden_vars=forbidden, lines=lines,
+            )
+            var_env.update(opt_env)
 
         ret = spq.oC_Return()
         if ret is None:
@@ -87,8 +495,10 @@ def translate_v0(
         _append_return(ret.oC_ProjectionBody(), lines=lines, bind_vars=bind_vars, var_env=var_env)
         return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
 
+    match_ctx = match_ctxs[0]
+
     # Extract single pattern element (existing v0 behavior)
-    anon = parts[0].oC_AnonymousPatternPart()
+    anon = all_parts[0].oC_AnonymousPatternPart()
     elem = anon.oC_PatternElement()
     node = elem.oC_NodePattern()
     if node is None:
@@ -131,6 +541,19 @@ def translate_v0(
         if user_filter:
             filters.append(user_filter)
 
+        # Build AQL
+        lines: list[str] = [for_line]
+        for f in filters:
+            lines.append(f"  FILTER {f}")
+
+        opt_var_env: dict[str, str] = {}
+        if optional_matches:
+            fv: set[str] = {var}
+            opt_var_env = _compile_optional_matches(
+                optional_matches, resolver=resolver, bind_vars=bind_vars,
+                forbidden_vars=fv, lines=lines,
+            )
+
         ret = spq.oC_Return()
         if ret is None:
             raise CoreError("RETURN is required in v0 subset", code="UNSUPPORTED")
@@ -150,13 +573,10 @@ def translate_v0(
         for it in items:
             expr_ctx = it.oC_Expression()
             expr = _compile_expression(expr_ctx, bind_vars)
+            if opt_var_env:
+                expr = _rewrite_vars(expr, opt_var_env)
             alias = it.oC_Variable().getText().strip() if it.oC_Variable() is not None else None
             compiled_items.append((alias, expr))
-
-        # Build AQL
-        lines: list[str] = [for_line]
-        for f in filters:
-            lines.append(f"  FILTER {f}")
 
         if distinct:
             if len(compiled_items) != 1:
@@ -234,8 +654,8 @@ def translate_v0(
 
         v_prop_filters = _compile_node_pattern_properties(v_node, var=v_trav, bind_vars=bind_vars)
 
-        # Relationship (type + var)
-        rel_type, rel_var = _extract_relationship_type_and_var(rel_pat, default_var="r")
+        # Relationship (type + var + range)
+        rel_type, rel_var, rel_range = _extract_relationship_type_and_var(rel_pat, default_var="r")
         detail = rel_pat.oC_RelationshipDetail()
         rel_named = detail is not None and detail.oC_Variable() is not None
         if not rel_named and rel_var in forbidden_vars:
@@ -254,71 +674,100 @@ def translate_v0(
             v_primary = _pick_primary_entity_label(v_labels, resolver)
             v_map = resolver.resolve_entity(v_primary)
         r_map = resolver.resolve_relationship(rel_type)
-
-        edge_key = _pick_bind_key("@edgeCollection", bind_vars)
-        bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
-        if not isinstance(bind_vars[edge_key], str) or not bind_vars[edge_key]:
-            raise CoreError(f"Invalid relationship mapping collection for: {rel_type}", code="INVALID_MAPPING")
-
-        v_filters: list[str] = []
-        if v_map is None:
-            if not v_bound:
-                vcoll_key = _pick_bind_key("vCollection", bind_vars)
-                bind_vars[vcoll_key] = _infer_unlabeled_collection(resolver)
-                v_filters.append(f"IS_SAME_COLLECTION(@{vcoll_key}, {v_trav})")
-        else:
-            vcoll_key = _pick_bind_key("vCollection", bind_vars)
-            bind_vars[vcoll_key] = v_map.get("collectionName")
-            if not isinstance(bind_vars[vcoll_key], str) or not bind_vars[vcoll_key]:
-                raise CoreError(f"Invalid entity mapping collectionName for: {v_primary}", code="INVALID_MAPPING")
-            v_filters.append(f"IS_SAME_COLLECTION(@{vcoll_key}, {v_trav})")
-
-        lines.append(f"  FOR {v_trav}, {rel_var} IN 1..1 {direction} {current_var} {_aql_collection_ref(edge_key)}")
-
-        if v_bound:
-            lines.append(f"    FILTER {v_trav}._id == {v_var}._id")
-
-        if v_map is not None and v_primary is not None:
-            v_style = v_map.get("style")
-            if v_style == "LABEL":
-                vtf_key = _pick_bind_key("vTypeField", bind_vars)
-                vtv_key = _pick_bind_key("vTypeValue", bind_vars)
-                bind_vars[vtf_key] = v_map.get("typeField")
-                bind_vars[vtv_key] = v_map.get("typeValue")
-                v_filters.append(f"{v_trav}[@{vtf_key}] == @{vtv_key}")
-                v_filters.extend(_extra_label_filters(v_trav, v_labels, v_primary))
-            elif v_style != "COLLECTION":
-                raise CoreError(f"Unsupported entity mapping style: {v_style}", code="INVALID_MAPPING")
-            elif len(v_labels) > 1:
-                raise CoreError("Multi-label node patterns require LABEL-style mappings in v0", code="NOT_IMPLEMENTED")
-
-        r_filters: list[str] = []
         r_style = r_map.get("style")
-        if r_style == "GENERIC_WITH_TYPE":
-            rtf_key = _pick_bind_key("relTypeField", bind_vars)
-            rtv_key = _pick_bind_key("relTypeValue", bind_vars)
-            bind_vars[rtf_key] = r_map.get("typeField")
-            bind_vars[rtv_key] = r_map.get("typeValue")
-            r_filters.append(f"{rel_var}[@{rtf_key}] == @{rtv_key}")
-            rel_type_exprs[rel_var] = f"{rel_var}[@{rtf_key}]"
-        elif r_style == "DEDICATED_COLLECTION":
-            rel_type_exprs[rel_var] = _aql_string_literal(rel_type)
-        else:
-            raise CoreError(f"Unsupported relationship mapping style: {r_style}", code="INVALID_MAPPING")
 
-        for f in v_filters + r_filters:
-            lines.append(f"    FILTER {f}")
-        for f in r_prop_filters:
-            lines.append(f"    FILTER {f}")
-        for f in v_prop_filters:
-            lines.append(f"    FILTER {f}")
+        if r_style == "EMBEDDED":
+            embedded_path = r_map.get("embeddedPath")
+            if not embedded_path:
+                raise CoreError(
+                    f"EMBEDDED relationship '{rel_type}' must declare 'embeddedPath'",
+                    code="INVALID_MAPPING",
+                )
+            is_array = r_map.get("embeddedArray", False)
+            if is_array:
+                lines.append(f"  FOR {v_trav} IN TO_ARRAY({current_var}.{embedded_path})")
+            else:
+                lines.append(f"  LET {v_trav} = {current_var}.{embedded_path}")
+            rel_type_exprs[rel_var] = _aql_string_literal(rel_type)
+            for f in v_prop_filters:
+                lines.append(f"    FILTER {f}")
+        else:
+            edge_key = _pick_bind_key("@edgeCollection", bind_vars)
+            bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
+            if not isinstance(bind_vars[edge_key], str) or not bind_vars[edge_key]:
+                raise CoreError(f"Invalid relationship mapping collection for: {rel_type}", code="INVALID_MAPPING")
+
+            v_filters: list[str] = []
+            if v_map is None:
+                if not v_bound:
+                    vcoll_key = _pick_bind_key("vCollection", bind_vars)
+                    bind_vars[vcoll_key] = _infer_unlabeled_collection(resolver)
+                    v_filters.append(f"IS_SAME_COLLECTION(@{vcoll_key}, {v_trav})")
+            else:
+                vcoll_key = _pick_bind_key("vCollection", bind_vars)
+                bind_vars[vcoll_key] = v_map.get("collectionName")
+                if not isinstance(bind_vars[vcoll_key], str) or not bind_vars[vcoll_key]:
+                    raise CoreError(f"Invalid entity mapping collectionName for: {v_primary}", code="INVALID_MAPPING")
+                v_filters.append(f"IS_SAME_COLLECTION(@{vcoll_key}, {v_trav})")
+
+            rmin, rmax = rel_range
+            lines.append(f"  FOR {v_trav}, {rel_var} IN {rmin}..{rmax} {direction} {current_var} {_aql_collection_ref(edge_key)}")
+
+            if v_bound:
+                lines.append(f"    FILTER {v_trav}._id == {v_var}._id")
+
+            if v_map is not None and v_primary is not None:
+                v_style = v_map.get("style")
+                if v_style == "LABEL":
+                    vtf_key = _pick_bind_key("vTypeField", bind_vars)
+                    vtv_key = _pick_bind_key("vTypeValue", bind_vars)
+                    bind_vars[vtf_key] = v_map.get("typeField")
+                    bind_vars[vtv_key] = v_map.get("typeValue")
+                    v_filters.append(f"{v_trav}[@{vtf_key}] == @{vtv_key}")
+                    v_filters.extend(_extra_label_filters(v_trav, v_labels, v_primary))
+                elif v_style != "COLLECTION":
+                    raise CoreError(f"Unsupported entity mapping style: {v_style}", code="INVALID_MAPPING")
+                elif len(v_labels) > 1:
+                    raise CoreError("Multi-label node patterns require LABEL-style mappings in v0", code="NOT_IMPLEMENTED")
+
+            r_filters: list[str] = []
+            if r_style == "GENERIC_WITH_TYPE":
+                rtf_key = _pick_bind_key("relTypeField", bind_vars)
+                rtv_key = _pick_bind_key("relTypeValue", bind_vars)
+                bind_vars[rtf_key] = r_map.get("typeField")
+                bind_vars[rtv_key] = r_map.get("typeValue")
+                r_filters.append(f"{rel_var}[@{rtf_key}] == @{rtv_key}")
+                rel_type_exprs[rel_var] = f"{rel_var}[@{rtf_key}]"
+            elif r_style == "DEDICATED_COLLECTION":
+                rel_type_exprs[rel_var] = _aql_string_literal(rel_type)
+            else:
+                raise CoreError(f"Unsupported relationship mapping style: {r_style}", code="INVALID_MAPPING")
+
+            for f in v_filters + r_filters:
+                lines.append(f"    FILTER {f}")
+            for f in r_prop_filters:
+                lines.append(f"    FILTER {f}")
+            for f in v_prop_filters:
+                lines.append(f"    FILTER {f}")
 
         # Advance current traversal variable.
         current_var = v_trav
         if not v_bound:
             forbidden_vars.add(v_var)
 
-    # RETURN clause (shared logic, but with special-casing for type(r))
+    where_ctx = match_ctx.oC_Where()
+    user_filter = _compile_where(where_ctx.oC_Expression(), bind_vars) if where_ctx is not None else None
+    if user_filter:
+        lines.append(f"    FILTER {user_filter}")
+
+    opt_var_env_rel: dict[str, str] = {}
+    if optional_matches:
+        opt_var_env_rel = _compile_optional_matches(
+            optional_matches, resolver=resolver, bind_vars=bind_vars,
+            forbidden_vars=forbidden_vars, lines=lines,
+        )
+
+    # RETURN clause (with special-casing for type(r))
     ret = spq.oC_Return()
     if ret is None:
         raise CoreError("RETURN is required in v0 subset", code="UNSUPPORTED")
@@ -344,12 +793,10 @@ def translate_v0(
             if inner in rel_type_exprs:
                 compiled_items.append((alias or "type", rel_type_exprs[inner]))
                 continue
-        compiled_items.append((alias, _compile_expression(expr_ctx, bind_vars)))
-
-    where_ctx = match_ctx.oC_Where()
-    user_filter = _compile_where(where_ctx.oC_Expression(), bind_vars) if where_ctx is not None else None
-    if user_filter:
-        lines.append(f"    FILTER {user_filter}")
+        expr = _compile_expression(expr_ctx, bind_vars)
+        if opt_var_env_rel:
+            expr = _rewrite_vars(expr, opt_var_env_rel)
+        compiled_items.append((alias, expr))
 
     if distinct:
         if len(compiled_items) != 1:
@@ -375,6 +822,74 @@ def translate_v0(
 
     lines.append("  RETURN " + _compile_return_object(compiled_items))
     return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
+
+
+def _translate_union(
+    regular: CypherParser.OC_RegularQueryContext,
+    *,
+    resolver: MappingResolver,
+    bind_vars: dict[str, Any],
+) -> AqlQuery:
+    """
+    Translate ``query UNION [ALL] query ...`` into AQL using
+    ``UNION()`` / ``UNION_DISTINCT()`` array functions with subqueries.
+
+    AQL shape::
+
+        FOR _u IN UNION_DISTINCT(
+          (FOR ... RETURN ...),
+          (FOR ... RETURN ...)
+        )
+          RETURN _u
+    """
+    first_sq = regular.oC_SingleQuery()
+    union_clauses = regular.oC_Union()
+    if not union_clauses:
+        raise CoreError(
+            "Internal: _translate_union called without union clauses",
+            code="INTERNAL_ERROR",
+        )
+
+    branches: list[CypherParser.OC_SingleQueryContext] = [first_sq]
+    is_all = True
+    for uc in union_clauses:
+        branches.append(uc.oC_SingleQuery())
+        if uc.ALL() is None:
+            is_all = False
+
+    subqueries: list[str] = []
+    for branch in branches:
+        branch_bv: dict[str, Any] = {}
+        bq = _translate_single_query(
+            branch, resolver=resolver, bind_vars=branch_bv,
+        )
+        _merge_bind_vars(bind_vars, branch_bv)
+        subqueries.append(f"({bq.text})")
+
+    fn = "UNION" if is_all else "UNION_DISTINCT"
+    joined = ",\n  ".join(subqueries)
+    aql = f"FOR _u IN {fn}(\n  {joined}\n)\n  RETURN _u"
+    return AqlQuery(text=aql, bind_vars=bind_vars)
+
+
+def _merge_bind_vars(
+    target: dict[str, Any],
+    source: dict[str, Any],
+) -> None:
+    """
+    Merge *source* bind vars into *target*.  Raise on key collision with
+    different values (bind var names must be unique across UNION branches).
+    """
+    for k, v in source.items():
+        if k in target:
+            if target[k] != v:
+                raise CoreError(
+                    f"Bind variable collision across UNION branches: "
+                    f"@{k} has conflicting values",
+                    code="UNSUPPORTED",
+                )
+        else:
+            target[k] = v
 
 
 def _translate_multi_part_query(
@@ -466,6 +981,136 @@ def _translate_multi_part_query(
     return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
 
 
+def _compile_optional_matches(
+    opt_matches: list[CypherParser.OC_MatchContext],
+    *,
+    resolver: MappingResolver,
+    bind_vars: dict[str, Any],
+    forbidden_vars: set[str],
+    lines: list[str],
+) -> dict[str, str]:
+    """
+    Compile OPTIONAL MATCH clauses into LET + subquery (FIRST) pattern.
+
+    Each OPTIONAL MATCH must be a relationship pattern starting from an
+    already-bound variable.  The target node is exposed via LET.
+    """
+    extra_env: dict[str, str] = {}
+    for om in opt_matches:
+        pattern = om.oC_Pattern()
+        om_parts = pattern.oC_PatternPart()
+        if not om_parts or len(om_parts) != 1:
+            raise CoreError(
+                "OPTIONAL MATCH supports a single pattern part",
+                code="UNSUPPORTED",
+            )
+        anon = om_parts[0].oC_AnonymousPatternPart()
+        elem = anon.oC_PatternElement()
+        start_node = elem.oC_NodePattern()
+        if start_node is None:
+            raise CoreError("OPTIONAL MATCH requires a node pattern", code="UNSUPPORTED")
+        chains = elem.oC_PatternElementChain() or []
+        if not chains:
+            raise CoreError(
+                "OPTIONAL MATCH without a relationship pattern is not supported",
+                code="UNSUPPORTED",
+            )
+        if len(chains) != 1:
+            raise CoreError(
+                "OPTIONAL MATCH supports single-hop patterns only",
+                code="NOT_IMPLEMENTED",
+            )
+
+        u_var, _ = _extract_node_var_and_labels(start_node, default_var="n")
+        if u_var not in forbidden_vars:
+            raise CoreError(
+                f"OPTIONAL MATCH start variable '{u_var}' is not bound",
+                code="UNSUPPORTED",
+            )
+
+        chain = chains[0]
+        rel_pat = chain.oC_RelationshipPattern()
+        v_node = chain.oC_NodePattern()
+        if rel_pat is None or v_node is None:
+            raise CoreError("Invalid OPTIONAL MATCH pattern", code="UNSUPPORTED")
+
+        v_var, v_labels = _extract_node_var_and_labels(v_node, default_var="v")
+        rel_type, rel_var, rel_range = _extract_relationship_type_and_var(
+            rel_pat, default_var="r"
+        )
+        direction = _relationship_direction(rel_pat)
+
+        inner_v = _pick_fresh_var(f"{v_var}_0", forbidden_vars=forbidden_vars)
+        inner_r = _pick_fresh_var(f"{rel_var}_0", forbidden_vars=forbidden_vars)
+
+        r_map = resolver.resolve_relationship(rel_type)
+        edge_key = _pick_bind_key("@edgeCollection", bind_vars)
+        bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
+        if not isinstance(bind_vars[edge_key], str) or not bind_vars[edge_key]:
+            raise CoreError(
+                f"Invalid relationship mapping collection for: {rel_type}",
+                code="INVALID_MAPPING",
+            )
+
+        sub_filters: list[str] = []
+
+        if v_labels:
+            v_primary = _pick_primary_entity_label(v_labels, resolver)
+            v_map = resolver.resolve_entity(v_primary)
+            vcoll_key = _pick_bind_key("vCollection", bind_vars)
+            bind_vars[vcoll_key] = v_map.get("collectionName")
+            sub_filters.append(f"IS_SAME_COLLECTION(@{vcoll_key}, {inner_v})")
+            v_style = v_map.get("style")
+            if v_style == "LABEL":
+                vtf_key = _pick_bind_key("vTypeField", bind_vars)
+                vtv_key = _pick_bind_key("vTypeValue", bind_vars)
+                bind_vars[vtf_key] = v_map.get("typeField")
+                bind_vars[vtv_key] = v_map.get("typeValue")
+                sub_filters.append(f"{inner_v}[@{vtf_key}] == @{vtv_key}")
+
+        r_style = r_map.get("style")
+        if r_style == "GENERIC_WITH_TYPE":
+            rtf_key = _pick_bind_key("relTypeField", bind_vars)
+            rtv_key = _pick_bind_key("relTypeValue", bind_vars)
+            bind_vars[rtf_key] = r_map.get("typeField")
+            bind_vars[rtv_key] = r_map.get("typeValue")
+            sub_filters.append(f"{inner_r}[@{rtf_key}] == @{rtv_key}")
+
+        where_ctx = om.oC_Where()
+        if where_ctx is not None:
+            wf = _compile_where(where_ctx.oC_Expression(), bind_vars)
+            wf = re.sub(rf"\b{re.escape(v_var)}\b", inner_v, wf)
+            sub_filters.append(wf)
+
+        rmin, rmax = rel_range
+        edge_ref = _aql_collection_ref(edge_key)
+        sub_lines = [f"FOR {inner_v}, {inner_r} IN {rmin}..{rmax} {direction} {u_var} {edge_ref}"]
+        for sf in sub_filters:
+            sub_lines.append(f"  FILTER {sf}")
+        sub_lines.append(f"  RETURN {inner_v}")
+        subquery = "\n    ".join(sub_lines)
+
+        let_var = _pick_fresh_var(v_var, forbidden_vars=forbidden_vars)
+        lines.append(f"  LET {let_var} = FIRST(\n    {subquery}\n  )")
+
+        # Also LET the relationship var if it was explicitly named
+        detail = rel_pat.oC_RelationshipDetail()
+        if detail is not None and detail.oC_Variable() is not None:
+            rel_let = _pick_fresh_var(rel_var, forbidden_vars=forbidden_vars)
+            edge_ref2 = _aql_collection_ref(edge_key)
+            r_sub = [f"FOR {inner_v}, {inner_r} IN {rmin}..{rmax} {direction} {u_var} {edge_ref2}"]
+            for sf in sub_filters:
+                r_sub.append(f"  FILTER {sf}")
+            r_sub.append(f"  RETURN {inner_r}")
+            r_subquery = "\n    ".join(r_sub)
+            lines.append(f"  LET {rel_let} = FIRST(\n    {r_subquery}\n  )")
+            extra_env[rel_var] = rel_let
+
+        extra_env[v_var] = let_var
+
+    return extra_env
+
+
 def _pick_fresh_var(name: str, *, forbidden_vars: set[str]) -> str:
     if name not in forbidden_vars:
         forbidden_vars.add(name)
@@ -499,13 +1144,28 @@ def _compile_match_multi_parts(
     resolver: MappingResolver,
     bind_vars: dict[str, Any],
 ) -> tuple[list[str], set[str]]:
-    """
-    Compile MATCH with multiple pattern parts (comma-separated).
-    """
+    """Compile MATCH with multiple pattern parts (comma-separated)."""
     pattern = match_ctx.oC_Pattern()
     parts = pattern.oC_PatternPart()
     if not parts or len(parts) < 2:
         raise CoreError("Expected multiple pattern parts", code="INTERNAL_ERROR")
+    wheres = []
+    wc = match_ctx.oC_Where()
+    if wc is not None:
+        wheres.append(wc)
+    return _compile_match_multi_parts_from_parts(
+        parts, extra_wheres=wheres, resolver=resolver, bind_vars=bind_vars,
+    )
+
+
+def _compile_match_multi_parts_from_parts(
+    parts: list,
+    *,
+    extra_wheres: list[CypherParser.OC_WhereContext] | None = None,
+    resolver: MappingResolver,
+    bind_vars: dict[str, Any],
+) -> tuple[list[str], set[str]]:
+    """Compile multiple pattern parts (from one or more MATCH clauses) into AQL."""
 
     lines: list[str] = []
     forbidden: set[str] = set()
@@ -706,11 +1366,14 @@ def _compile_match_multi_parts(
 
             rel_default = "r" if rel_part_i == 0 else f"r{rel_part_i+1}"
             rel_part_i += 1
-            rel_type, rel_var = _extract_relationship_type_and_var(rel_pat, default_var=rel_default)
+            rel_type, rel_var, rel_range = _extract_relationship_type_and_var(rel_pat, default_var=rel_default)
             r_prop_filters = _compile_relationship_pattern_properties(rel_pat, var=rel_var, bind_vars=bind_vars)
 
             if rel_var in forbidden:
-                raise CoreError("Shared relationship variables across pattern parts not supported in v0", code="NOT_IMPLEMENTED")
+                raise CoreError(
+                    "Shared relationship variables across pattern parts not supported in v0",
+                    code="NOT_IMPLEMENTED",
+                )
 
             direction = _relationship_direction(rel_pat)
 
@@ -721,7 +1384,8 @@ def _compile_match_multi_parts(
             if not isinstance(bind_vars[edge_key], str) or not bind_vars[edge_key]:
                 raise CoreError(f"Invalid relationship mapping collection for: {rel_type}", code="INVALID_MAPPING")
 
-            add_for(f"FOR {v_trav}, {rel_var} IN 1..1 {direction} {current_u} {_aql_collection_ref(edge_key)}")
+            rmin, rmax = rel_range
+            add_for(f"FOR {v_trav}, {rel_var} IN {rmin}..{rmax} {direction} {current_u} {_aql_collection_ref(edge_key)}")
 
             if v_bound:
                 add_filter(f"{v_trav}._id == {v_var}._id")
@@ -749,9 +1413,8 @@ def _compile_match_multi_parts(
 
             current_u = v_trav
 
-    where_ctx = match_ctx.oC_Where()
-    if where_ctx is not None:
-        f = _compile_where(where_ctx.oC_Expression(), bind_vars)
+    for wc in (extra_wheres or []):
+        f = _compile_where(wc.oC_Expression(), bind_vars)
         add_filter(f)
 
     return lines, forbidden
@@ -856,7 +1519,7 @@ def _compile_match_from_bound(
         node_default = "v" if hop_idx == 0 else "w"
         rel_default = "r" if hop_idx == 0 else "r_1"
         v_cy, v_labels = _extract_node_var_and_labels(v_node, default_var=node_default)
-        rel_type, rel_cy = _extract_relationship_type_and_var(rel_pat, default_var=rel_default)
+        rel_type, rel_cy, rel_range = _extract_relationship_type_and_var(rel_pat, default_var=rel_default)
 
         v_aql = _pick_fresh_var(v_cy, forbidden_vars=forbidden_vars) if v_cy not in out_env else out_env[v_cy]
         r_aql = _pick_fresh_var(rel_cy, forbidden_vars=forbidden_vars) if rel_cy not in out_env else out_env[rel_cy]
@@ -885,7 +1548,8 @@ def _compile_match_from_bound(
             if not isinstance(bind_vars[vcoll_key], str) or not bind_vars[vcoll_key]:
                 raise CoreError(f"Invalid entity mapping collectionName for: {v_primary}", code="INVALID_MAPPING")
 
-        lines.append(f"  FOR {v_aql}, {r_aql} IN 1..1 {direction} {current_aql} {_aql_collection_ref(edge_key)}")
+        rmin, rmax = rel_range
+        lines.append(f"  FOR {v_aql}, {r_aql} IN {rmin}..{rmax} {direction} {current_aql} {_aql_collection_ref(edge_key)}")
 
         v_filters: list[str] = [f"IS_SAME_COLLECTION(@{vcoll_key}, {v_aql})"]
         if v_map is not None and v_primary is not None:
@@ -1038,7 +1702,7 @@ def _compile_match_pipeline(
         v_var, v_labels = _extract_node_var_and_labels(v_node, default_var="v")
 
         v_prop_filters = _compile_node_pattern_properties(v_node, var=v_var, bind_vars=bind_vars)
-        rel_type, rel_var = _extract_relationship_type_and_var(rel_pat, default_var="r")
+        rel_type, rel_var, rel_range = _extract_relationship_type_and_var(rel_pat, default_var="r")
         detail = rel_pat.oC_RelationshipDetail()
         rel_named = detail is not None and detail.oC_Variable() is not None
         if not rel_named and rel_var in forbidden:
@@ -1071,7 +1735,8 @@ def _compile_match_pipeline(
             if not isinstance(bind_vars[vcoll_key], str) or not bind_vars[vcoll_key]:
                 raise CoreError(f"Invalid entity mapping collectionName for: {v_primary}", code="INVALID_MAPPING")
 
-        lines.append(f"  FOR {v_var}, {rel_var} IN 1..1 {direction} {current_var} {_aql_collection_ref(edge_key)}")
+        rmin, rmax = rel_range
+        lines.append(f"  FOR {v_var}, {rel_var} IN {rmin}..{rmax} {direction} {current_var} {_aql_collection_ref(edge_key)}")
 
         v_filters: list[str] = [f"IS_SAME_COLLECTION(@{vcoll_key}, {v_var})"]
         if v_map is not None and v_primary is not None:
@@ -1597,12 +2262,19 @@ def _relationship_direction(rel_pat: CypherParser.OC_RelationshipPatternContext)
 
 def _extract_relationship_type_and_var(
     rel_pat: CypherParser.OC_RelationshipPatternContext, *, default_var: str
-) -> tuple[str, str]:
+) -> tuple[str, str, tuple[int, int]]:
+    """Returns (rel_type, rel_var, (min_hops, max_hops))."""
     detail = rel_pat.oC_RelationshipDetail()
     if detail is None:
-        raise CoreError("Relationship detail with a single type is required in v0 subset", code="UNSUPPORTED")
-    if detail.oC_RangeLiteral() is not None:
-        raise CoreError("Relationship ranges not supported in v0", code="UNSUPPORTED")
+        raise CoreError(
+            "Relationship detail with a single type is required in v0 subset",
+            code="UNSUPPORTED",
+        )
+
+    min_hops, max_hops = 1, 1
+    range_ctx = detail.oC_RangeLiteral()
+    if range_ctx is not None:
+        min_hops, max_hops = _parse_range_literal(range_ctx)
 
     rel_var = (detail.oC_Variable().getText() if detail.oC_Variable() is not None else default_var).strip()
     types_ctx = detail.oC_RelationshipTypes()
@@ -1610,11 +2282,76 @@ def _extract_relationship_type_and_var(
         raise CoreError("Relationship type is required in v0 subset", code="UNSUPPORTED")
     types = types_ctx.oC_RelTypeName()
     if not types or len(types) != 1:
-        raise CoreError("Exactly one relationship type is required in v0 subset", code="UNSUPPORTED")
+        raise CoreError(
+            "Exactly one relationship type is required in v0 subset",
+            code="UNSUPPORTED",
+        )
     rel_type = types[0].getText().strip()
     if not rel_type or not rel_var:
         raise CoreError("Invalid relationship pattern", code="UNSUPPORTED")
-    return rel_type, rel_var
+    return rel_type, rel_var, (min_hops, max_hops)
+
+
+_MAX_VLP_DEPTH = 10
+
+
+def _parse_range_literal(
+    range_ctx: CypherParser.OC_RangeLiteralContext,
+) -> tuple[int, int]:
+    """Parse ``*``, ``*2``, ``*1..3``, ``*..5`` etc. into (min, max)."""
+    ints = range_ctx.oC_IntegerLiteral() or []
+    has_dots = ".." in range_ctx.getText()
+
+    if not ints and not has_dots:
+        # bare ``*`` → 1..max
+        return 1, _MAX_VLP_DEPTH
+
+    if len(ints) == 1 and not has_dots:
+        # ``*3`` → exactly 3 hops
+        n = int(ints[0].getText())
+        return n, n
+
+    if len(ints) == 2 and has_dots:
+        lo = int(ints[0].getText())
+        hi = int(ints[1].getText())
+        if lo > hi:
+            raise CoreError(
+                f"Invalid range: min ({lo}) > max ({hi})",
+                code="UNSUPPORTED",
+            )
+        return lo, hi
+
+    if len(ints) == 1 and has_dots:
+        raw = range_ctx.getText().strip()
+        n = int(ints[0].getText())
+        if raw.startswith("*") and ".." in raw:
+            before_dots = raw[1 : raw.index("..")]
+            if before_dots.strip().isdigit():
+                return n, _MAX_VLP_DEPTH
+            return 1, n
+        return n, _MAX_VLP_DEPTH
+
+    return 1, _MAX_VLP_DEPTH
+
+
+def _extract_interleaved_op(ctx: Any, term_index: int, valid_ops: set[str]) -> str:
+    """
+    In ANTLR's openCypher grammar, binary operators are interleaved between
+    sub-rule children and SP tokens.  Walk the raw children to find the
+    operator token that sits between term (term_index-1) and term (term_index).
+    """
+    term_count = 0
+    for i in range(ctx.getChildCount()):
+        child = ctx.getChild(i)
+        if hasattr(child, "getRuleIndex"):
+            term_count += 1
+            if term_count > term_index:
+                break
+            continue
+        t = child.getText().strip()
+        if t in valid_ops and term_count == term_index:
+            return t
+    return next(iter(valid_ops))
 
 
 def _aql_string_literal(value: str) -> str:
@@ -1633,6 +2370,51 @@ def _compile_type_of_relationship(rel_type: str, rel_var: str, rel_style: str | 
 
 def _compile_where(expr_ctx: CypherParser.OC_ExpressionContext, bind_vars: dict[str, Any]) -> str:
     return _compile_expression(expr_ctx, bind_vars)
+
+
+def _compile_case(
+    ctx: CypherParser.OC_CaseExpressionContext,
+    bind_vars: dict[str, Any],
+) -> str:
+    """Compile Cypher CASE expression to AQL.
+
+    AQL only supports the generic form (``CASE WHEN cond THEN val ... END``),
+    so the simple form (``CASE expr WHEN val THEN res ...``) is expanded by
+    comparing the test expression to each WHEN value with ``==``.
+    """
+    alternatives = ctx.oC_CaseAlternatives() or []
+    all_exprs = ctx.oC_Expression() or []
+    has_else = ctx.ELSE() is not None
+
+    # Direct oC_Expression children of the CASE node:
+    #   Generic form: 0 (no ELSE) or 1 (ELSE value)
+    #   Simple form:  1 (test, no ELSE) or 2 (test + ELSE value)
+    is_simple = len(all_exprs) > (1 if has_else else 0)
+
+    if is_simple:
+        test_expr = _compile_expression(all_exprs[0], bind_vars)
+        else_expr_idx = 1
+    else:
+        test_expr = None
+        else_expr_idx = 0
+
+    parts = ["CASE"]
+    for alt in alternatives:
+        alt_exprs = alt.oC_Expression()
+        when_e = _compile_expression(alt_exprs[0], bind_vars)
+        then_e = _compile_expression(alt_exprs[1], bind_vars)
+        if test_expr is not None:
+            parts.append(f"WHEN ({test_expr} == {when_e}) THEN {then_e}")
+        else:
+            parts.append(f"WHEN {when_e} THEN {then_e}")
+
+    has_else = ctx.ELSE() is not None
+    if has_else and else_expr_idx < len(all_exprs):
+        else_e = _compile_expression(all_exprs[else_expr_idx], bind_vars)
+        parts.append(f"ELSE {else_e}")
+
+    parts.append("END")
+    return " ".join(parts)
 
 
 def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
@@ -1684,31 +2466,45 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
         return f"({left} {aql_op} {right})"
 
     if isinstance(ctx, CypherParser.OC_AddOrSubtractExpressionContext):
-        # v0 subset doesn't use arithmetic; accept the first term only.
         terms = ctx.oC_MultiplyDivideModuloExpression()
-        if len(terms) != 1:
-            raise CoreError("Arithmetic not supported in v0", code="UNSUPPORTED")
-        return _compile_expression(terms[0], bind_vars)
+        result = _compile_expression(terms[0], bind_vars)
+        if len(terms) > 1:
+            for i in range(1, len(terms)):
+                op = _extract_interleaved_op(ctx, i, {"+", "-"})
+                right = _compile_expression(terms[i], bind_vars)
+                result = f"({result} {op} {right})"
+        return result
 
     if isinstance(ctx, CypherParser.OC_MultiplyDivideModuloExpressionContext):
         terms = ctx.oC_PowerOfExpression()
-        if len(terms) != 1:
-            raise CoreError("Arithmetic not supported in v0", code="UNSUPPORTED")
-        return _compile_expression(terms[0], bind_vars)
+        result = _compile_expression(terms[0], bind_vars)
+        if len(terms) > 1:
+            for i in range(1, len(terms)):
+                op = _extract_interleaved_op(ctx, i, {"*", "/", "%"})
+                right = _compile_expression(terms[i], bind_vars)
+                result = f"({result} {op} {right})"
+        return result
 
     if isinstance(ctx, CypherParser.OC_PowerOfExpressionContext):
         terms = ctx.oC_UnaryAddOrSubtractExpression()
-        if len(terms) != 1:
-            raise CoreError("Arithmetic not supported in v0", code="UNSUPPORTED")
-        return _compile_expression(terms[0], bind_vars)
+        result = _compile_expression(terms[0], bind_vars)
+        if len(terms) > 1:
+            for i in range(1, len(terms)):
+                right = _compile_expression(terms[i], bind_vars)
+                result = f"POW({result}, {right})"
+        return result
 
     if isinstance(ctx, CypherParser.OC_UnaryAddOrSubtractExpressionContext):
         inner = _compile_expression(ctx.oC_StringListNullOperatorExpression(), bind_vars)
-        # If a unary +/- is present, it will appear as a terminal child token.
+        has_minus = False
         for i in range(ctx.getChildCount()):
             t = ctx.getChild(i).getText()
-            if t in {"+", "-"}:
-                raise CoreError("Unary +/- not supported in v0", code="UNSUPPORTED")
+            if t == "-":
+                has_minus = not has_minus
+            elif t == "+":
+                pass
+        if has_minus:
+            return f"(-{inner})"
         return inner
 
     if isinstance(ctx, CypherParser.OC_StringListNullOperatorExpressionContext):
@@ -1738,7 +2534,20 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
 
         string_ops = ctx.oC_StringOperatorExpression()
         if string_ops:
-            raise CoreError("String operators not supported in v0", code="UNSUPPORTED")
+            if len(string_ops) != 1:
+                raise CoreError(
+                    "Chained string operators not supported in v0",
+                    code="UNSUPPORTED",
+                )
+            sop = string_ops[0]
+            rhs = _compile_expression(sop.oC_PropertyOrLabelsExpression(), bind_vars)
+            if sop.STARTS() is not None:
+                return f"STARTS_WITH({base}, {rhs})"
+            if sop.ENDS() is not None:
+                return f"(RIGHT({base}, LENGTH({rhs})) == {rhs})"
+            if sop.CONTAINS() is not None:
+                return f"CONTAINS({base}, {rhs})"
+            raise CoreError("Unknown string operator", code="UNSUPPORTED")
 
         return base
 
@@ -1762,6 +2571,8 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
             return ctx.oC_Variable().getText().strip()
         if ctx.oC_ParenthesizedExpression() is not None:
             return _compile_expression(ctx.oC_ParenthesizedExpression().oC_Expression(), bind_vars)
+        if ctx.oC_CaseExpression() is not None:
+            return _compile_case(ctx.oC_CaseExpression(), bind_vars)
         raise CoreError("Unsupported atom in v0", code="UNSUPPORTED")
 
     if isinstance(ctx, CypherParser.OC_LiteralContext):
@@ -1818,9 +2629,15 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
             # picking the first non-null value.
             return f"FIRST(REMOVE_VALUES([{', '.join(compiled_args)}], null))"
 
-        # extension functions are parsed as namespaces; we defer semantics to the registry later.
         if fn_norm.startswith("arango."):
-            raise CoreError("arango.* extensions not implemented in v0 translator yet", code="NOT_IMPLEMENTED")
+            registry = _active_registry.get()
+            if registry is None:
+                raise CoreError(
+                    f"arango.* extension '{fn}' requires a registry "
+                    f"(pass TranslateOptions(registry=...) to translate)",
+                    code="EXTENSIONS_DISABLED",
+                )
+            return registry.compile_function(fn_norm, compiled_args, bind_vars)
 
         raise CoreError(f"Unsupported function in v0: {fn}", code="UNSUPPORTED")
 

@@ -16,18 +16,24 @@ Repository = "https://github.com/ArthurKeen/arango-cypher-py"
 Issues = "https://github.com/ArthurKeen/arango-cypher-py/issues"
 
 [project.optional-dependencies]
+service = [
+  "fastapi>=0.100.0",
+  "uvicorn[standard]>=0.20.0",
+]
 dev = [
   "pytest>=8.0.0",
   "pytest-cov>=5.0.0",
   "ruff>=0.6.0",
   "antlr4-tools",
   "PyYAML>=6.0.0",
+  "httpx>=0.24.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 markers = [
-  "integration: requires a running ArangoDB (typically via docker compose)",
+  "integration: requires a running ArangoDB (see README); isolated profile tests use docker-compose.pytest.yml on port 28530",
   "tck: openCypher TCK harness and runners",
 ]
 

@@ -1,3 +1,7 @@
+> **Superseded:** This document is **historical context** only. The authoritative **product requirements, completeness strategy, and gap-closing roadmap** live in **[`python_prd.md`](./python_prd.md)** (see §2A and §10A). Prefer editing `python_prd.md` for planning changes.
+
+---
+
 I would like to create a python implementation of the arango-cypher project (~/code/arango-cypher) that takes advantage of python's capabilities and the large number of python libraries.  would you think very carefully about this and come up with a plan for implementing the fuctionality in python.  obviously it would not be installed on the coordinator like foxx based arango-cypher.  should it be a new project?  how should we name it?  should we also rename this project.  since it is going to be in python could it optionally support agentic workflow?  for schema detection, I would like you to use arango-schema-mapper which is at ~/code/arango-schema-mapper.  This will return a conceptual schema mapped to the physical schema and it will be in the owl ttl format.  this can be used when the algorithmic detection does not match PG or LPG and it will tell you which parts of the graph follow which physical patterns - the cypher to AQL transpiler will need to accomopdate hybrid structured physical arango models.  SHould it have it's own UI for running cypher
 
 Recommendation: make this a new Python project (don’t rename arango-cypher yet)

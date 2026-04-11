@@ -1,0 +1,57 @@
+version: 1
+cases:
+  - id: C214
+    name: Sole OPTIONAL MATCH node with WHERE (bare return)
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      OPTIONAL MATCH (n:User) WHERE n.id = "u1" RETURN n
+    expected:
+      aql: |-
+        LET _rows = (
+          FOR n IN @@collection
+            FILTER (n.id == "u1")
+            RETURN n
+        )
+        FOR _r IN (LENGTH(_rows) > 0 ? _rows : [null])
+          RETURN _r
+      bind_vars:
+        "@collection": users
+
+  - id: C215
+    name: Sole OPTIONAL MATCH node projected
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      OPTIONAL MATCH (n:User) RETURN n.name AS name
+    expected:
+      aql: |-
+        LET _rows = (
+          FOR n IN @@collection
+            RETURN {name: n.name}
+        )
+        FOR _r IN (LENGTH(_rows) > 0 ? _rows : [{name: null}])
+          RETURN _r
+      bind_vars:
+        "@collection": users
+
+  - id: C216
+    name: Sole OPTIONAL MATCH relationship pattern projected
+    mapping_fixture: pg
+    extensions_enabled: false
+    cypher: |
+      OPTIONAL MATCH (u:User)-[r:FOLLOWS]->(v:User) RETURN u.name AS from_name, v.name AS to_name
+    expected:
+      aql: |-
+        LET _rows = (
+          FOR u IN @@uCollection
+            FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+              FILTER IS_SAME_COLLECTION(@vCollection, v)
+            RETURN {from_name: u.name, to_name: v.name}
+        )
+        FOR _r IN (LENGTH(_rows) > 0 ? _rows : [{from_name: null, to_name: null}])
+          RETURN _r
+      bind_vars:
+        "@uCollection": users
+        "@edgeCollection": follows
+        "vCollection": users
