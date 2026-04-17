@@ -931,8 +931,9 @@ Update this table as work packages are completed:
 | WP-16 | Datasets expansion | v0.3 | **Done** | 2026-04-13 |
 | WP-17 | NL-to-Cypher pipeline | v0.3 | **Done** | 2026-04-13 |
 | WP-18 | Index-aware transpilation | v0.3 | **Done** | 2026-04-13 |
-| WP-19 | Translation caching | v0.4 | **Done** | 2026-04-13 |
-| WP-20 | Filter pushdown into traversals | v0.4 | Not started | |
+| WP-19 | Arango Platform deployment enablement | v0.4 | Blocked (upstream) | WP body above. Awaiting `arangodb-schema-analyzer` PyPI publication. |
+| WP-20 | Filter pushdown into traversals | v0.4 | **Done** | 2026-04-15 (WS-F/G sprint — PRUNE for variable-length, conservative rules). |
+| WP-26 | Translation caching (LRU, 256 entries) | v0.4 | **Done** | 2026-04-13. Originally tracked as WP-19; renumbered 2026-04-17 when WP-19 was reassigned to Arango Platform deployment enablement (PRD §15). |
 | WP-21 | List + pattern comprehensions | v0.4 | **Done** | 2026-04-13 |
 | WP-22 | Results export (CSV/JSON) | v0.4 | **Done** | 2026-04-13 |
 | WP-23 | Agentic tools | v0.4 | **Done** | 2026-04-13 |

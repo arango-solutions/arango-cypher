@@ -9,6 +9,7 @@ Related repos:
 ### Changelog
 | Date | Changes |
 |------|---------|
+| 2026-04-17 | **Clarified product scope: service is the product, UI is debug/demo.** Added a "Product scope" key decision to the Executive summary, a primary-product goal in §2, a matching non-goal carving out multi-user workbench features, a scope banner at the head of §4.4 (Cypher Workbench UI), and a "What gets deployed" note in §15 stating the default platform deployment is headless. Triggered by the realization (post-WP-25 scoping) that undirected UI expansion would compete for engineering cycles against the conversion service + NL pipelines, which are the actual deliverable. The UI remains valuable for two things — debugging translations during development, and demoing the service to prospects — but is explicitly **not** a production multi-user workbench: no authn/authz, no multi-tenant isolation, no server-side persistence beyond what the service already stores, no collaboration. Any future "UI-included" deployment variant must be opt-in and separately versioned. |
 | 2026-04-17 | **Added §1.2.1 "SOTA techniques, current gaps, and hardening plan"** and scoped **WP-25 (NL→Cypher pipeline hardening)** into five sub-packages. Triggered by research notes in `docs/research/nl2cypher.md` and `docs/research/nl2cypher2aql_analysis.md`. The current `nl2cypher.py` implements the zero-shot baseline (logical-only prompt, ANTLR-based self-healing) — correct but minimal. SOTA has moved to: (1) dynamic few-shot retrieval from a curated NL→Cypher corpus, (2) pre-flight entity resolution for labels and property values, (3) execution-grounded validation via AQL `EXPLAIN` in the retry loop, (4) prompt caching on the schema prefix, (5) evaluation harness + regression gate. WP-25.1/.2/.3/.4 are parallelizable (disjoint modules, single merge point in `nl2cypher.py`); WP-25.5 runs after .1 and .2. Task decomposition / multi-agent orchestration and SLM fine-tuning are explicitly deferred (the `LLMProvider` protocol already accommodates a fine-tuned endpoint when the time comes). The §1.2 invariant — LLM sees only the conceptual schema — is preserved; few-shot examples are conceptual-Cypher and entity resolution only rewrites string literals. Multi-subagent prompts for parallel execution added as "Wave 4" in `docs/agent_prompts.md`. |
 | 2026-04-17 | **Naming resolved (§11).** Project name stabilized as `arango-cypher-py`, symmetric with the newly renamed Foxx sibling `arango-cypher-foxx`. The `-py` / `-foxx` suffixes are honest about what each package is (Python out-of-process distribution vs. Foxx in-database microservice) and leave the bare `arango-cypher` name free for a potential future umbrella/spec repo on the `arango-solutions` org. Distribution name in `pyproject.toml`, CLI command, `[project.urls]` (target: `arango-solutions/arango-cypher-py`), READMEs, PRD, and implementation plan all aligned. Python import package remains `arango_cypher` (unchanged — no import breakage). No PyPI migration needed (never published). GitHub org rename (`arango-solutions/arango-cypher` → `arango-solutions/arango-cypher-py`) is pending org-admin action; until that lands, the `pushurl` points at the current URL and GitHub auto-redirects will keep working. Local checkout directory `~/code/arango-cypher-py` unchanged. |
 | 2026-04-17 | **Added §15 "Packaging and deployment to the Arango Platform".** Confirmed via pypi.org 404 that `arangodb-schema-analyzer` (declared in the `[analyzer]` extra) is not published to any package index — the only real obstacle to packaging this repo for ServiceMaker. Decision: **fix it upstream by publishing the analyzer**, not by building packaging tooling in this repo. Rejected three alternatives (vendored wheels, git URL deps, monorepo vendoring) as "absorbing a cost that belongs upstream." Rejected a full packaging/deployment CLI in this repo (Typer `package`/`deploy`/`redeploy`/`teardown` subcommands) on scope, release-cadence, token-blast-radius, and deployment-volume grounds; any deployment CLI will live in a separate project or be contributed to ServiceMaker itself. What this repo now owns: a README section with the manual deploy path (three curl commands), a prerequisite checklist, and a CI smoke test that `uv sync` succeeds on the packaged tarball. Corresponding implementation plan entry: WP-19 in `docs/implementation_plan.md` shrunk accordingly. |
@@ -28,6 +29,7 @@ Related repos:
 Build a **Python-native Cypher → AQL transpiler** that runs **outside** ArangoDB (CLI/library/service), uses **`arangodb-schema-analyzer`** to produce a **conceptual schema + conceptual→physical mapping** (and optionally OWL Turtle), and can translate Cypher against **pure PG**, **pure LPG**, or **hybrid** physical ArangoDB models.
 
 Key decisions:
+- **Product scope.** The deliverable is the Cypher→AQL conversion service (§4.3) and the NL→Cypher→AQL / NL→AQL pipelines (§1.2, §1.3) that run inside it. The Cypher Workbench UI (§4.4) exists to **debug** the service (visualize translations, replay activity, inspect schema mappings) and to **demo** it to prospects. It is not a full-featured multi-user workbench and is **not deployed by default** alongside the service (see §15).
 - **New project**: the Foxx implementation (originally named `arango-cypher`, renamed 2026-04-17 to `arango-cypher-foxx`) remains stable; this is a separate Python project published as `arango-cypher-py`, the symmetric Python sibling (§11).
 - **Name**: repo `arango-cypher-py` (target GitHub location `arango-solutions/arango-cypher-py`; rename of the existing `arango-solutions/arango-cypher` repo is pending org-admin action), Python import package `arango_cypher`, distribution name `arango-cypher-py`, CLI command `arango-cypher-py`.
 - **Schema mapping**: depend on `arangodb-schema-analyzer` as a library and optionally consume/produce OWL Turtle via its tool contract.
@@ -313,6 +315,7 @@ As a complement to the two-stage pipeline (§1.2), the system also supports **di
 ## 2) Goals / non-goals
 
 ### Goals (v0.1–v0.3)
+- **Primary product**: a deployable conversion service (library + CLI + HTTP) with a deterministic Cypher→AQL transpiler and an LLM-driven NL→Cypher pipeline. The UI (§4.4) is a debug/demo surface, not a separately supported product.
 - **Translate** a defined subset of Cypher into **AQL + bind variables**.
 - **Execute** translated AQL against ArangoDB (optional convenience wrapper).
 - **Support PG, LPG, and hybrid** via `arangodb-schema-analyzer` mapping.
@@ -342,6 +345,7 @@ As a complement to the two-stage pipeline (§1.2), the system also supports **di
 - **Full** openCypher TCK compliance in v0.1 -- but TCK is a **progressive goal**: each new Cypher feature should be accompanied by a check of which TCK scenarios it unblocks (see §8.2 for the phased strategy).
 - Writing queries (CREATE/MERGE/DELETE/SET) in the first milestone, unless you explicitly want it. (Write support becomes a requirement in v0.2+ for TCK setup steps.)
 - Full query optimizer equivalent to a database planner (we'll have a small internal logical plan, but not a cost-based optimizer).
+- The Cypher Workbench UI (§4.4) is **not** a production multi-user workbench. Multi-user authn/authz, collaboration, server-side persistence, and multi-tenant isolation are explicitly out of scope — the UI targets single-operator debug/demo use (see §4.4 scope banner).
 
 ---
 
@@ -397,6 +401,8 @@ FastAPI service (`arango_cypher.service:app`) with endpoints:
 Run with: `uvicorn arango_cypher.service:app --host 0.0.0.0 --port 8000`
 
 ### 4.4 Cypher Workbench UI
+
+> **Scope note.** The Workbench UI is a **debug and demo surface** for the conversion service (§4.3), not the product. It is optimized for a single operator (developer, SE, or demo presenter) inspecting and replaying translations against one dataset at a time. Multi-user support, authentication/authorization, persistent server-side user state, collaboration, and multi-tenant isolation are explicitly **out of scope**. The UI is **not deployed by default** alongside the service (§15) — the default Arango Platform deployment is headless (library + CLI + HTTP endpoints). UI work should be scoped to features that directly improve the ability to debug the service or demonstrate its capabilities; any feature that would only be valuable in a multi-user workbench context belongs in a separate downstream product, not here.
 
 #### 4.4.1 Architecture
 SPA served by FastAPI. The browser does **not** connect to ArangoDB directly; all
@@ -1966,6 +1972,8 @@ Statistics are stored in `MappingBundle.metadata["statistics"]`:
 ## 15) Packaging and deployment to the Arango Platform
 
 This section covers how `arango-cypher-py` is packaged for, and deployed to, the Arango Platform's Container Manager (see `docs/arango_packaging_service/` for the upstream platform API and ServiceMaker tool).
+
+**What gets deployed.** The default platform deployment is **headless**: the library, CLI, and FastAPI HTTP endpoints in `arango_cypher.service` (§4.3). The Cypher Workbench UI (§4.4) is a debug/demo surface — it is **not** included in the default ServiceMaker tarball and is **not** exposed by the platform's Container Manager in standard deployments. Operators who want to run the UI against a deployed service do so locally (pointing their browser at a local dev server that proxies to the platform endpoint) or via a separate, explicitly-enabled packaging variant. Any future "UI-included" tarball must be opt-in, separately versioned, and carry the §4.4 scope disclaimer.
 
 ### 15.1 Design decision: fix the root cause upstream, don't build a toolchain here
 
