@@ -60,7 +60,7 @@ The v0 translator supports:
 ### Install
 
 ```bash
-git clone https://github.com/ArthurKeen/arango-cypher-py.git
+git clone https://github.com/arango-solutions/arango-cypher-py.git
 cd arango-cypher-py
 
 python -m venv .venv
@@ -265,7 +265,7 @@ The mapping layer supports three physical model styles:
 
 ## Related projects
 
-- [arango-cypher](https://github.com/ArthurKeen/arango-cypher) — Foxx/JS implementation (runs inside ArangoDB coordinators)
+- [arango-cypher-foxx](https://github.com/ArthurKeen/arango-cypher-foxx) — Foxx/JS implementation (runs inside ArangoDB coordinators)
 - [arangodb-schema-analyzer](https://github.com/ArthurKeen/arangodb-schema-analyzer) — schema detection and conceptual→physical mapping
 
 ## License

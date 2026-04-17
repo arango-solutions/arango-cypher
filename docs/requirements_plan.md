@@ -9,13 +9,11 @@ Why a new project
 Runtime model is fundamentally different: Foxx runs inside ArangoDB coordinators; Python will run externally (service/CLI/library).
 Dependency surface: Python can use rich parsing/LLM/data tooling without worrying about Foxx constraints.
 Migration path: keep arango-cypher stable while the Python stack matures; later you can decide whether to deprecate Foxx or keep both.
-Naming
-New project name: arango-cypher-py (clear, discoverable, and honest)
-PyPI package: arango-cypher is likely taken/ambiguous; use arango-cypher-py or arangocypher.
-Repo: arango-cypher-py or arangodb-cypher-transpiler.
-Do not rename this JS/Foxx repo right now. If later you make Python the primary implementation, then consider:
-Keep this as arango-cypher-foxx
-Make Python repo arango-cypher (only when you’re ready for a breaking ecosystem rename)
+Naming (resolved 2026-04-17)
+New project name: arango-cypher-py. The suffix is symmetric with the renamed Foxx repo (`arango-cypher-foxx`), honest about the package being a Python distribution, and leaves the bare `arango-cypher` name free on the `arango-solutions` org for a potential future umbrella/spec repo.
+PyPI package: arango-cypher-py.
+Repo: arango-solutions/arango-cypher-py (GitHub rename from `arango-solutions/arango-cypher` pending org-admin action; `pushurl` and URLs will be updated once it lands).
+The legacy JS/Foxx repo previously called `arango-cypher` was renamed to `arango-cypher-foxx` on GitHub on 2026-04-17.
 Core architectural goal (Python)
 Build a Python schema-aware Cypher→AQL transpiler that supports:
 PG (types-as-collections)

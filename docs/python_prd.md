@@ -3,12 +3,13 @@ Date: 2026-02-17
 Last updated: 2026-04-17  
 Workspace: `arango-cypher-py`  
 Related repos:
-- `~/code/arango-cypher` (Foxx/JS implementation)
+- `~/code/arango-cypher-foxx` (Foxx/JS implementation; renamed from `arango-cypher` on 2026-04-17 — see §11 naming resolution)
 - `~/code/arango-schema-mapper` (a.k.a. `arangodb-schema-analyzer`, schema detection + mapping)
 
 ### Changelog
 | Date | Changes |
 |------|---------|
+| 2026-04-17 | **Naming resolved (§11).** Project name stabilized as `arango-cypher-py`, symmetric with the newly renamed Foxx sibling `arango-cypher-foxx`. The `-py` / `-foxx` suffixes are honest about what each package is (Python out-of-process distribution vs. Foxx in-database microservice) and leave the bare `arango-cypher` name free for a potential future umbrella/spec repo on the `arango-solutions` org. Distribution name in `pyproject.toml`, CLI command, `[project.urls]` (target: `arango-solutions/arango-cypher-py`), READMEs, PRD, and implementation plan all aligned. Python import package remains `arango_cypher` (unchanged — no import breakage). No PyPI migration needed (never published). GitHub org rename (`arango-solutions/arango-cypher` → `arango-solutions/arango-cypher-py`) is pending org-admin action; until that lands, the `pushurl` points at the current URL and GitHub auto-redirects will keep working. Local checkout directory `~/code/arango-cypher-py` unchanged. |
 | 2026-04-17 | **Added §15 "Packaging and deployment to the Arango Platform".** Confirmed via pypi.org 404 that `arangodb-schema-analyzer` (declared in the `[analyzer]` extra) is not published to any package index — the only real obstacle to packaging this repo for ServiceMaker. Decision: **fix it upstream by publishing the analyzer**, not by building packaging tooling in this repo. Rejected three alternatives (vendored wheels, git URL deps, monorepo vendoring) as "absorbing a cost that belongs upstream." Rejected a full packaging/deployment CLI in this repo (Typer `package`/`deploy`/`redeploy`/`teardown` subcommands) on scope, release-cadence, token-blast-radius, and deployment-volume grounds; any deployment CLI will live in a separate project or be contributed to ServiceMaker itself. What this repo now owns: a README section with the manual deploy path (three curl commands), a prerequisite checklist, and a CI smoke test that `uv sync` succeeds on the packaged tarball. Corresponding implementation plan entry: WP-19 in `docs/implementation_plan.md` shrunk accordingly. |
 | 2026-04-17 | **Neo4j cross-validation harness + translator correctness fixes.** Added a side-by-side harness that seeds the same fixture into Neo4j Community (via `docker-compose.neo4j.yml`) and ArangoDB, runs each Cypher query against both engines, and asserts row-for-row equivalence (column-count match, row-count match, positional compare for `ORDER BY` / multiset compare otherwise, with scalar normalization for int↔float). Shipped two suites: `tests/integration/test_movies_crossvalidate.py` (20/20 pass) and `tests/integration/test_northwind_crossvalidate.py` (14/14 pass), gated behind `RUN_INTEGRATION=1 RUN_CROSS=1`. Cross-module seed guard (`ensure_dataset` in `tests/integration/neo4j_reference.py`) lets both corpora share the single writable Neo4j Community instance. Closed three translator correctness bugs surfaced by the harness, each resolving a previously `divergence`-flagged Movies query: **(1) 3-valued logic on numeric ordered comparisons** — `_compile_expression` now emits `!= null` guards on both operands of `<`/`<=`/`>`/`>=` in `WHERE` so Cypher's NULL-as-false semantics survive translation (new `_is_obvious_non_null` helper skips the guard on literal operands). **(2) `ORDER BY` scope after implicit `COLLECT`** — `_append_return_aggregation` now maps each grouping expression to its `COLLECT` alias, so a Cypher `ORDER BY p.name` after `COLLECT name = p.name` is rewritten to `SORT name` instead of referencing the out-of-scope `p`. **(3) Cypher relationship-uniqueness rule** — `_translate_match_body` emits cross-group `FILTER r_i._id != r_j._id` for single-hop fixed-length non-embedded relationships in the same pattern, so `(p)-[:R]->(m)<-[:R]-(q)` correctly excludes `q == p`. 24 stale goldens resynced via a new `scripts/update_goldens.py` (surgical YAML rewrite that preserves block-literal formatting + bind-var style). Unit suite: **561 passing**. Cross-validation: **34 passing** (20 Movies + 14 Northwind) — zero divergences remaining. |
 | 2026-04-15 | **WS-F/G sprint.** Filter pushdown into traversals (PRUNE for variable-length, conservative rules). Relationship uniqueness enforcement (`r1._id != r2._id` for multi-relationship patterns). WITH pipeline from multiple MATCHes verified working + golden tests. rdflib OWL ingestion (`arango_query_core/owl_rdflib.py`, `[owl]` extra). ICIJ Paradise Papers dataset: mapping fixture, download/seed script, 5 query golden tests. Native `shortestPath()` deferred (needs Java for ANTLR regeneration). 494 tests pass. |
@@ -26,8 +27,8 @@ Related repos:
 Build a **Python-native Cypher → AQL transpiler** that runs **outside** ArangoDB (CLI/library/service), uses **`arangodb-schema-analyzer`** to produce a **conceptual schema + conceptual→physical mapping** (and optionally OWL Turtle), and can translate Cypher against **pure PG**, **pure LPG**, or **hybrid** physical ArangoDB models.
 
 Key decisions:
-- **New project**: keep Foxx `arango-cypher` stable; create a separate Python project.
-- **Name**: repo `arango-cypher-py`, Python import package `arango_cypher`, distributable name `arango-cypher-py` (or `arangodb-cypher-transpiler` if you want to avoid ambiguity).
+- **New project**: the Foxx implementation (originally named `arango-cypher`, renamed 2026-04-17 to `arango-cypher-foxx`) remains stable; this is a separate Python project published as `arango-cypher-py`, the symmetric Python sibling (§11).
+- **Name**: repo `arango-cypher-py` (target GitHub location `arango-solutions/arango-cypher-py`; rename of the existing `arango-solutions/arango-cypher` repo is pending org-admin action), Python import package `arango_cypher`, distribution name `arango-cypher-py`, CLI command `arango-cypher-py`.
 - **Schema mapping**: depend on `arangodb-schema-analyzer` as a library and optionally consume/produce OWL Turtle via its tool contract.
 - **NL → Cypher → AQL** (two-stage pipeline, §1.2): use an LLM to convert natural language to Cypher (passing the ontology/conceptual schema as prompt context, same pattern as LangChain's `GraphCypherQAChain`), then use the **deterministic** transpiler to convert Cypher to AQL. The LLM never sees collection names, type fields, or AQL. The transpiler never uses an LLM. This separation is a first-class architectural constraint.
 - **NL → AQL** (direct path, §1.3): optionally bypass the intermediate Cypher representation and have the LLM generate AQL directly. The LLM is given the full physical schema (collection names, edge collections, field names, type discriminators) so it can produce valid AQL. This is useful when the Cypher transpiler does not yet support a required construct, or when the user wants to leverage AQL-specific features.
@@ -1634,8 +1635,8 @@ Adding another dataset now takes three steps:
 | Cross-validation (Neo4j equivalence) | `RUN_INTEGRATION=1 RUN_CROSS=1 pytest -m cross` | Nightly or on-demand; requires `docker compose -f docker-compose.neo4j.yml up -d` |
 | TCK | `RUN_INTEGRATION=1 RUN_TCK=1 pytest -m tck` | Nightly or on-demand |
 
-### 8.4 Converting existing `arango-cypher` tests
-We'll treat the JS/Foxx test suite as **spec** and migrate in stages:
+### 8.4 Converting existing Foxx (`arango-cypher-foxx`) tests
+We'll treat the legacy JS/Foxx test suite as **spec** and migrate in stages:
 
 #### Step 1: Extract a corpus
 Create a `tests/fixtures/cypher_cases/` directory with files like:
@@ -1748,11 +1749,8 @@ Recommended:
 - **Python package**: `arango_cypher` (import-friendly)
 - **CLI**: `arango-cypher-py`
 
-### Should we rename the existing `arango-cypher`?
-Recommendation: **not yet**.
-- If Python becomes primary later:
-  - rename Foxx repo to `arango-cypher-foxx`
-  - optionally move Python to `arango-cypher`
+### Should we rename the existing `arango-cypher` (Foxx)?
+**Resolved (2026-04-17):** yes. The Foxx repo was renamed to `arango-cypher-foxx`, and this Python project stabilized as `arango-cypher-py`. The `-foxx` / `-py` suffixes mirror each other and truthfully describe what each package is (in-database Foxx microservice vs. out-of-process Python distribution). The bare `arango-cypher` name is intentionally kept free on the `arango-solutions` org for a potential future umbrella/spec repo that describes the Cypher→AQL concept and links to implementations. The GitHub rename of `arango-solutions/arango-cypher` → `arango-solutions/arango-cypher-py` is pending org-admin action; `[project.urls]` and git `pushurl` will be updated once the rename lands, and GitHub's automatic redirect keeps the current URL working in the meantime.
 
 ---
 

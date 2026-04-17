@@ -3,7 +3,7 @@
 ## Development setup
 
 ```bash
-git clone https://github.com/ArthurKeen/arango-cypher-py.git
+git clone https://github.com/arango-solutions/arango-cypher-py.git
 cd arango-cypher-py
 
 python -m venv .venv
