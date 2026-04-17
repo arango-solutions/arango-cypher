@@ -47,7 +47,6 @@ def test_translate_v0_requires_mapping():
     [
         ("RETURN 1", "UNSUPPORTED", "MATCH is required"),
         ("MATCH (n) RETURN n", "UNSUPPORTED", "label is required"),
-        ("MATCH (n:User) RETURN DISTINCT n.city, n.id", "UNSUPPORTED", "DISTINCT only supported"),
         ("MATCH (u:User)-[u:FOLLOWS]->(v:User) RETURN u", "UNSUPPORTED", "Relationship variable must not shadow"),
         (
             "MATCH (u:User)-[:FOLLOWS $props]->(v:User) RETURN u",

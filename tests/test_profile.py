@@ -40,11 +40,11 @@ def test_validate_syntax_ok_without_mapping():
 def test_validate_translate_failure_with_mapping():
     mapping = mapping_bundle_for("pg")
     r = validate_cypher_profile(
-        "MATCH (n:User) CREATE (m:User) RETURN n",
+        "MERGE (a:Person {name: 'x'}) MERGE (b:Person {name: 'y'})",
         mapping=mapping,
     )
     assert not r.ok
-    assert r.first_error_code == "UNSUPPORTED"
+    assert r.first_error_code == "NOT_IMPLEMENTED"
 
 
 def test_validate_ok_with_mapping():
