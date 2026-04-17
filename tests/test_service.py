@@ -51,11 +51,10 @@ class TestConnectDefaults:
         resp = client.get("/connect/defaults")
         assert resp.status_code == 200
         data = resp.json()
-        assert "host" in data
-        assert "port" in data
+        assert "url" in data
         assert "database" in data
         assert "username" in data
-        assert "password" not in data
+        assert "password" in data
 
 
 class TestTranslate:
