@@ -1,0 +1,40 @@
+# Reference Cypher engine (Neo4j Community) for cross-validating translated AQL.
+#
+# Bolt port 27687 (host) -> 7687 (container) to avoid clashes with a dev Neo4j.
+# HTTP port 27474 (host) -> 7474 (container) for the Browser / REST.
+#
+#   docker compose -f docker-compose.neo4j.yml -p arango_cypher_neo4j up -d
+#   docker compose -f docker-compose.neo4j.yml -p arango_cypher_neo4j down
+#
+# Auth: neo4j / openSesame  (override via NEO4J_AUTH env var).
+#
+services:
+  neo4j:
+    image: neo4j:5-community
+    environment:
+      - NEO4J_AUTH=neo4j/openSesame
+      - NEO4J_PLUGINS=[]
+      - NEO4J_server_memory_heap_initial__size=256m
+      - NEO4J_server_memory_heap_max__size=1G
+      - NEO4J_server_memory_pagecache_size=256m
+    ports:
+      - "27687:7687"
+      - "27474:7474"
+    volumes:
+      - neo4j_crossvalidate_data:/data
+      - neo4j_crossvalidate_logs:/logs
+    healthcheck:
+      # cypher-shell ships in the Neo4j image; use it against Bolt for a real readiness probe.
+      test:
+        [
+          "CMD-SHELL",
+          "cypher-shell -u neo4j -p openSesame 'RETURN 1' >/dev/null 2>&1",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 40
+      start_period: 10s
+
+volumes:
+  neo4j_crossvalidate_data:
+  neo4j_crossvalidate_logs:

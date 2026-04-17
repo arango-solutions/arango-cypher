@@ -46,10 +46,11 @@ def seed_social_dataset(db: Any, *, mode: str) -> None:
     Modes:
     - pg: users + follows (dedicated edge collection)
     - lpg: vertices + edges (generic, with type discriminator)
+    - naked_lpg: same data as lpg but intended for use with a mapping that has no VCI
     - hybrid: users + edges (generic, with type discriminator)
     """
     m = mode.strip().lower()
-    if m not in {"pg", "lpg", "hybrid"}:
+    if m not in {"pg", "lpg", "naked_lpg", "hybrid"}:
         raise ValueError(f"Unsupported seed mode: {mode}")
 
     if m == "pg":
@@ -108,7 +109,7 @@ def seed_social_dataset(db: Any, *, mode: str) -> None:
         )
         return
 
-    if m == "lpg":
+    if m in ("lpg", "naked_lpg"):
         vertices = _ensure_doc_collection(db, "vertices")
         edges = _ensure_edge_collection(db, "edges")
         _reset_collection(vertices)
