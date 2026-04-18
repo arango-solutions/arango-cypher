@@ -15,6 +15,7 @@ from .providers import (
 )
 
 if TYPE_CHECKING:
+    from .entity_resolution import EntityResolver
     from .fewshot import FewShotIndex
 
 logger = logging.getLogger(__name__)
@@ -371,6 +372,7 @@ def _call_llm_with_retry(
     max_retries: int = 2,
     ctx: "_SchemaCtx | None" = None,
     few_shot_examples: list[tuple[str, str]] | None = None,
+    resolved_entities: list[str] | None = None,
 ) -> NL2CypherResult | None:
     """Call the LLM provider with parse-based validation and retry.
 
@@ -387,6 +389,7 @@ def _call_llm_with_retry(
     builder = PromptBuilder(
         schema_summary=schema_summary,
         few_shot_examples=list(few_shot_examples) if few_shot_examples else [],
+        resolved_entities=list(resolved_entities) if resolved_entities else [],
     )
     best_cypher = ""
     best_content = ""
@@ -860,6 +863,9 @@ def nl_to_cypher(
     max_retries: int = 2,
     use_fewshot: bool = True,
     fewshot_index: "FewShotIndex | None" = None,
+    use_entity_resolution: bool = True,
+    entity_resolver: EntityResolver | None = None,
+    db: Any | None = None,
 ) -> NL2CypherResult:
     """Translate a natural language question to Cypher.
 
@@ -876,6 +882,18 @@ def nl_to_cypher(
             from the shipped corpora and inject them into the prompt.
         fewshot_index: Optional caller-supplied FewShotIndex to override
             the default one built from the shipped corpora.
+        use_entity_resolution: If True (default) and a ``db`` handle or
+            ``entity_resolver`` is provided, pre-resolve mentions in the
+            question against the database's string properties so the LLM
+            sees database-correct literals (e.g. ``"Forrest Gump"``
+            instead of the user's ``"Forest Gump"``).  When no DB and no
+            resolver are supplied the flag is a no-op and the prompt is
+            byte-identical to the pre-WP-25.2 baseline.
+        entity_resolver: Optional caller-supplied :class:`EntityResolver`.
+            Overrides ``db``-based auto-construction when provided.
+        db: Optional python-arango ``StandardDatabase``.  When supplied
+            (and ``use_entity_resolution=True``) an :class:`EntityResolver`
+            is constructed lazily against this connection.
     """
     if mapping is None:
         return NL2CypherResult(
@@ -908,9 +926,30 @@ def nl_to_cypher(
                     except Exception as exc:
                         logger.info("FewShotIndex.retrieve failed: %s", exc)
                         few_shot = []
+
+            resolved_lines: list[str] = []
+            if use_entity_resolution:
+                resolver = entity_resolver
+                if resolver is None and db is not None:
+                    try:
+                        from .entity_resolution import EntityResolver
+                        resolver = EntityResolver(db=db, mapping=bundle)
+                    except Exception as exc:
+                        logger.info("EntityResolver init failed: %s", exc)
+                        resolver = None
+                if resolver is not None:
+                    try:
+                        hits = resolver.resolve(question)
+                        if hits:
+                            resolved_lines = resolver.format_prompt_section(hits)
+                    except Exception as exc:
+                        logger.info("EntityResolver.resolve failed: %s", exc)
+                        resolved_lines = []
+
             result = _call_llm_with_retry(
                 question, schema_summary, provider, max_retries=max_retries,
                 ctx=ctx, few_shot_examples=few_shot,
+                resolved_entities=resolved_lines,
             )
             if result and result.cypher:
                 return result

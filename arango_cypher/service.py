@@ -806,18 +806,39 @@ class NL2CypherRequest(BaseModel):
     question: str
     mapping: dict[str, Any] | None = None
     use_llm: bool = True
+    use_fewshot: bool = True
+    use_entity_resolution: bool = True
+    session_token: str | None = None
 
 
 @app.post("/nl2cypher")
 def nl2cypher_endpoint(req: NL2CypherRequest, _: None = Depends(_check_nl_rate_limit)):
-    """Translate a natural language question into Cypher."""
+    """Translate a natural language question into Cypher.
+
+    When ``session_token`` is supplied and entity resolution is enabled,
+    the session's live ``StandardDatabase`` is passed through to
+    :func:`nl_to_cypher` so mentions in the question can be rewritten to
+    their database-correct form (WP-25.2).  Without a token the resolver
+    is silently disabled and the prompt falls back to its pre-WP-25.2
+    shape.
+    """
     from .nl2cypher import nl_to_cypher
+
+    db = None
+    if req.use_entity_resolution and req.session_token:
+        sess = _sessions.get(req.session_token)
+        if sess is not None:
+            db = sess.db
+            sess.touch()
 
     t0 = time.perf_counter()
     result = nl_to_cypher(
         req.question,
         mapping=req.mapping,
         use_llm=req.use_llm,
+        use_fewshot=req.use_fewshot,
+        use_entity_resolution=req.use_entity_resolution,
+        db=db,
     )
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
     return {

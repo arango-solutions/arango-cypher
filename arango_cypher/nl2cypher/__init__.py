@@ -46,6 +46,7 @@ from ._core import (
     nl_to_cypher,
     suggest_nl_queries,
 )
+from .entity_resolution import EntityResolver, ResolvedEntity
 from .fewshot import BM25Retriever, FewShotIndex, Retriever
 from .providers import (
     LLMProvider,
@@ -56,6 +57,7 @@ from .providers import (
 
 __all__ = [
     "BM25Retriever",
+    "EntityResolver",
     "FewShotIndex",
     "LLMProvider",
     "NL2AqlResult",
@@ -63,6 +65,7 @@ __all__ = [
     "OpenAIProvider",
     "OpenRouterProvider",
     "PromptBuilder",
+    "ResolvedEntity",
     "Retriever",
     "_SYSTEM_PROMPT",
     "_build_schema_summary",
