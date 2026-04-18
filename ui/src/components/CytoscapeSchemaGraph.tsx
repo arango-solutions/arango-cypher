@@ -637,7 +637,7 @@ export default function CytoscapeSchemaGraph({ mapping, onMappingChange }: Props
             "curve-style": "bezier",
             label: "data(label)",
             "font-size": "9px",
-            "font-weight": "600",
+            "font-weight": 600,
             color: "#c7d2fe",
             "text-background-color": "#0f172a",
             "text-background-opacity": 0.9,
