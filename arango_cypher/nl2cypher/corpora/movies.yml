@@ -1,0 +1,97 @@
+version: 1
+# Seed few-shot corpus for the movies/Neo4j-style schema.
+# Mined from tests/fixtures/datasets/movies/query-corpus.yml with light humanization.
+examples:
+  - question: "Find a person by name, for example Tom Hanks?"
+    cypher: 'MATCH (p:Person {name: "Tom Hanks"}) RETURN p.name, p.born'
+
+  - question: "Which movies has Tom Hanks acted in?"
+    cypher: 'MATCH (p:Person {name: "Tom Hanks"})-[:ACTED_IN]->(m:Movie) RETURN m.title ORDER BY m.title'
+
+  - question: "Who acted in The Matrix?"
+    cypher: 'MATCH (p:Person)-[:ACTED_IN]->(m:Movie {title: "The Matrix"}) RETURN p.name ORDER BY p.name'
+
+  - question: "Who directed The Matrix?"
+    cypher: 'MATCH (p:Person)-[:DIRECTED]->(m:Movie {title: "The Matrix"}) RETURN p.name'
+
+  - question: "Find co-actors of Tom Hanks via a shared movie?"
+    cypher: >
+      MATCH (p:Person {name: "Tom Hanks"})-[:ACTED_IN]->(m:Movie)<-[:ACTED_IN]-(coactor:Person)
+      RETURN DISTINCT coactor.name ORDER BY coactor.name
+
+  - question: "Top 5 directors by number of movies directed?"
+    cypher: >
+      MATCH (p:Person)-[:DIRECTED]->(m:Movie)
+      RETURN p.name, count(m) AS movie_count
+      ORDER BY movie_count DESC, p.name
+      LIMIT 5
+
+  - question: "Which movies were released in the 1990s?"
+    cypher: >
+      MATCH (m:Movie)
+      WHERE m.released >= 1990 AND m.released < 2000
+      RETURN m.title ORDER BY m.released, m.title
+
+  - question: "Find a person who both acted in and directed the same movie?"
+    cypher: >
+      MATCH (p:Person)-[:ACTED_IN]->(m:Movie)<-[:DIRECTED]-(p)
+      RETURN p.name, m.title ORDER BY p.name
+
+  - question: "Show 5 movies with a LIMIT?"
+    cypher: 'MATCH (m:Movie) RETURN m.title ORDER BY m.title LIMIT 5'
+
+  - question: "Find reviewers and their ratings?"
+    cypher: >
+      MATCH (p:Person)-[r:REVIEWED]->(m:Movie)
+      RETURN p.name, m.title, r.rating ORDER BY r.rating DESC
+
+  - question: "Who follows whom in the graph?"
+    cypher: >
+      MATCH (a:Person)-[:FOLLOWS]->(b:Person)
+      RETURN a.name, b.name ORDER BY a.name
+
+  - question: "Which movies were released after the year 2000?"
+    cypher: >
+      MATCH (m:Movie)
+      WHERE m.released > 2000
+      RETURN m.title, m.released ORDER BY m.released
+
+  - question: "Who produced which movie?"
+    cypher: >
+      MATCH (p:Person)-[:PRODUCED]->(m:Movie)
+      RETURN p.name, m.title ORDER BY p.name, m.title
+
+  - question: "Who wrote which movie?"
+    cypher: >
+      MATCH (p:Person)-[:WROTE]->(m:Movie)
+      RETURN p.name, m.title ORDER BY p.name, m.title
+
+  - question: "How many movies are there in total?"
+    cypher: 'MATCH (m:Movie) RETURN count(m) AS total'
+
+  - question: "Which actors were born before 1950?"
+    cypher: >
+      MATCH (p:Person)-[:ACTED_IN]->(m:Movie)
+      WHERE p.born < 1950
+      RETURN DISTINCT p.name, p.born ORDER BY p.born, p.name
+
+  - question: "Which movies did Keanu Reeves act in?"
+    cypher: 'MATCH (p:Person {name: "Keanu Reeves"})-[:ACTED_IN]->(m:Movie) RETURN m.title ORDER BY m.title'
+
+  - question: "Top 3 people with the most acted-in movies?"
+    cypher: >
+      MATCH (p:Person)-[:ACTED_IN]->(m:Movie)
+      RETURN p.name, count(m) AS cnt
+      ORDER BY cnt DESC, p.name
+      LIMIT 3
+
+  - question: "Find the movie titled Forrest Gump via a WHERE clause?"
+    cypher: >
+      MATCH (m:Movie)
+      WHERE m.title = "Forrest Gump"
+      RETURN m.title, m.released
+
+  - question: "List the actors and directors of Apollo 13 together?"
+    cypher: >
+      MATCH (actor:Person)-[:ACTED_IN]->(m:Movie {title: "Apollo 13"})<-[:DIRECTED]-(director:Person)
+      RETURN actor.name, director.name ORDER BY actor.name

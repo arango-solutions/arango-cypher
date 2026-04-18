@@ -1,36 +1,21 @@
-"""Natural Language to Cypher translation pipeline.
-
-Converts plain-English questions into Cypher queries using schema context
-from the MappingBundle. Supports pluggable LLM backends via the
-``LLMProvider`` protocol and includes a rule-based fallback for common
-patterns when no LLM is configured.
-
-Usage::
-
-    from arango_cypher.nl2cypher import nl_to_cypher
-
-    result = nl_to_cypher(
-        "Find all people who acted in The Matrix",
-        mapping=my_mapping_bundle,
-    )
-    print(result.cypher)
-
-    # With a custom provider:
-    from arango_cypher.nl2cypher import OpenAIProvider, nl_to_cypher
-    provider = OpenAIProvider(model="gpt-4o", api_key="sk-...")
-    result = nl_to_cypher("...", mapping=bundle, llm_provider=provider)
-"""
+"""NL→Cypher core pipeline: schema summarization, prompt building, rule-based fallback."""
 from __future__ import annotations
 
-import abc
-import json
 import logging
-import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any
 
 from arango_query_core.mapping import MappingBundle
+
+from .providers import (
+    LLMProvider,
+    _BaseChatProvider,
+    _get_default_provider,
+)
+
+if TYPE_CHECKING:
+    from .fewshot import FewShotIndex
 
 logger = logging.getLogger(__name__)
 
@@ -47,173 +32,6 @@ class NL2CypherResult:
     completion_tokens: int = 0
     total_tokens: int = 0
     retries: int = 0
-
-
-# ---------------------------------------------------------------------------
-# Pluggable LLM provider interface
-# ---------------------------------------------------------------------------
-
-@runtime_checkable
-class LLMProvider(Protocol):
-    """Protocol for LLM backends that generate text from a prompt.
-
-    ``generate`` accepts pre-rendered ``system`` and ``user`` strings and
-    returns ``(response_text, usage_dict)`` where *usage_dict* contains
-    ``prompt_tokens``, ``completion_tokens``, and ``total_tokens``.  The
-    caller is responsible for rendering the system prompt (see
-    :class:`PromptBuilder` for the NL→Cypher path); providers no longer
-    format schema context themselves, which keeps the §1.2 invariant
-    auditable at a single site and lets future waves extend the prompt
-    without touching every provider.
-    """
-
-    def generate(
-        self, system: str, user: str,
-    ) -> tuple[str, dict[str, int]]:
-        """Return ``(content, usage_dict)`` for the given system/user pair."""
-        ...
-
-
-class _BaseChatProvider:
-    """Shared HTTP-based chat completion logic for OpenAI-compatible APIs."""
-
-    def __init__(
-        self,
-        *,
-        api_key: str = "",
-        base_url: str = "https://api.openai.com/v1",
-        model: str = "gpt-4o-mini",
-        temperature: float = 0.1,
-        timeout: int = 30,
-        extra_headers: dict[str, str] | None = None,
-    ) -> None:
-        self.api_key = api_key
-        self.base_url = base_url
-        self.model = model
-        self.temperature = temperature
-        self.timeout = timeout
-        self._extra_headers = extra_headers or {}
-
-    def _chat(
-        self, system: str, user: str,
-    ) -> tuple[str, dict[str, int]]:
-        import requests
-
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            **self._extra_headers,
-        }
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
-        resp = requests.post(
-            f"{self.base_url}/chat/completions",
-            headers=headers,
-            json={
-                "model": self.model,
-                "messages": messages,
-                "temperature": self.temperature,
-            },
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        content = data["choices"][0]["message"]["content"]
-        usage = data.get("usage", {})
-        return content, {
-            "prompt_tokens": usage.get("prompt_tokens", 0),
-            "completion_tokens": usage.get("completion_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-        }
-
-
-class OpenAIProvider(_BaseChatProvider):
-    """OpenAI-compatible chat completion provider.
-
-    Reads configuration from constructor args or environment variables:
-      - ``api_key`` / ``OPENAI_API_KEY``
-      - ``base_url`` / ``OPENAI_BASE_URL``  (default: OpenAI)
-      - ``model``   / ``OPENAI_MODEL``      (default: gpt-4o-mini)
-    """
-
-    def __init__(
-        self,
-        *,
-        api_key: str | None = None,
-        base_url: str | None = None,
-        model: str | None = None,
-        temperature: float = 0.1,
-        timeout: int = 30,
-    ) -> None:
-        super().__init__(
-            api_key=api_key or os.environ.get("OPENAI_API_KEY", ""),
-            base_url=base_url or os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            model=model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-            temperature=temperature,
-            timeout=timeout,
-        )
-
-    def generate(self, system: str, user: str) -> tuple[str, dict[str, int]]:
-        return self._chat(system, user)
-
-
-class OpenRouterProvider(_BaseChatProvider):
-    """OpenRouter-compatible chat completion provider.
-
-    Reads configuration from constructor args or environment variables:
-      - ``api_key`` / ``OPENROUTER_API_KEY``
-      - ``model``   / ``OPENROUTER_MODEL``   (default: openai/gpt-4o-mini)
-    """
-
-    def __init__(
-        self,
-        *,
-        api_key: str | None = None,
-        model: str | None = None,
-        temperature: float = 0.1,
-        timeout: int = 30,
-    ) -> None:
-        super().__init__(
-            api_key=api_key or os.environ.get("OPENROUTER_API_KEY", ""),
-            base_url="https://openrouter.ai/api/v1",
-            model=model or os.environ.get("OPENROUTER_MODEL", "openai/gpt-4o-mini"),
-            temperature=temperature,
-            timeout=timeout,
-        )
-
-    def generate(self, system: str, user: str) -> tuple[str, dict[str, int]]:
-        return self._chat(system, user)
-
-
-def get_llm_provider() -> OpenAIProvider | OpenRouterProvider | None:
-    """Create an LLM provider from environment configuration.
-
-    Resolution order:
-    1. ``LLM_PROVIDER=openai``      → :class:`OpenAIProvider`
-    2. ``LLM_PROVIDER=openrouter``  → :class:`OpenRouterProvider`
-    3. Auto-detect: if ``OPENROUTER_API_KEY`` is set and ``OPENAI_API_KEY``
-       is not, use :class:`OpenRouterProvider`; otherwise
-       :class:`OpenAIProvider`.
-
-    Returns ``None`` when no API key is available.
-    """
-    explicit = os.environ.get("LLM_PROVIDER", "").lower().strip()
-    if explicit == "openrouter":
-        p = OpenRouterProvider()
-        return p if p.api_key else None
-    if explicit == "openai":
-        p = OpenAIProvider()
-        return p if p.api_key else None
-
-    has_openai = bool(os.environ.get("OPENAI_API_KEY", ""))
-    has_openrouter = bool(os.environ.get("OPENROUTER_API_KEY", ""))
-    if has_openrouter and not has_openai:
-        return OpenRouterProvider()
-    if has_openai:
-        return OpenAIProvider()
-    return None
 
 
 def _property_quality_hint(prop_meta: dict[str, Any] | None) -> str:
@@ -455,9 +273,6 @@ class PromptBuilder:
 
         extensions: list[str] = []
         if self.few_shot_examples:
-            # TODO(WP-25.1): fewshot plug-in point — retrieval wave will
-            # ship a ranker that populates ``few_shot_examples`` with
-            # (nl_question, cypher) pairs drawn from the query corpus.
             extensions.append(self._render_few_shot_section())
         if self.resolved_entities:
             # TODO(WP-25.2): entity-resolution plug-in point — ER wave
@@ -520,23 +335,6 @@ def _validate_cypher(cypher: str) -> tuple[bool, str]:
         return True, ""
     except Exception as exc:
         return False, str(exc)
-    upper = cypher.upper()
-    ok = any(kw in upper for kw in ("MATCH", "RETURN", "CREATE", "MERGE", "CALL"))
-    return ok, ("" if ok else "no recognizable Cypher clause found")
-
-
-_DEFAULT_PROVIDER: _BaseChatProvider | None = None
-_DEFAULT_PROVIDER_RESOLVED = False
-
-
-def _get_default_provider() -> _BaseChatProvider | None:
-    """Lazily create a default LLM provider via :func:`get_llm_provider`."""
-    global _DEFAULT_PROVIDER, _DEFAULT_PROVIDER_RESOLVED
-    if _DEFAULT_PROVIDER_RESOLVED:
-        return _DEFAULT_PROVIDER
-    _DEFAULT_PROVIDER = get_llm_provider()
-    _DEFAULT_PROVIDER_RESOLVED = True
-    return _DEFAULT_PROVIDER
 
 
 def _fix_labels(cypher: str, ctx: "_SchemaCtx") -> str:
@@ -546,20 +344,18 @@ def _fix_labels(cypher: str, ctx: "_SchemaCtx") -> str:
     same fuzzy matching the rule-based engine uses, plus role-synonym lookup.
     """
     def _replace_label(m: re.Match) -> str:
-        prefix = m.group(1)  # ":" or ":" preceded by "("
+        prefix = m.group(1)
         label = m.group(2)
         if label.lower() in ctx.entities:
             return prefix + ctx.entities[label.lower()]["name"]
         if label.lower() in {r["type"].lower() for r in ctx.relationships.values()}:
             return prefix + label
-        # Try role-synonym → relationship → fromEntity
         role = label.lower().rstrip("s")
         rel = ctx.role_to_rel.get(role)
         if rel:
             from_e = rel.get("fromEntity", "")
             if from_e and from_e != "Any":
                 return prefix + from_e
-        # Try fuzzy entity match
         ent = _match_entity(label, ctx.entities)
         if ent:
             return prefix + ent["name"]
@@ -574,6 +370,7 @@ def _call_llm_with_retry(
     provider: LLMProvider,
     max_retries: int = 2,
     ctx: "_SchemaCtx | None" = None,
+    few_shot_examples: list[tuple[str, str]] | None = None,
 ) -> NL2CypherResult | None:
     """Call the LLM provider with parse-based validation and retry.
 
@@ -587,7 +384,10 @@ def _call_llm_with_retry(
     attempts; only ``retry_context`` mutates between iterations so the
     (cacheable) system prefix stays byte-stable.
     """
-    builder = PromptBuilder(schema_summary=schema_summary)
+    builder = PromptBuilder(
+        schema_summary=schema_summary,
+        few_shot_examples=list(few_shot_examples) if few_shot_examples else [],
+    )
     best_cypher = ""
     best_content = ""
     total_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
@@ -694,7 +494,6 @@ def _build_schema_context(bundle: MappingBundle) -> "_SchemaCtx":
                 "properties": [],
             }
 
-    # Build role-noun → relationship mapping (actor→ACTED_IN, director→DIRECTED, etc.)
     _ROLE_SYNONYMS: dict[str, list[str]] = {
         "acted_in": ["actor", "actress", "cast", "star", "performer"],
         "directed": ["director"],
@@ -765,8 +564,6 @@ def _rule_based_translate(question: str, bundle: MappingBundle) -> NL2CypherResu
     q = question.lower().strip().rstrip("?").rstrip(".")
     wants_single = bool(re.search(r"\b(?:a\s+(?:random|single|sample)|one)\b", q))
 
-    # --- Pattern 1: "which/what ROLE verb prep FILTER" ---
-    # "which actors were in the Star Wars Movies"
     _VERB_PHRASES = (
         r"(?:were|was|are|is)\s+in"
         r"|act(?:ed)?\s+in|star(?:red)?\s+in|appear(?:ed)?\s+in"
@@ -783,7 +580,6 @@ def _rule_based_translate(question: str, bundle: MappingBundle) -> NL2CypherResu
     if m:
         role_word = m.group(1).rstrip("s")
         filter_text = _extract_filter_value(m.group(2)) if m.group(2).strip() else ""
-        # Find the verb phrase to determine the relationship
         verb_match = re.search(
             r"((?:were|was|are|is)\s+in|acted?\s*in|starred?\s*in|appeared?\s*in"
             r"|directed?|produced?|wrote?|written|reviewed?|followed?|known?)", q,
@@ -806,8 +602,6 @@ def _rule_based_translate(question: str, bundle: MappingBundle) -> NL2CypherResu
                     cypher=cypher, explanation=f"Find {from_e} via {rel['type']}", confidence=0.6, method="rule_based",
                 )
 
-    # --- Pattern 2: "which/what ENTITY did NAME verb in" (reverse direction) ---
-    # "what movies did Tom Hanks act in" / "which movies has Keanu Reeves directed"
     m = re.match(
         r"(?:which|what)\s+(\w+)\s+"
         r"(?:did|has|have|had|does|do)\s+"
@@ -840,8 +634,6 @@ def _rule_based_translate(question: str, bundle: MappingBundle) -> NL2CypherResu
                     cypher=cypher, explanation=f"Find {target_label} via {rel['type']}", confidence=0.6, method="rule_based",
                 )
 
-    # --- Pattern 3: "who VERB FILTER" ---
-    # "who directed The Matrix" / "who acted in Forrest Gump"
     m = re.match(r"who\s+(\w+)\s+(?:in\s+)?(.+)", q)
     if m:
         verb = m.group(1)
@@ -860,13 +652,11 @@ def _rule_based_translate(question: str, bundle: MappingBundle) -> NL2CypherResu
                     cypher=cypher, explanation=f"Find who {verb} {filter_text}", confidence=0.5, method="rule_based",
                 )
 
-    # --- Normalize for simpler patterns ---
     q = re.sub(
         r"^(?:(?:can\s+you\s+)?(?:please\s+)?(?:give\s+me|show\s+me|get\s+me|tell\s+me|i\s+(?:want|need))\s+)",
         "get ", q,
     )
 
-    # Extract explicit numeric limit: "get 5 people" / "get 2 random people"
     explicit_limit: int | None = None
     limit_m = re.match(r"^(\w+\s+)(\d+)\s+", q)
     if limit_m:
@@ -875,16 +665,13 @@ def _rule_based_translate(question: str, bundle: MappingBundle) -> NL2CypherResu
 
     q = re.sub(r"^(\w+\s+)(?:(?:a|an)\s+(?:random|single|sample)\s+|the\s+|an?\s+)", r"\1", q)
     q = re.sub(r"^(\w+\s+)(?:some|any)\s+", r"\1all ", q)
-    # Strip "random" / "sample" that may remain after number extraction
     q = re.sub(r"^(\w+\s+)(?:random|sample)\s+", r"\1", q)
 
-    # --- Pattern 4: "find/get/list X" (simple entity lookup) ---
     m = re.match(r"(?:find|list|show|get|return|fetch|display|retrieve|select|which|what)\s+(?:all\s+)?(\w+)s?\b(.*)", q)
     if m:
         entity_hint = m.group(1)
         rest = m.group(2).strip()
 
-        # Check if the entity hint is actually a role synonym
         role_word = entity_hint.rstrip("s")
         rel = role_to_rel.get(role_word)
         if rel:
@@ -927,7 +714,6 @@ def _rule_based_translate(question: str, bundle: MappingBundle) -> NL2CypherResu
                 confidence=0.6, method="rule_based",
             )
 
-    # --- Pattern 5: "how many X" / "count X" ---
     m = re.match(r"(?:how many|count)\s+(\w+)s?\b", q)
     if m:
         entity = _match_entity(m.group(1), entities)
@@ -938,7 +724,6 @@ def _rule_based_translate(question: str, bundle: MappingBundle) -> NL2CypherResu
                 confidence=0.7, method="rule_based",
             )
 
-    # --- Pattern 6: relationship type name appears in the question ---
     for rtype, rdef in relationships.items():
         if rtype.replace("_", " ") in q or rtype in q:
             from_e = rdef.get("fromEntity", "Any")
@@ -975,11 +760,9 @@ def _match_entity(hint: str, entities: dict[str, dict]) -> dict | None:
         key_stems = {key, key.rstrip("s"), key.rstrip("es"), re.sub(r"ies$", "y", key)}
         if stems & key_stems:
             return val
-    # Substring matching
     for key, val in entities.items():
         if hint in key or key in hint:
             return val
-    # Levenshtein-lite: check if stems share a common prefix of ≥3 chars
     for key, val in entities.items():
         key_base = re.sub(r"[aeiouy]+$", "", key)
         for s in stems:
@@ -1033,495 +816,39 @@ def _parse_simple_filter(text: str, var: str) -> str | None:
     return None
 
 
-@dataclass
-class NL2AqlResult:
-    """Result of a natural language to AQL direct translation."""
-    aql: str
-    bind_vars: dict[str, Any]
-    explanation: str = ""
-    confidence: float = 0.0
-    method: str = "llm"
-    schema_context: str = ""
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
+# ---------------------------------------------------------------------------
+# Default few-shot index (lazy, process-wide)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_FEWSHOT_INDEX: "FewShotIndex | None" = None
+_DEFAULT_FEWSHOT_RESOLVED = False
 
 
-_AQL_PROMPT_TEMPLATE = """You are an ArangoDB AQL query expert. Given a natural language question and a database schema, generate a valid AQL query.
+def _get_default_fewshot_index() -> "FewShotIndex | None":
+    """Lazily build the default FewShotIndex from the shipped corpora.
 
-{schema}
-
-## AQL Syntax Reference
-
-### Basic query structure
-```
-FOR doc IN collection
-  FILTER condition
-  SORT doc.field ASC|DESC
-  LIMIT [offset,] count
-  RETURN doc | {{ field1: doc.field1, ... }}
-```
-
-### Graph traversal (1-hop)
-```
-FOR vertex, edge IN 1..1 OUTBOUND|INBOUND|ANY startVertex edgeCollection
-  RETURN vertex
-```
-- OUTBOUND: follows _from -> _to direction (startVertex is _from)
-- INBOUND: reverse direction (startVertex is _to)
-- ANY: both directions
-- The startVertex must be a document or document _id
-
-### Graph traversal (multi-hop)
-```
-FOR vertex, edge, path IN min..max OUTBOUND|INBOUND|ANY startVertex edgeCollection
-  RETURN vertex
-```
-- path.vertices is array of vertices along the path
-- path.edges is array of edges along the path
-
-### Chaining traversals (multi-step patterns)
-```
-FOR a IN Collection1
-  FILTER a.prop == "value"
-  FOR b IN OUTBOUND a edgeCollection1
-    FOR c IN OUTBOUND b edgeCollection2
-      RETURN {{ a: a, b: b, c: c }}
-```
-
-### Aggregation with COLLECT
-```
-// Count with grouping
-FOR doc IN collection
-  FOR related IN OUTBOUND doc edgeCol
-    COLLECT key = doc.field WITH COUNT INTO count
-    RETURN {{ key, count }}
-
-// Aggregate functions
-FOR doc IN collection
-  COLLECT key = doc.field AGGREGATE total = SUM(doc.value), avg = AVG(doc.value), cnt = COUNT(doc)
-  RETURN {{ key, total, avg, cnt }}
-
-// Collect into array
-FOR a IN col1
-  FOR b IN OUTBOUND a edgeCol
-    COLLECT groupKey = a.field INTO items = b
-    RETURN {{ groupKey, items }}
-```
-
-### OPTIONAL MATCH equivalent (left join)
-```
-FOR d IN Collection
-  LET related = FIRST(FOR r IN OUTBOUND d edgeCol RETURN r)
-  RETURN {{ d, related }}  // related is null if no match
-```
-
-### Subqueries
-```
-FOR doc IN collection
-  LET count = LENGTH(FOR x IN OUTBOUND doc edgeCol RETURN 1)
-  RETURN {{ doc, connectionCount: count }}
-```
-
-### Type discriminator filtering
-When entities share a collection with a type discriminator field:
-```
-FOR doc IN sharedCollection
-  FILTER doc.typeField == "TypeValue"
-  RETURN doc
-```
-
-## Critical Rules
-1. Use EXACT collection names from the schema (case-sensitive)
-2. Use EXACT field names from the schema (case-sensitive)
-3. Do NOT use bind parameters (@@col or @param) — use literal names and values
-4. Use LOWER() for case-insensitive string comparisons: FILTER LOWER(doc.name) == LOWER("value")
-5. For CONTAINS matching: FILTER CONTAINS(LOWER(doc.field), LOWER("value"))
-6. System properties: _key, _id, _rev, _from, _to (edges also have _from, _to)
-7. _id format is "collectionName/key" (e.g., "Device/12345")
-8. When filtering by a related entity's property, traverse to that entity first
-9. Use DISTINCT to deduplicate: RETURN DISTINCT doc
-10. AQL uses == for equality (not =), != for inequality
-11. String concatenation: use CONCAT(), not +
-12. When counting, use COLLECT WITH COUNT INTO or COLLECT AGGREGATE cnt = COUNT(1)
-13. For "top N" queries: SORT field DESC LIMIT N
-14. Wrap the query in ```aql``` code block
-15. Return a single valid AQL query
-"""
-
-
-def _build_physical_schema_summary(bundle: MappingBundle) -> str:
-    """Build a physical-schema description for direct NL→AQL generation.
-
-    Unlike the conceptual-only summary used for NL→Cypher, this includes
-    collection names, edge collection names, type fields, physical
-    field names, and cardinality statistics so the LLM can generate
-    efficient AQL directly.
+    Returns ``None`` if ``rank_bm25`` is unavailable or the corpora cannot
+    be loaded. The caller is responsible for falling back to a zero-shot
+    prompt in that case.
     """
-    pm = bundle.physical_mapping
-    cs = bundle.conceptual_schema
-    stats = bundle.metadata.get("statistics", {})
-    entity_stats = stats.get("entities", {})
-    col_stats = stats.get("collections", {})
-    rel_stats = stats.get("relationships", {})
+    global _DEFAULT_FEWSHOT_INDEX, _DEFAULT_FEWSHOT_RESOLVED
+    if _DEFAULT_FEWSHOT_RESOLVED:
+        return _DEFAULT_FEWSHOT_INDEX
+    _DEFAULT_FEWSHOT_RESOLVED = True
+    try:
+        from pathlib import Path
 
-    lines: list[str] = ["Database schema (ArangoDB collections and edges):"]
-
-    flagged_entity_props: list[tuple[str, str, dict[str, Any]]] = []
-    if isinstance(pm.get("entities"), dict):
-        lines.append("\nDocument collections:")
-        for label, ent in pm["entities"].items():
-            if not isinstance(ent, dict):
-                continue
-            col = ent.get("collectionName", label)
-            style = ent.get("style", "COLLECTION")
-            props = ent.get("properties", {})
-            if isinstance(props, dict):
-                prop_entries = list(props.items())[:12]
-                formatted: list[str] = []
-                for pname, pmeta in prop_entries:
-                    hint = _property_quality_hint(pmeta if isinstance(pmeta, dict) else None)
-                    formatted.append(f"{pname}{hint}")
-                    if isinstance(pmeta, dict) and (
-                        pmeta.get("sentinelValues") or pmeta.get("numericLike")
-                    ):
-                        flagged_entity_props.append((label, pname, pmeta))
-                prop_str = ", ".join(formatted) if formatted else "no properties"
-            else:
-                prop_str = "no properties"
-
-            type_info = ""
-            if style in ("LABEL", "GENERIC_WITH_TYPE") and ent.get("typeField"):
-                type_info = f" [type discriminator: {ent['typeField']}={ent.get('typeValue', label)}]"
-
-            count_info = ""
-            est = entity_stats.get(label, {})
-            if isinstance(est, dict) and "estimated_count" in est:
-                count_info = f" — ~{est['estimated_count']:,} documents"
-
-            lines.append(f"  Collection '{col}' (entity: {label}){type_info}{count_info}")
-            lines.append(f"    Fields: {prop_str}")
-
-    if isinstance(pm.get("relationships"), dict):
-        lines.append("\nEdge collections:")
-        for rtype, rel in pm["relationships"].items():
-            if not isinstance(rel, dict):
-                continue
-            edge_col = rel.get("edgeCollectionName", rtype)
-            style = rel.get("style", "DEDICATED_COLLECTION")
-            domain = rel.get("domain", "?")
-            range_ = rel.get("range", "?")
-            props = rel.get("properties", {})
-            prop_names = list(props.keys())[:8] if isinstance(props, dict) else []
-            prop_str = ", ".join(prop_names) if prop_names else "no properties"
-
-            type_info = ""
-            if style == "GENERIC_WITH_TYPE" and rel.get("typeField"):
-                type_info = f" [type discriminator: {rel['typeField']}={rel.get('typeValue', rtype)}]"
-
-            domain_col = _resolve_collection_name(domain, pm) or domain
-            range_col = _resolve_collection_name(range_, pm) or range_
-
-            rs = rel_stats.get(rtype, {})
-            cardinality_info = ""
-            if isinstance(rs, dict) and rs.get("edge_count"):
-                parts = [f"~{rs['edge_count']:,} edges"]
-                if rs.get("avg_out_degree"):
-                    parts.append(f"avg fan-out: {rs['avg_out_degree']}/{domain}")
-                if rs.get("avg_in_degree"):
-                    parts.append(f"avg fan-in: {rs['avg_in_degree']}/{range_}")
-                if rs.get("cardinality_pattern"):
-                    parts.append(f"pattern: {rs['cardinality_pattern']}")
-                cardinality_info = "\n    Cardinality: " + ", ".join(parts)
-
-            lines.append(
-                f"  Edge collection '{edge_col}' (relationship: {rtype}){type_info}"
-            )
-            lines.append(f"    Connects: {domain}('{domain_col}') -> {range_}('{range_col}')")
-            if prop_str != "no properties":
-                lines.append(f"    Fields: {prop_str}")
-            if cardinality_info:
-                lines.append(cardinality_info)
-
-    cs_rels = cs.get("relationships", [])
-    if isinstance(cs_rels, list) and cs_rels:
-        lines.append("\nGraph topology (for traversal queries):")
-        for r in cs_rels:
-            if not isinstance(r, dict):
-                continue
-            rtype = r.get("type", "")
-            from_e = r.get("fromEntity", "?")
-            to_e = r.get("toEntity", "?")
-            edge_col = ""
-            if isinstance(pm.get("relationships"), dict):
-                pm_rel = pm["relationships"].get(rtype, {})
-                edge_col = pm_rel.get("edgeCollectionName", "") if isinstance(pm_rel, dict) else ""
-            if edge_col:
-                lines.append(f"  {from_e} --[{edge_col}]--> {to_e}")
-
-    if entity_stats or rel_stats:
-        lines.append("\nQuery optimization hints:")
-        lines.append("  - Start traversals from the SMALLER collection when filtering by a property.")
-        lines.append("  - For 1:N relationships, traverse OUTBOUND from the '1' side to avoid scanning the 'N' side.")
-        lines.append("  - For N:1 relationships, traverse INBOUND from the '1' side.")
-        lines.append("  - Use LIMIT early when only a few results are needed from large collections.")
-
-    if flagged_entity_props:
-        lines.append("\nData-quality hints:")
-        lines.append(
-            "  - Fields marked 'sentinels: ...' store a string placeholder for "
-            "missing values (e.g. literal 'NULL'). These are NOT real nulls; "
-            "exclude them in FILTER, e.g. "
-            "`FILTER t.COMPANY_SIZE != 'NULL' AND t.COMPANY_SIZE != null`."
-        )
-        lines.append(
-            "  - Fields marked 'numeric-like string' hold numbers stored as "
-            "strings. Cast before numeric comparison or ordering, e.g. "
-            "`SORT TO_NUMBER(t.COMPANY_SIZE) DESC`."
-        )
-        lines.append(
-            "  - For 'top-N by numeric X', combine both: filter sentinels, "
-            "then SORT TO_NUMBER(...) DESC LIMIT N."
-        )
-
-    return "\n".join(lines)
-
-
-def _resolve_collection_name(entity_label: str, pm: dict[str, Any]) -> str | None:
-    """Resolve an entity label to its physical collection name."""
-    if isinstance(pm.get("entities"), dict):
-        ent = pm["entities"].get(entity_label, {})
-        if isinstance(ent, dict):
-            return ent.get("collectionName", entity_label)
-    return None
-
-
-def _extract_aql_from_response(text: str) -> tuple[str, dict[str, Any]]:
-    """Extract AQL query from LLM response (handles code blocks).
-
-    Returns (aql, bind_vars). Bind vars are currently empty since we
-    ask the LLM to use literals.
-    """
-    m = re.search(r"```(?:aql)?\s*\n(.*?)```", text, re.DOTALL)
-    if m:
-        return m.group(1).strip(), {}
-    # Fallback: look for lines that look like AQL
-    lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
-    aql_lines = []
-    for line in lines:
-        upper = line.upper()
-        if any(kw in upper for kw in ("FOR", "RETURN", "FILTER", "LET", "SORT", "LIMIT", "COLLECT", "INSERT", "UPDATE", "REMOVE", "WITH")):
-            aql_lines.append(line)
-        elif aql_lines:
-            aql_lines.append(line)
-    return "\n".join(aql_lines) if aql_lines else text.strip(), {}
-
-
-def _validate_aql_syntax(
-    aql: str, *, known_collections: set[str] | None = None,
-) -> tuple[bool, str]:
-    """Structural AQL syntax check.
-
-    Returns ``(ok, error_message)``.  Checks performed:
-    1. At least one top-level AQL clause keyword present.
-    2. Balanced parentheses, brackets, and braces.
-    3. Every ``FOR`` is followed by a matching ``RETURN``, ``INSERT``,
-       ``UPDATE``, or ``REMOVE``.
-    4. Collection names referenced via ``FOR … IN <collection>`` or
-       ``INTO <collection>`` match *known_collections* when provided.
-    """
-    if not aql or not aql.strip():
-        return False, "empty AQL string"
-
-    upper = aql.upper()
-    has_clause = any(
-        kw in upper for kw in ("FOR", "RETURN", "INSERT", "UPDATE", "REMOVE", "LET")
-    )
-    if not has_clause:
-        return False, "no recognizable AQL clause keyword found"
-
-    for open_ch, close_ch, name in [("(", ")", "parentheses"), ("[", "]", "brackets"), ("{", "}", "braces")]:
-        depth = 0
-        for ch in aql:
-            if ch == open_ch:
-                depth += 1
-            elif ch == close_ch:
-                depth -= 1
-            if depth < 0:
-                return False, f"unbalanced {name}: unexpected closing '{close_ch}'"
-        if depth != 0:
-            return False, f"unbalanced {name}: {depth} unclosed '{open_ch}'"
-
-    for_count = len(re.findall(r"\bFOR\b", upper))
-    terminal_count = len(re.findall(r"\b(?:RETURN|INSERT|UPDATE|REMOVE)\b", upper))
-    if for_count > 0 and terminal_count == 0:
-        return False, "FOR clause without a corresponding RETURN/INSERT/UPDATE/REMOVE"
-
-    if known_collections:
-        mentioned = set()
-        for m in re.finditer(r"\bFOR\s+\w+\s+IN\s+(\w+)", aql):
-            mentioned.add(m.group(1))
-        for m in re.finditer(r"\bINTO\s+(\w+)", aql):
-            mentioned.add(m.group(1))
-        built_in = {"OUTBOUND", "INBOUND", "ANY", "GRAPH"}
-        bad = mentioned - known_collections - built_in
-        if bad:
-            return False, f"unknown collection(s): {', '.join(sorted(bad))}"
-
-    return True, ""
-
-
-def _call_llm_for_aql(
-    question: str,
-    schema_summary: str,
-    provider: LLMProvider,
-    max_retries: int = 2,
-    known_collections: set[str] | None = None,
-) -> NL2AqlResult | None:
-    """Call the LLM to generate AQL directly, with validation and retry.
-
-    NL→AQL uses the full physical schema and a distinct system prompt
-    (:data:`_AQL_PROMPT_TEMPLATE`), so it deliberately does not share
-    :class:`PromptBuilder` with the NL→Cypher path — mixing the two
-    would risk leaking physical details into the conceptual prompt
-    (see PRD §1.2). The system string is rendered once here and reused
-    across retry attempts; only the user message changes per attempt.
-    """
-    system = _AQL_PROMPT_TEMPLATE.format(schema=schema_summary)
-    last_error = ""
-    total_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    for attempt in range(1 + max_retries):
-        try:
-            user = question
-            if attempt > 0 and last_error:
-                user = (
-                    f"{question}\n\n"
-                    f"(Previous attempt produced invalid AQL: {last_error}. "
-                    f"Please fix and try again.)"
-                )
-
-            result = provider.generate(system, user)
-            if isinstance(result, tuple):
-                content, usage = result
-                for k in total_usage:
-                    total_usage[k] += usage.get(k, 0)
-            else:
-                content = result
-
-            aql, bind_vars = _extract_aql_from_response(content)
-
-            ok, err_msg = _validate_aql_syntax(
-                aql, known_collections=known_collections,
-            )
-            if ok:
-                return NL2AqlResult(
-                    aql=aql,
-                    bind_vars=bind_vars,
-                    explanation=content,
-                    confidence=0.8,
-                    method="llm_direct",
-                    schema_context=schema_summary,
-                    prompt_tokens=total_usage["prompt_tokens"],
-                    completion_tokens=total_usage["completion_tokens"],
-                    total_tokens=total_usage["total_tokens"],
-                )
-
-            last_error = err_msg or "generated text did not parse as AQL"
-            logger.info(
-                "LLM AQL attempt %d/%d: validation failed (%s) for: %s",
-                attempt + 1, 1 + max_retries, last_error, aql[:120],
-            )
-        except Exception as e:
-            logger.warning("LLM AQL call failed (attempt %d): %s", attempt + 1, e)
-            last_error = str(e)
-
-    return None
-
-
-def _collect_known_collections(bundle: MappingBundle) -> set[str]:
-    """Extract all physical collection names from the mapping for AQL validation."""
-    pm = bundle.physical_mapping
-    cols: set[str] = set()
-    if isinstance(pm.get("entities"), dict):
-        for ent in pm["entities"].values():
-            if isinstance(ent, dict) and ent.get("collectionName"):
-                cols.add(ent["collectionName"])
-    if isinstance(pm.get("relationships"), dict):
-        for rel in pm["relationships"].values():
-            if isinstance(rel, dict) and rel.get("edgeCollectionName"):
-                cols.add(rel["edgeCollectionName"])
-    return cols
-
-
-def nl_to_aql(
-    question: str,
-    *,
-    mapping: MappingBundle | dict[str, Any] | None = None,
-    llm_provider: LLMProvider | None = None,
-    max_retries: int = 2,
-) -> NL2AqlResult:
-    """Translate a natural language question directly to AQL.
-
-    Unlike :func:`nl_to_cypher`, this bypasses the intermediate Cypher
-    representation and generates AQL directly by providing the LLM with
-    the full physical schema (collection names, edge collections, field
-    names, type discriminators).
-
-    Requires an LLM — there is no rule-based fallback for direct AQL
-    generation.
-
-    Args:
-        question: Plain English question about the graph.
-        mapping: Schema mapping (MappingBundle or export dict).
-        llm_provider: A custom LLM provider. If None, uses OpenAI
-            provider from environment variables.
-        max_retries: Number of retry attempts if LLM output fails validation.
-    """
-    if mapping is None:
-        return NL2AqlResult(
-            aql="",
-            bind_vars={},
-            explanation="No schema mapping provided. Cannot generate AQL without knowing the database structure.",
-            confidence=0.0,
-        )
-
-    if isinstance(mapping, dict):
-        bundle = MappingBundle(
-            conceptual_schema=mapping.get("conceptualSchema") or mapping.get("conceptual_schema") or {},
-            physical_mapping=mapping.get("physicalMapping") or mapping.get("physical_mapping") or {},
-            metadata=mapping.get("metadata", {}),
-        )
-    else:
-        bundle = mapping
-
-    schema_summary = _build_physical_schema_summary(bundle)
-
-    base_provider = llm_provider or _get_default_provider()
-    if base_provider is None:
-        return NL2AqlResult(
-            aql="",
-            bind_vars={},
-            explanation="No LLM provider configured. Direct NL→AQL requires an LLM. Set OPENAI_API_KEY in .env.",
-            confidence=0.0,
-            method="none",
-        )
-
-    known_collections = _collect_known_collections(bundle)
-    result = _call_llm_for_aql(
-        question, schema_summary, base_provider,
-        max_retries=max_retries,
-        known_collections=known_collections,
-    )
-    if result and result.aql:
-        return result
-
-    return NL2AqlResult(
-        aql="",
-        bind_vars={},
-        explanation="LLM could not generate valid AQL. Try rephrasing the question.",
-        confidence=0.0,
-        method="llm_direct",
-    )
+        from .fewshot import FewShotIndex
+        corpora_dir = Path(__file__).parent / "corpora"
+        paths = sorted(corpora_dir.glob("*.yml"))
+        if not paths:
+            _DEFAULT_FEWSHOT_INDEX = None
+            return None
+        _DEFAULT_FEWSHOT_INDEX = FewShotIndex.from_corpus_files(paths)
+    except Exception as exc:
+        logger.info("FewShotIndex initialization failed: %s", exc)
+        _DEFAULT_FEWSHOT_INDEX = None
+    return _DEFAULT_FEWSHOT_INDEX
 
 
 def nl_to_cypher(
@@ -1531,6 +858,8 @@ def nl_to_cypher(
     use_llm: bool = True,
     llm_provider: LLMProvider | None = None,
     max_retries: int = 2,
+    use_fewshot: bool = True,
+    fewshot_index: "FewShotIndex | None" = None,
 ) -> NL2CypherResult:
     """Translate a natural language question to Cypher.
 
@@ -1543,6 +872,10 @@ def nl_to_cypher(
             provider configured via ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL`` /
             ``OPENAI_MODEL`` environment variables.
         max_retries: Number of retry attempts if LLM output fails validation.
+        use_fewshot: If True (default), retrieve top-K similar examples
+            from the shipped corpora and inject them into the prompt.
+        fewshot_index: Optional caller-supplied FewShotIndex to override
+            the default one built from the shipped corpora.
     """
     if mapping is None:
         return NL2CypherResult(
@@ -1566,9 +899,18 @@ def nl_to_cypher(
     if use_llm:
         provider = llm_provider or _get_default_provider()
         if provider is not None:
+            few_shot: list[tuple[str, str]] = []
+            if use_fewshot:
+                index = fewshot_index if fewshot_index is not None else _get_default_fewshot_index()
+                if index is not None:
+                    try:
+                        few_shot = index.retrieve(question, k=3)
+                    except Exception as exc:
+                        logger.info("FewShotIndex.retrieve failed: %s", exc)
+                        few_shot = []
             result = _call_llm_with_retry(
                 question, schema_summary, provider, max_retries=max_retries,
-                ctx=ctx,
+                ctx=ctx, few_shot_examples=few_shot,
             )
             if result and result.cypher:
                 return result
@@ -1611,7 +953,7 @@ def _llm_suggest_nl_queries(
     )
     try:
         content, _usage = provider._chat(system, user)
-    except Exception as exc:  # network / auth errors fall through to rule-based
+    except Exception as exc:
         logger.info("LLM suggest_nl_queries failed: %s", exc)
         return []
 

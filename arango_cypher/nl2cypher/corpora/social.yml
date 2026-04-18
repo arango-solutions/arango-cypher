@@ -1,0 +1,52 @@
+version: 1
+# Seed few-shot corpus for the social (users-follow-users) schema.
+# Mined from tests/fixtures/datasets/social/query-corpus.yml with light humanization.
+examples:
+  - question: "Find the user named Alice and show their age?"
+    cypher: 'MATCH (u:User {name: "Alice"}) RETURN u.name, u.age'
+
+  - question: "List all users ordered alphabetically by name?"
+    cypher: 'MATCH (u:User) RETURN u.name ORDER BY u.name'
+
+  - question: "Which users live in Boston?"
+    cypher: >
+      MATCH (u:User)
+      WHERE u.city = "Boston"
+      RETURN u.name ORDER BY u.name
+
+  - question: "Who does Alice follow?"
+    cypher: >
+      MATCH (a:User {name: "Alice"})-[:FOLLOWS]->(b:User)
+      RETURN b.name ORDER BY b.name
+
+  - question: "Show users older than 25, oldest first?"
+    cypher: >
+      MATCH (u:User)
+      WHERE u.age > 25
+      RETURN u.name, u.age ORDER BY u.age DESC
+
+  - question: "How many users live in each city?"
+    cypher: >
+      MATCH (u:User)
+      RETURN u.city, count(u) AS cnt
+      ORDER BY cnt DESC
+
+  - question: "Which users are currently active?"
+    cypher: >
+      MATCH (u:User)
+      WHERE u.active = true
+      RETURN u.name ORDER BY u.name
+
+  - question: "Which users have an email address on file?"
+    cypher: >
+      MATCH (u:User)
+      WHERE u.email IS NOT NULL
+      RETURN u.name, u.email ORDER BY u.name
+
+  - question: "Find two-hop follower chains (a follows b who follows c)?"
+    cypher: >
+      MATCH (a:User)-[:FOLLOWS]->(b:User)-[:FOLLOWS]->(c:User)
+      RETURN a.name, b.name, c.name
+
+  - question: "Show the first 3 users by name?"
+    cypher: 'MATCH (u:User) RETURN u.name ORDER BY u.name LIMIT 3'

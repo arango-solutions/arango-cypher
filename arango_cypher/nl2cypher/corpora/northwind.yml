@@ -1,0 +1,45 @@
+version: 1
+# Seed few-shot corpus for the Northwind e-commerce schema.
+# Mined from tests/fixtures/datasets/northwind/query-corpus.yml with light humanization.
+examples:
+  - question: "List all customers with their city and country?"
+    cypher: "MATCH (c:Customer) RETURN c.companyName, c.city, c.country"
+
+  - question: "Which customers are based in Germany?"
+    cypher: "MATCH (c:Customer) WHERE c.country = 'Germany' RETURN c.companyName, c.city"
+
+  - question: "Show products priced above $25, most expensive first?"
+    cypher: "MATCH (p:Product) WHERE p.unitPrice > 25 RETURN p.productName, p.unitPrice ORDER BY p.unitPrice DESC"
+
+  - question: "Which products have been discontinued?"
+    cypher: "MATCH (p:Product) WHERE p.discontinued = true RETURN p.productName"
+
+  - question: "Which orders did the customer Alfreds Futterkiste place?"
+    cypher: "MATCH (c:Customer)-[:PURCHASED]->(o:Order) WHERE c.companyName = 'Alfreds Futterkiste' RETURN o.orderDate, o.shipCity"
+
+  - question: "Which products are contained in order 10248?"
+    cypher: "MATCH (o:Order)-[:CONTAINS]->(p:Product) WHERE o._key = '10248' RETURN p.productName"
+
+  - question: "Show each product together with its category?"
+    cypher: "MATCH (p:Product)-[:BELONGS_TO]->(c:Category) RETURN p.productName, c.categoryName"
+
+  - question: "Show each product together with its supplier?"
+    cypher: "MATCH (p:Product)-[:SUPPLIED_BY]->(s:Supplier) RETURN p.productName, s.companyName"
+
+  - question: "Which employee handled which order?"
+    cypher: "MATCH (o:Order)-[:SOLD_BY]->(e:Employee) RETURN o._key, e.firstName, e.lastName"
+
+  - question: "Who reports to whom in the employee hierarchy?"
+    cypher: "MATCH (e:Employee)-[:REPORTS_TO]->(m:Employee) RETURN e.firstName, e.lastName, m.firstName AS managerFirst, m.lastName AS managerLast"
+
+  - question: "For each customer, which products did they end up buying?"
+    cypher: "MATCH (c:Customer)-[:PURCHASED]->(o:Order)-[:CONTAINS]->(p:Product) RETURN c.companyName, p.productName"
+
+  - question: "List all products in the Beverages category?"
+    cypher: "MATCH (p:Product)-[:BELONGS_TO]->(c:Category) WHERE c.categoryName = 'Beverages' RETURN p.productName, p.unitPrice"
+
+  - question: "Count the number of orders per customer, biggest buyers first?"
+    cypher: "MATCH (c:Customer)-[:PURCHASED]->(o:Order) RETURN c.companyName, count(o) AS orderCount ORDER BY orderCount DESC, c.companyName"
+
+  - question: "List every product with its supplier, including products that have no supplier?"
+    cypher: "MATCH (p:Product) OPTIONAL MATCH (p)-[:SUPPLIED_BY]->(s:Supplier) RETURN p.productName, s.companyName"

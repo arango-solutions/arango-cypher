@@ -1,0 +1,509 @@
+"""NL→AQL direct translation pipeline.
+
+Unlike NL→Cypher (which hides physical mapping from the LLM per §1.2),
+the direct NL→AQL path deliberately exposes collection names, edge
+collections, type discriminators, and cardinality statistics so the
+model can emit efficient AQL without going through Cypher.
+"""
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass
+from typing import Any
+
+from arango_query_core.mapping import MappingBundle
+
+from ._core import _property_quality_hint
+from .providers import LLMProvider, _get_default_provider
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class NL2AqlResult:
+    """Result of a natural language to AQL direct translation."""
+    aql: str
+    bind_vars: dict[str, Any]
+    explanation: str = ""
+    confidence: float = 0.0
+    method: str = "llm"
+    schema_context: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+
+_AQL_PROMPT_TEMPLATE = """You are an ArangoDB AQL query expert. Given a natural language question and a database schema, generate a valid AQL query.
+
+{schema}
+
+## AQL Syntax Reference
+
+### Basic query structure
+```
+FOR doc IN collection
+  FILTER condition
+  SORT doc.field ASC|DESC
+  LIMIT [offset,] count
+  RETURN doc | {{ field1: doc.field1, ... }}
+```
+
+### Graph traversal (1-hop)
+```
+FOR vertex, edge IN 1..1 OUTBOUND|INBOUND|ANY startVertex edgeCollection
+  RETURN vertex
+```
+- OUTBOUND: follows _from -> _to direction (startVertex is _from)
+- INBOUND: reverse direction (startVertex is _to)
+- ANY: both directions
+- The startVertex must be a document or document _id
+
+### Graph traversal (multi-hop)
+```
+FOR vertex, edge, path IN min..max OUTBOUND|INBOUND|ANY startVertex edgeCollection
+  RETURN vertex
+```
+- path.vertices is array of vertices along the path
+- path.edges is array of edges along the path
+
+### Chaining traversals (multi-step patterns)
+```
+FOR a IN Collection1
+  FILTER a.prop == "value"
+  FOR b IN OUTBOUND a edgeCollection1
+    FOR c IN OUTBOUND b edgeCollection2
+      RETURN {{ a: a, b: b, c: c }}
+```
+
+### Aggregation with COLLECT
+```
+// Count with grouping
+FOR doc IN collection
+  FOR related IN OUTBOUND doc edgeCol
+    COLLECT key = doc.field WITH COUNT INTO count
+    RETURN {{ key, count }}
+
+// Aggregate functions
+FOR doc IN collection
+  COLLECT key = doc.field AGGREGATE total = SUM(doc.value), avg = AVG(doc.value), cnt = COUNT(doc)
+  RETURN {{ key, total, avg, cnt }}
+
+// Collect into array
+FOR a IN col1
+  FOR b IN OUTBOUND a edgeCol
+    COLLECT groupKey = a.field INTO items = b
+    RETURN {{ groupKey, items }}
+```
+
+### OPTIONAL MATCH equivalent (left join)
+```
+FOR d IN Collection
+  LET related = FIRST(FOR r IN OUTBOUND d edgeCol RETURN r)
+  RETURN {{ d, related }}  // related is null if no match
+```
+
+### Subqueries
+```
+FOR doc IN collection
+  LET count = LENGTH(FOR x IN OUTBOUND doc edgeCol RETURN 1)
+  RETURN {{ doc, connectionCount: count }}
+```
+
+### Type discriminator filtering
+When entities share a collection with a type discriminator field:
+```
+FOR doc IN sharedCollection
+  FILTER doc.typeField == "TypeValue"
+  RETURN doc
+```
+
+## Critical Rules
+1. Use EXACT collection names from the schema (case-sensitive)
+2. Use EXACT field names from the schema (case-sensitive)
+3. Do NOT use bind parameters (@@col or @param) — use literal names and values
+4. Use LOWER() for case-insensitive string comparisons: FILTER LOWER(doc.name) == LOWER("value")
+5. For CONTAINS matching: FILTER CONTAINS(LOWER(doc.field), LOWER("value"))
+6. System properties: _key, _id, _rev, _from, _to (edges also have _from, _to)
+7. _id format is "collectionName/key" (e.g., "Device/12345")
+8. When filtering by a related entity's property, traverse to that entity first
+9. Use DISTINCT to deduplicate: RETURN DISTINCT doc
+10. AQL uses == for equality (not =), != for inequality
+11. String concatenation: use CONCAT(), not +
+12. When counting, use COLLECT WITH COUNT INTO or COLLECT AGGREGATE cnt = COUNT(1)
+13. For "top N" queries: SORT field DESC LIMIT N
+14. Wrap the query in ```aql``` code block
+15. Return a single valid AQL query
+"""
+
+
+def _build_physical_schema_summary(bundle: MappingBundle) -> str:
+    """Build a physical-schema description for direct NL→AQL generation.
+
+    Unlike the conceptual-only summary used for NL→Cypher, this includes
+    collection names, edge collection names, type fields, physical
+    field names, and cardinality statistics so the LLM can generate
+    efficient AQL directly.
+    """
+    pm = bundle.physical_mapping
+    cs = bundle.conceptual_schema
+    stats = bundle.metadata.get("statistics", {})
+    entity_stats = stats.get("entities", {})
+    rel_stats = stats.get("relationships", {})
+
+    lines: list[str] = ["Database schema (ArangoDB collections and edges):"]
+
+    flagged_entity_props: list[tuple[str, str, dict[str, Any]]] = []
+    if isinstance(pm.get("entities"), dict):
+        lines.append("\nDocument collections:")
+        for label, ent in pm["entities"].items():
+            if not isinstance(ent, dict):
+                continue
+            col = ent.get("collectionName", label)
+            style = ent.get("style", "COLLECTION")
+            props = ent.get("properties", {})
+            if isinstance(props, dict):
+                prop_entries = list(props.items())[:12]
+                formatted: list[str] = []
+                for pname, pmeta in prop_entries:
+                    hint = _property_quality_hint(pmeta if isinstance(pmeta, dict) else None)
+                    formatted.append(f"{pname}{hint}")
+                    if isinstance(pmeta, dict) and (
+                        pmeta.get("sentinelValues") or pmeta.get("numericLike")
+                    ):
+                        flagged_entity_props.append((label, pname, pmeta))
+                prop_str = ", ".join(formatted) if formatted else "no properties"
+            else:
+                prop_str = "no properties"
+
+            type_info = ""
+            if style in ("LABEL", "GENERIC_WITH_TYPE") and ent.get("typeField"):
+                type_info = f" [type discriminator: {ent['typeField']}={ent.get('typeValue', label)}]"
+
+            count_info = ""
+            est = entity_stats.get(label, {})
+            if isinstance(est, dict) and "estimated_count" in est:
+                count_info = f" — ~{est['estimated_count']:,} documents"
+
+            lines.append(f"  Collection '{col}' (entity: {label}){type_info}{count_info}")
+            lines.append(f"    Fields: {prop_str}")
+
+    if isinstance(pm.get("relationships"), dict):
+        lines.append("\nEdge collections:")
+        for rtype, rel in pm["relationships"].items():
+            if not isinstance(rel, dict):
+                continue
+            edge_col = rel.get("edgeCollectionName", rtype)
+            style = rel.get("style", "DEDICATED_COLLECTION")
+            domain = rel.get("domain", "?")
+            range_ = rel.get("range", "?")
+            props = rel.get("properties", {})
+            prop_names = list(props.keys())[:8] if isinstance(props, dict) else []
+            prop_str = ", ".join(prop_names) if prop_names else "no properties"
+
+            type_info = ""
+            if style == "GENERIC_WITH_TYPE" and rel.get("typeField"):
+                type_info = f" [type discriminator: {rel['typeField']}={rel.get('typeValue', rtype)}]"
+
+            domain_col = _resolve_collection_name(domain, pm) or domain
+            range_col = _resolve_collection_name(range_, pm) or range_
+
+            rs = rel_stats.get(rtype, {})
+            cardinality_info = ""
+            if isinstance(rs, dict) and rs.get("edge_count"):
+                parts = [f"~{rs['edge_count']:,} edges"]
+                if rs.get("avg_out_degree"):
+                    parts.append(f"avg fan-out: {rs['avg_out_degree']}/{domain}")
+                if rs.get("avg_in_degree"):
+                    parts.append(f"avg fan-in: {rs['avg_in_degree']}/{range_}")
+                if rs.get("cardinality_pattern"):
+                    parts.append(f"pattern: {rs['cardinality_pattern']}")
+                cardinality_info = "\n    Cardinality: " + ", ".join(parts)
+
+            lines.append(
+                f"  Edge collection '{edge_col}' (relationship: {rtype}){type_info}"
+            )
+            lines.append(f"    Connects: {domain}('{domain_col}') -> {range_}('{range_col}')")
+            if prop_str != "no properties":
+                lines.append(f"    Fields: {prop_str}")
+            if cardinality_info:
+                lines.append(cardinality_info)
+
+    cs_rels = cs.get("relationships", [])
+    if isinstance(cs_rels, list) and cs_rels:
+        lines.append("\nGraph topology (for traversal queries):")
+        for r in cs_rels:
+            if not isinstance(r, dict):
+                continue
+            rtype = r.get("type", "")
+            from_e = r.get("fromEntity", "?")
+            to_e = r.get("toEntity", "?")
+            edge_col = ""
+            if isinstance(pm.get("relationships"), dict):
+                pm_rel = pm["relationships"].get(rtype, {})
+                edge_col = pm_rel.get("edgeCollectionName", "") if isinstance(pm_rel, dict) else ""
+            if edge_col:
+                lines.append(f"  {from_e} --[{edge_col}]--> {to_e}")
+
+    if entity_stats or rel_stats:
+        lines.append("\nQuery optimization hints:")
+        lines.append("  - Start traversals from the SMALLER collection when filtering by a property.")
+        lines.append("  - For 1:N relationships, traverse OUTBOUND from the '1' side to avoid scanning the 'N' side.")
+        lines.append("  - For N:1 relationships, traverse INBOUND from the '1' side.")
+        lines.append("  - Use LIMIT early when only a few results are needed from large collections.")
+
+    if flagged_entity_props:
+        lines.append("\nData-quality hints:")
+        lines.append(
+            "  - Fields marked 'sentinels: ...' store a string placeholder for "
+            "missing values (e.g. literal 'NULL'). These are NOT real nulls; "
+            "exclude them in FILTER, e.g. "
+            "`FILTER t.COMPANY_SIZE != 'NULL' AND t.COMPANY_SIZE != null`."
+        )
+        lines.append(
+            "  - Fields marked 'numeric-like string' hold numbers stored as "
+            "strings. Cast before numeric comparison or ordering, e.g. "
+            "`SORT TO_NUMBER(t.COMPANY_SIZE) DESC`."
+        )
+        lines.append(
+            "  - For 'top-N by numeric X', combine both: filter sentinels, "
+            "then SORT TO_NUMBER(...) DESC LIMIT N."
+        )
+
+    return "\n".join(lines)
+
+
+def _resolve_collection_name(entity_label: str, pm: dict[str, Any]) -> str | None:
+    """Resolve an entity label to its physical collection name."""
+    if isinstance(pm.get("entities"), dict):
+        ent = pm["entities"].get(entity_label, {})
+        if isinstance(ent, dict):
+            return ent.get("collectionName", entity_label)
+    return None
+
+
+def _extract_aql_from_response(text: str) -> tuple[str, dict[str, Any]]:
+    """Extract AQL query from LLM response (handles code blocks).
+
+    Returns (aql, bind_vars). Bind vars are currently empty since we
+    ask the LLM to use literals.
+    """
+    m = re.search(r"```(?:aql)?\s*\n(.*?)```", text, re.DOTALL)
+    if m:
+        return m.group(1).strip(), {}
+    lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
+    aql_lines = []
+    for line in lines:
+        upper = line.upper()
+        if any(kw in upper for kw in ("FOR", "RETURN", "FILTER", "LET", "SORT", "LIMIT", "COLLECT", "INSERT", "UPDATE", "REMOVE", "WITH")):
+            aql_lines.append(line)
+        elif aql_lines:
+            aql_lines.append(line)
+    return "\n".join(aql_lines) if aql_lines else text.strip(), {}
+
+
+def _validate_aql_syntax(
+    aql: str, *, known_collections: set[str] | None = None,
+) -> tuple[bool, str]:
+    """Structural AQL syntax check.
+
+    Returns ``(ok, error_message)``.  Checks performed:
+    1. At least one top-level AQL clause keyword present.
+    2. Balanced parentheses, brackets, and braces.
+    3. Every ``FOR`` is followed by a matching ``RETURN``, ``INSERT``,
+       ``UPDATE``, or ``REMOVE``.
+    4. Collection names referenced via ``FOR … IN <collection>`` or
+       ``INTO <collection>`` match *known_collections* when provided.
+    """
+    if not aql or not aql.strip():
+        return False, "empty AQL string"
+
+    upper = aql.upper()
+    has_clause = any(
+        kw in upper for kw in ("FOR", "RETURN", "INSERT", "UPDATE", "REMOVE", "LET")
+    )
+    if not has_clause:
+        return False, "no recognizable AQL clause keyword found"
+
+    for open_ch, close_ch, name in [("(", ")", "parentheses"), ("[", "]", "brackets"), ("{", "}", "braces")]:
+        depth = 0
+        for ch in aql:
+            if ch == open_ch:
+                depth += 1
+            elif ch == close_ch:
+                depth -= 1
+            if depth < 0:
+                return False, f"unbalanced {name}: unexpected closing '{close_ch}'"
+        if depth != 0:
+            return False, f"unbalanced {name}: {depth} unclosed '{open_ch}'"
+
+    for_count = len(re.findall(r"\bFOR\b", upper))
+    terminal_count = len(re.findall(r"\b(?:RETURN|INSERT|UPDATE|REMOVE)\b", upper))
+    if for_count > 0 and terminal_count == 0:
+        return False, "FOR clause without a corresponding RETURN/INSERT/UPDATE/REMOVE"
+
+    if known_collections:
+        mentioned = set()
+        for m in re.finditer(r"\bFOR\s+\w+\s+IN\s+(\w+)", aql):
+            mentioned.add(m.group(1))
+        for m in re.finditer(r"\bINTO\s+(\w+)", aql):
+            mentioned.add(m.group(1))
+        built_in = {"OUTBOUND", "INBOUND", "ANY", "GRAPH"}
+        bad = mentioned - known_collections - built_in
+        if bad:
+            return False, f"unknown collection(s): {', '.join(sorted(bad))}"
+
+    return True, ""
+
+
+def _call_llm_for_aql(
+    question: str,
+    schema_summary: str,
+    provider: LLMProvider,
+    max_retries: int = 2,
+    known_collections: set[str] | None = None,
+) -> NL2AqlResult | None:
+    """Call the LLM to generate AQL directly, with validation and retry.
+
+    NL→AQL uses the full physical schema and a distinct system prompt
+    (:data:`_AQL_PROMPT_TEMPLATE`), so it deliberately does not share
+    :class:`PromptBuilder` with the NL→Cypher path — mixing the two
+    would risk leaking physical details into the conceptual prompt
+    (see PRD §1.2). The system string is rendered once here and reused
+    across retry attempts; only the user message changes per attempt.
+    """
+    system = _AQL_PROMPT_TEMPLATE.format(schema=schema_summary)
+    last_error = ""
+    total_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    for attempt in range(1 + max_retries):
+        try:
+            user = question
+            if attempt > 0 and last_error:
+                user = (
+                    f"{question}\n\n"
+                    f"(Previous attempt produced invalid AQL: {last_error}. "
+                    f"Please fix and try again.)"
+                )
+
+            result = provider.generate(system, user)
+            if isinstance(result, tuple):
+                content, usage = result
+                for k in total_usage:
+                    total_usage[k] += usage.get(k, 0)
+            else:
+                content = result
+
+            aql, bind_vars = _extract_aql_from_response(content)
+
+            ok, err_msg = _validate_aql_syntax(
+                aql, known_collections=known_collections,
+            )
+            if ok:
+                return NL2AqlResult(
+                    aql=aql,
+                    bind_vars=bind_vars,
+                    explanation=content,
+                    confidence=0.8,
+                    method="llm_direct",
+                    schema_context=schema_summary,
+                    prompt_tokens=total_usage["prompt_tokens"],
+                    completion_tokens=total_usage["completion_tokens"],
+                    total_tokens=total_usage["total_tokens"],
+                )
+
+            last_error = err_msg or "generated text did not parse as AQL"
+            logger.info(
+                "LLM AQL attempt %d/%d: validation failed (%s) for: %s",
+                attempt + 1, 1 + max_retries, last_error, aql[:120],
+            )
+        except Exception as e:
+            logger.warning("LLM AQL call failed (attempt %d): %s", attempt + 1, e)
+            last_error = str(e)
+
+    return None
+
+
+def _collect_known_collections(bundle: MappingBundle) -> set[str]:
+    """Extract all physical collection names from the mapping for AQL validation."""
+    pm = bundle.physical_mapping
+    cols: set[str] = set()
+    if isinstance(pm.get("entities"), dict):
+        for ent in pm["entities"].values():
+            if isinstance(ent, dict) and ent.get("collectionName"):
+                cols.add(ent["collectionName"])
+    if isinstance(pm.get("relationships"), dict):
+        for rel in pm["relationships"].values():
+            if isinstance(rel, dict) and rel.get("edgeCollectionName"):
+                cols.add(rel["edgeCollectionName"])
+    return cols
+
+
+def nl_to_aql(
+    question: str,
+    *,
+    mapping: MappingBundle | dict[str, Any] | None = None,
+    llm_provider: LLMProvider | None = None,
+    max_retries: int = 2,
+) -> NL2AqlResult:
+    """Translate a natural language question directly to AQL.
+
+    Unlike :func:`nl_to_cypher`, this bypasses the intermediate Cypher
+    representation and generates AQL directly by providing the LLM with
+    the full physical schema (collection names, edge collections, field
+    names, type discriminators).
+
+    Requires an LLM — there is no rule-based fallback for direct AQL
+    generation.
+
+    Args:
+        question: Plain English question about the graph.
+        mapping: Schema mapping (MappingBundle or export dict).
+        llm_provider: A custom LLM provider. If None, uses OpenAI
+            provider from environment variables.
+        max_retries: Number of retry attempts if LLM output fails validation.
+    """
+    if mapping is None:
+        return NL2AqlResult(
+            aql="",
+            bind_vars={},
+            explanation="No schema mapping provided. Cannot generate AQL without knowing the database structure.",
+            confidence=0.0,
+        )
+
+    if isinstance(mapping, dict):
+        bundle = MappingBundle(
+            conceptual_schema=mapping.get("conceptualSchema") or mapping.get("conceptual_schema") or {},
+            physical_mapping=mapping.get("physicalMapping") or mapping.get("physical_mapping") or {},
+            metadata=mapping.get("metadata", {}),
+        )
+    else:
+        bundle = mapping
+
+    schema_summary = _build_physical_schema_summary(bundle)
+
+    base_provider = llm_provider or _get_default_provider()
+    if base_provider is None:
+        return NL2AqlResult(
+            aql="",
+            bind_vars={},
+            explanation="No LLM provider configured. Direct NL→AQL requires an LLM. Set OPENAI_API_KEY in .env.",
+            confidence=0.0,
+            method="none",
+        )
+
+    known_collections = _collect_known_collections(bundle)
+    result = _call_llm_for_aql(
+        question, schema_summary, base_provider,
+        max_retries=max_retries,
+        known_collections=known_collections,
+    )
+    if result and result.aql:
+        return result
+
+    return NL2AqlResult(
+        aql="",
+        bind_vars={},
+        explanation="LLM could not generate valid AQL. Try rephrasing the question.",
+        confidence=0.0,
+        method="llm_direct",
+    )
