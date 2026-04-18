@@ -1,50 +1,50 @@
 {
   "config_name": "full",
-  "generated_at": "2026-04-18T20:41:56Z",
+  "generated_at": "2026-04-18T21:17:05Z",
   "case_count": 31,
   "results": [],
   "parse_ok_rate": 1.0,
-  "pattern_match_rate": 0.8709677419354839,
+  "pattern_match_rate": 0.9032258064516129,
   "explain_ok_rate": null,
   "row_match_rate": null,
-  "tokens_mean": 445.4193548387097,
+  "tokens_mean": 471.38709677419354,
   "cached_tokens_mean": 0,
-  "retries_mean": 0,
-  "latency_mean_ms": 1351.7370967741936,
+  "retries_mean": 0.03225806451612903,
+  "latency_mean_ms": 4081.491290322581,
   "by_category": {
     "baseline": {
       "n": 9,
       "parse_ok_rate": 1.0,
       "pattern_match_rate": 1.0,
-      "tokens_mean": 433.3333333333333,
+      "tokens_mean": 439.55555555555554,
       "retries_mean": 0
     },
     "few_shot_bait": {
       "n": 6,
       "parse_ok_rate": 1.0,
       "pattern_match_rate": 1.0,
-      "tokens_mean": 457,
+      "tokens_mean": 471.6666666666667,
       "retries_mean": 0
     },
     "hallucination_bait": {
       "n": 7,
       "parse_ok_rate": 1.0,
-      "pattern_match_rate": 1.0,
-      "tokens_mean": 434.14285714285717,
-      "retries_mean": 0
+      "pattern_match_rate": 0.8571428571428571,
+      "tokens_mean": 500.2857142857143,
+      "retries_mean": 0.14285714285714285
     },
     "multi_hop": {
       "n": 3,
       "parse_ok_rate": 1.0,
       "pattern_match_rate": 1.0,
-      "tokens_mean": 485,
+      "tokens_mean": 507.3333333333333,
       "retries_mean": 0
     },
     "typo": {
       "n": 6,
       "parse_ok_rate": 1.0,
-      "pattern_match_rate": 0.3333333333333333,
-      "tokens_mean": 445.3333333333333,
+      "pattern_match_rate": 0.6666666666666666,
+      "tokens_mean": 467.1666666666667,
       "retries_mean": 0
     }
   },

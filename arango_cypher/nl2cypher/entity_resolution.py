@@ -104,11 +104,34 @@ class EntityResolver:
         mapping: MappingBundle | None = None,
         max_candidates: int = 5,
         min_score: float = 0.5,
+        fuzzy_threshold: float = 0.7,
     ) -> None:
+        """Initialize a resolver.
+
+        Args:
+            db: A python-arango ``StandardDatabase`` (or compatible mock).
+                When ``None``, :meth:`resolve` returns ``[]``.
+            mapping: The :class:`~arango_query_core.mapping.MappingBundle`
+                for the dataset.  Required for any actual resolution.
+            max_candidates: Cap on candidate mentions per question.
+            min_score: Final-score floor — resolutions below this are
+                dropped.  Default 0.5 keeps low-confidence guesses out.
+            fuzzy_threshold: Minimum normalized similarity (1 −
+                edit-distance / max-length) at which the AQL
+                ``LEVENSHTEIN_DISTANCE`` branch contributes to the
+                final score.  0.7 ≈ "≤ 30 % of characters differ"; this
+                catches single-character typos in 4+ char names
+                ("Forest"/"Forrest") and 1–2 char drops in 7+ char
+                names ("Tom Hank"/"Tom Hanks") without lighting up on
+                wholly unrelated strings.  The fuzzy contribution is
+                also down-weighted by ``0.9`` so an exact (1.00) or
+                substring (0.85) hit always wins when both fire.
+        """
         self.db = db
         self.mapping = mapping
         self.max_candidates = max_candidates
         self.min_score = min_score
+        self.fuzzy_threshold = fuzzy_threshold
         self._cache: dict[tuple[int, str], list[ResolvedEntity]] = {}
         self._schema_labels: set[str] = self._collect_schema_labels(mapping)
         self._resolver: MappingResolver | None = (
@@ -367,12 +390,23 @@ class EntityResolver:
         ``typeField``/``typeValue`` discriminator) styles are handled
         without the caller needing to know which style is in play.
 
-        Uses AQL ``FILTER LOWER(d.<prop>) == LOWER(@m) OR CONTAINS(...)``
-        against the resolved collection.  An ArangoSearch view path is
-        not used yet — we keep the initial implementation pure-AQL to
-        avoid a hard dependency on view creation.  The resolver can be
-        upgraded to SEARCH/BM25 later without changing this public
-        contract.
+        Combines four scoring strategies in pure AQL:
+
+        * **exact** (1.00) — case-insensitive equality.
+        * **contains** (0.85) — DB value contains the mention as a substring.
+        * **reverse** (0.70) — mention contains the DB value as a substring.
+        * **fuzzy**   (≤ 0.90) — ``LEVENSHTEIN_DISTANCE`` normalized by
+          the longer of the two strings, gated by
+          :attr:`fuzzy_threshold` and down-weighted by ``0.9`` so an
+          exact / substring hit always wins when both fire.  This is
+          the path that catches typos like "Forest Gump" → "Forrest
+          Gump" against a live DB.
+
+        The final ``score`` is ``MAX(exact, contains, reverse, fuzzy)``.
+        We keep the initial implementation pure-AQL to avoid a hard
+        dependency on ArangoSearch view creation; the resolver can be
+        upgraded to SEARCH/BM25/NGRAM later without changing this
+        public contract.
         """
         if self._resolver is None or self.db is None:
             return None
@@ -406,7 +440,11 @@ class EntityResolver:
             f"  LET exact = lv == lm ? 1.0 : 0.0\n"
             f"  LET contains = CONTAINS(lv, lm) ? 0.85 : 0.0\n"
             f"  LET reverse = CONTAINS(lm, lv) ? 0.7 : 0.0\n"
-            f"  LET score = exact > 0 ? exact : (contains > reverse ? contains : reverse)\n"
+            f"  LET maxlen = LENGTH(lv) > LENGTH(lm) ? LENGTH(lv) : LENGTH(lm)\n"
+            f"  LET fuzzy_raw = maxlen > 0 "
+            f"? 1.0 - (LEVENSHTEIN_DISTANCE(lv, lm) * 1.0 / maxlen) : 0.0\n"
+            f"  LET fuzzy = fuzzy_raw >= @fuzzy_threshold ? fuzzy_raw * 0.9 : 0.0\n"
+            f"  LET score = MAX([exact, contains, reverse, fuzzy])\n"
             f"  FILTER score > 0\n"
             f"  SORT score DESC\n"
             f"  LIMIT 1\n"
@@ -416,6 +454,7 @@ class EntityResolver:
             "@c": collection,
             "field": field_name,
             "m": mention,
+            "fuzzy_threshold": self.fuzzy_threshold,
         }
         if type_field and type_value:
             bind_vars["type_field"] = type_field

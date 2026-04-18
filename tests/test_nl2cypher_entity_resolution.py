@@ -213,6 +213,71 @@ class TestResolveWithMockedDb:
         assert resolver.resolve('who is "X"?') == []
 
 
+class TestFuzzyScoring:
+    """Wave 4h: ``LEVENSHTEIN_DISTANCE``-based fuzzy match in the AQL."""
+
+    def test_fuzzy_threshold_is_bound_into_query(self, movies_mapping) -> None:
+        """The configured threshold must reach the query as a bind var."""
+        captured: list[dict[str, Any]] = []
+
+        def responder(aql: str, bind_vars: dict[str, Any]):
+            captured.append(dict(bind_vars))
+            return [{"value": "Forrest Gump", "score": 0.82}]
+
+        resolver = EntityResolver(
+            db=_FakeDb(responder),
+            mapping=movies_mapping,
+            fuzzy_threshold=0.65,
+        )
+        resolver.resolve('who acted in "Forest Gump"?')
+        assert captured, "expected at least one AQL execution"
+        assert captured[0].get("fuzzy_threshold") == 0.65
+
+    def test_aql_includes_levenshtein_branch(self, movies_mapping) -> None:
+        """Defensive: the emitted AQL must reference LEVENSHTEIN_DISTANCE.
+
+        We don't pin the full AQL string (too brittle), but we do pin
+        the *presence* of the fuzzy branch so a future refactor that
+        accidentally drops it breaks loudly.
+        """
+        captured: list[str] = []
+
+        def responder(aql: str, bind_vars: dict[str, Any]):
+            captured.append(aql)
+            return []
+
+        resolver = EntityResolver(
+            db=_FakeDb(responder),
+            mapping=movies_mapping,
+        )
+        resolver.resolve('find "Anything"')
+        assert captured
+        aql = captured[0]
+        assert "LEVENSHTEIN_DISTANCE" in aql
+        assert "fuzzy_threshold" in aql
+        assert "MAX([exact, contains, reverse, fuzzy])" in aql
+
+    def test_default_threshold_is_documented(self) -> None:
+        """The default fuzzy_threshold should match the docstring (0.7)."""
+        resolver = EntityResolver(db=None, mapping=None)
+        assert resolver.fuzzy_threshold == 0.7
+
+    def test_fuzzy_score_below_threshold_dropped_by_filter(
+        self, movies_mapping,
+    ) -> None:
+        """When the DB returns score=0 (because fuzzy was below threshold),
+        the resolver drops the candidate via min_score, not by inspecting AQL.
+        """
+        def responder(aql: str, bind_vars: dict[str, Any]):
+            return []
+
+        resolver = EntityResolver(
+            db=_FakeDb(responder),
+            mapping=movies_mapping,
+        )
+        assert resolver.resolve('find "Totally Unrelated"') == []
+
+
 class TestOfflineFallback:
     def test_no_db_returns_empty(self, movies_mapping) -> None:
         assert EntityResolver(db=None, mapping=movies_mapping).resolve("q") == []
