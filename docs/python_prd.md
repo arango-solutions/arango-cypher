@@ -259,7 +259,7 @@ WP-25.1 / .2 / .3 / .4 executed in parallel during the Wave-4 rollout (disjoint 
 
 - Refresh `tests/nl2cypher/eval/baseline.json` with a real-LLM report and turn the gate on in nightly CI (currently placeholder values, gate opt-in via `RUN_NL2CYPHER_EVAL=1`).
 - ~~Implement the Anthropic provider behind the existing `AnthropicProvider` stub and verify `cache_read_input_tokens` propagates through to `cached_tokens`.~~ Landed on `main` after WP-25 closure; the live cache hit is verified by the opt-in smoke test `tests/test_nl2cypher_caching.py::TestAnthropicLiveSmoke` (gated on `ANTHROPIC_API_KEY`).
-- Expand the eval corpus beyond the initial 13 cases across movies / northwind / social datasets.
+- ~~Expand the eval corpus beyond the initial 13 cases across movies / northwind / social datasets.~~ Grown to **31 cases** (movies_pg: 21, northwind_pg: 10) on 2026-04-18: 9 baseline, 6 few_shot_bait, 6 typo, 7 hallucination_bait, 3 multi_hop. Further growth (social variant + cross-mapping) is welcome but no longer blocking the gate's regression signal.
 
 **Non-goals of WP-25:**
 

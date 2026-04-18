@@ -115,3 +115,173 @@ cases:
     expected_patterns:
       - "(?is)Person.*REVIEWED.*Movie"
     category: hallucination_bait
+
+  # ---------------------------------------------------------------------
+  # baseline (additions) — northwind coverage + a few more movies lookups
+  # ---------------------------------------------------------------------
+  - id: eval_006
+    mapping_fixture: northwind_pg
+    question: "List all customers based in Germany"
+    expected_patterns:
+      - "(?is)Customer"
+      - "(?is)country.*=.*['\"]Germany['\"]"
+    category: baseline
+
+  - id: eval_007
+    mapping_fixture: northwind_pg
+    question: "Show products that have been discontinued"
+    expected_patterns:
+      - "(?is)Product"
+      - "(?is)discontinued.*(=|IS).*(true|TRUE)"
+    category: baseline
+
+  - id: eval_008
+    mapping_fixture: northwind_pg
+    question: "How many orders did each employee handle?"
+    expected_patterns:
+      - "(?is)Order.*SOLD_BY.*Employee|Employee.*SOLD_BY.*Order"
+      - "(?is)count\\("
+    category: baseline
+
+  - id: eval_009
+    mapping_fixture: movies_pg
+    question: "Find people born before 1950"
+    expected_patterns:
+      - "(?is)Person"
+      - "(?is)born.*<.*1950"
+    category: baseline
+
+  # ---------------------------------------------------------------------
+  # few_shot_bait (additions) — paraphrases of seed corpus examples
+  # ---------------------------------------------------------------------
+  - id: eval_013
+    mapping_fixture: northwind_pg
+    question: "What products are in the Beverages category?"
+    expected_patterns:
+      - "(?is)Product.*BELONGS_TO.*Category|Category.*BELONGS_TO.*Product"
+      - "(?is)categoryName.*=.*['\"]Beverages['\"]"
+    category: few_shot_bait
+
+  - id: eval_014
+    mapping_fixture: northwind_pg
+    question: "For each customer, list the products they ended up buying"
+    expected_patterns:
+      - "(?is)Customer.*PURCHASED.*Order"
+      - "(?is)Order.*CONTAINS.*Product"
+    category: few_shot_bait
+
+  - id: eval_015
+    mapping_fixture: movies_pg
+    question: "Top directors ranked by how many movies they've directed"
+    expected_patterns:
+      - "(?is)Person.*DIRECTED.*Movie|DIRECTED.*Movie"
+      - "(?is)count\\("
+      - "(?is)ORDER BY.*DESC"
+    category: few_shot_bait
+
+  # ---------------------------------------------------------------------
+  # typo (additions) — more property-value misspellings + collection-style
+  # ---------------------------------------------------------------------
+  - id: eval_022
+    mapping_fixture: movies_pg
+    question: "Who acted in the Matrx?"
+    expected_patterns:
+      - "(?is)The Matrix"
+      - "(?is)ACTED_IN"
+    category: typo
+
+  - id: eval_023
+    mapping_fixture: movies_pg
+    question: "Find movies directed by Lana Wachoski"
+    expected_patterns:
+      - "(?is)Lana Wachowski"
+      - "(?is)DIRECTED"
+    category: typo
+
+  - id: eval_024
+    mapping_fixture: northwind_pg
+    question: "Show customers from Germny"
+    expected_patterns:
+      - "(?is)Customer"
+      - "(?is)country.*=.*['\"]Germany['\"]"
+    category: typo
+
+  - id: eval_025
+    mapping_fixture: northwind_pg
+    question: "What did the customer Alfred Futerkist order?"
+    expected_patterns:
+      - "(?is)Alfreds Futterkiste"
+      - "(?is)PURCHASED.*Order|Customer.*Order"
+    category: typo
+
+  # ---------------------------------------------------------------------
+  # hallucination_bait (additions) — words that tempt invented labels/edges
+  # ---------------------------------------------------------------------
+  - id: eval_033
+    mapping_fixture: northwind_pg
+    question: "Which buyers are based in London?"
+    expected_patterns:
+      # Northwind has Customer (not Buyer); city='London' is the right filter
+      - "(?is)Customer"
+      - "(?is)city.*=.*['\"]London['\"]"
+    category: hallucination_bait
+
+  - id: eval_034
+    mapping_fixture: northwind_pg
+    question: "List vendors and the items they supply"
+    expected_patterns:
+      # Northwind has Supplier + Product, not Vendor + Item
+      - "(?is)Supplier"
+      - "(?is)Product"
+      - "(?is)SUPPLIED_BY"
+    category: hallucination_bait
+
+  - id: eval_035
+    mapping_fixture: movies_pg
+    question: "Which films feature Keanu Reeves?"
+    expected_patterns:
+      # Schema uses Movie, not Film
+      - "(?is)Movie"
+      - "(?is)Keanu Reeves"
+      - "(?is)ACTED_IN"
+    category: hallucination_bait
+
+  - id: eval_036
+    mapping_fixture: movies_pg
+    question: "Who are the screenwriters of The Matrix?"
+    expected_patterns:
+      # Schema uses WROTE (not WRITTEN_BY / SCREENPLAY_BY etc.)
+      - "(?is)Person.*WROTE.*Movie|WROTE.*Movie"
+      - "(?is)The Matrix"
+    category: hallucination_bait
+
+  # ---------------------------------------------------------------------
+  # multi_hop — questions that require >=2 traversals; stress few-shot retrieval
+  # ---------------------------------------------------------------------
+  - id: eval_040
+    mapping_fixture: movies_pg
+    question: "Find people who acted in a movie that was directed by Tom Hanks"
+    expected_patterns:
+      - "(?is)ACTED_IN"
+      - "(?is)DIRECTED"
+      - "(?is)Tom Hanks"
+    category: multi_hop
+
+  - id: eval_041
+    mapping_fixture: northwind_pg
+    question: "List the suppliers of the products Alfreds Futterkiste has bought"
+    expected_patterns:
+      - "(?is)Alfreds Futterkiste"
+      - "(?is)PURCHASED"
+      - "(?is)CONTAINS"
+      - "(?is)SUPPLIED_BY"
+    category: multi_hop
+
+  - id: eval_042
+    mapping_fixture: movies_pg
+    question: "Find directors whose movies were also reviewed by someone"
+    expected_patterns:
+      - "(?is)DIRECTED"
+      - "(?is)REVIEWED"
+    category: multi_hop
+
