@@ -338,6 +338,45 @@ def _validate_cypher(cypher: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def _validate_via_explain(
+    cypher: str,
+    *,
+    mapping: MappingBundle | None,
+    db: Any | None,
+) -> tuple[bool, str]:
+    """Execution-grounded validation via :func:`explain_aql` (WP-25.3).
+
+    Returns ``(True, "")`` in two cases: the validation step is skipped
+    (no *db* or *mapping*), or EXPLAIN succeeded.  When either the
+    Cypher→AQL transpile step or EXPLAIN itself fails, returns
+    ``(False, short_error_message)`` suitable for LLM feedback.
+
+    Translation errors are surfaced separately from EXPLAIN errors so
+    the LLM can tell whether it broke the Cypher shape (transpile) or
+    merely hallucinated a collection / property name (EXPLAIN).
+    """
+    if db is None or mapping is None:
+        return True, ""
+    try:
+        from arango_cypher.api import translate
+        from arango_query_core.exec import explain_aql
+    except Exception as exc:
+        logger.info("execution-grounded validation unavailable: %s", exc)
+        return True, ""
+    try:
+        tq = translate(cypher, mapping=mapping)
+    except Exception as exc:
+        msg = str(exc) or exc.__class__.__name__
+        msg = msg.splitlines()[0] if "\n" in msg else msg
+        return False, f"Cypher did not transpile to AQL: {msg[:300]}"
+    try:
+        ok, err = explain_aql(db, tq.aql, tq.bind_vars or {})
+    except Exception as exc:
+        logger.info("EXPLAIN step raised unexpectedly: %s", exc)
+        return True, ""
+    return ok, err
+
+
 def _fix_labels(cypher: str, ctx: "_SchemaCtx") -> str:
     """Rewrite Cypher labels that don't exist in the mapping to the closest match.
 
@@ -373,18 +412,27 @@ def _call_llm_with_retry(
     ctx: "_SchemaCtx | None" = None,
     few_shot_examples: list[tuple[str, str]] | None = None,
     resolved_entities: list[str] | None = None,
+    mapping: MappingBundle | None = None,
+    db: Any | None = None,
 ) -> NL2CypherResult | None:
-    """Call the LLM provider with parse-based validation and retry.
+    """Call the LLM provider with parse + execution-grounded validation and retry.
 
     After each LLM call the generated Cypher is parsed via the ANTLR
-    grammar.  If parsing fails, the specific parse error is fed back to
-    the LLM for up to ``max_retries`` additional attempts.  The result
-    includes a ``retries`` count so callers can observe how many rounds
-    were needed.
+    grammar.  On ANTLR failure the parse error is fed back.  On ANTLR
+    success, if both *mapping* and *db* are available (WP-25.3), the
+    Cypher is translated to AQL and planned via ``POST /_api/explain``;
+    EXPLAIN errors (missing collections, unknown properties, bad
+    traversals) feed back into the retry prompt the same way parse
+    errors do.  With no *db* the EXPLAIN step is skipped and the
+    behaviour is identical to the pre-WP-25.3 pipeline.
 
     The prompt is assembled by a :class:`PromptBuilder` shared across
     attempts; only ``retry_context`` mutates between iterations so the
     (cacheable) system prefix stays byte-stable.
+
+    The ``max_retries`` budget is shared across both failure kinds —
+    a query that fails ANTLR on attempt 1 and EXPLAIN on attempt 2 with
+    ``max_retries=2`` gets one more try before falling through.
     """
     builder = PromptBuilder(
         schema_summary=schema_summary,
@@ -418,17 +466,32 @@ def _call_llm_with_retry(
 
             ok, err_msg = _validate_cypher(cypher)
             if ok:
-                return NL2CypherResult(
-                    cypher=cypher,
-                    explanation=content,
-                    confidence=0.8,
-                    method="llm",
-                    schema_context=schema_summary,
-                    prompt_tokens=total_usage["prompt_tokens"],
-                    completion_tokens=total_usage["completion_tokens"],
-                    total_tokens=total_usage["total_tokens"],
-                    retries=attempt,
+                explain_ok, explain_err = _validate_via_explain(
+                    cypher, mapping=mapping, db=db,
                 )
+                if explain_ok:
+                    return NL2CypherResult(
+                        cypher=cypher,
+                        explanation=content,
+                        confidence=0.8,
+                        method="llm",
+                        schema_context=schema_summary,
+                        prompt_tokens=total_usage["prompt_tokens"],
+                        completion_tokens=total_usage["completion_tokens"],
+                        total_tokens=total_usage["total_tokens"],
+                        retries=attempt,
+                    )
+                best_cypher = cypher
+                best_content = content
+                builder.retry_context = (
+                    f"Translated AQL failed EXPLAIN: {explain_err}. "
+                    f"The Cypher was: {cypher}. Please revise your Cypher."
+                )
+                logger.info(
+                    "LLM attempt %d/%d: EXPLAIN failed: %s",
+                    attempt + 1, 1 + max_retries, explain_err[:120],
+                )
+                continue
 
             best_cypher = cypher
             best_content = content
@@ -950,6 +1013,7 @@ def nl_to_cypher(
                 question, schema_summary, provider, max_retries=max_retries,
                 ctx=ctx, few_shot_examples=few_shot,
                 resolved_entities=resolved_lines,
+                mapping=bundle, db=db,
             )
             if result and result.cypher:
                 return result
