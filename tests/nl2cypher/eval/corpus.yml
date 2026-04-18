@@ -1,0 +1,117 @@
+version: 1
+# Curated evaluation set for WP-25.5.  Kept intentionally small so a
+# baseline refresh is cheap; expand in follow-ups.  Each case declares
+# its category so the report can break down accuracy by category.
+cases:
+  # ---------------------------------------------------------------------
+  # baseline — simple lookups / one-hop traversals
+  # ---------------------------------------------------------------------
+  - id: eval_001
+    mapping_fixture: movies_pg
+    question: "Which movies did Tom Hanks act in?"
+    expected_patterns:
+      - "(?is)MATCH.*Person.*Tom Hanks.*ACTED_IN.*Movie"
+    category: baseline
+
+  - id: eval_002
+    mapping_fixture: movies_pg
+    question: "Who directed The Matrix?"
+    expected_patterns:
+      - "(?is)MATCH.*Person.*DIRECTED.*Movie.*The Matrix"
+    category: baseline
+
+  - id: eval_003
+    mapping_fixture: movies_pg
+    question: "Count how many movies each director made"
+    expected_patterns:
+      - "(?is)DIRECTED.*Movie"
+      - "(?is)count\\("
+    category: baseline
+
+  - id: eval_004
+    mapping_fixture: movies_pg
+    question: "List all movies released after 2000"
+    expected_patterns:
+      - "(?is)Movie"
+      - "(?is)released.*>.*2000|released.*>=.*2001"
+    category: baseline
+
+  - id: eval_005
+    mapping_fixture: movies_pg
+    question: "Find the 5 most recent movies"
+    expected_patterns:
+      - "(?is)Movie"
+      - "(?is)ORDER BY.*released.*DESC"
+      - "(?is)LIMIT.*5"
+    category: baseline
+
+  # ---------------------------------------------------------------------
+  # few_shot_bait — questions that mirror a seed corpus example closely
+  # ---------------------------------------------------------------------
+  - id: eval_010
+    mapping_fixture: movies_pg
+    question: "Find co-actors of Tom Hanks"
+    expected_patterns:
+      - "(?is)Tom Hanks"
+      - "(?is)ACTED_IN.*ACTED_IN"
+    category: few_shot_bait
+
+  - id: eval_011
+    mapping_fixture: movies_pg
+    question: "Show me all the roles Tom Hanks played"
+    expected_patterns:
+      - "(?is)Tom Hanks"
+      - "(?is)ACTED_IN"
+      - "(?is)roles"
+    category: few_shot_bait
+
+  - id: eval_012
+    mapping_fixture: movies_pg
+    question: "Which person both acted in and directed the same movie?"
+    expected_patterns:
+      - "(?is)ACTED_IN"
+      - "(?is)DIRECTED"
+    category: few_shot_bait
+
+  # ---------------------------------------------------------------------
+  # typo — property values misspelled in the NL question
+  # ---------------------------------------------------------------------
+  - id: eval_020
+    mapping_fixture: movies_pg
+    question: "Who acted in Forest Gump?"
+    expected_patterns:
+      - "(?is)Forrest Gump"
+    category: typo
+
+  - id: eval_021
+    mapping_fixture: movies_pg
+    question: "Find movies with Toms Hanks"
+    expected_patterns:
+      - "(?is)Tom Hanks"
+    category: typo
+
+  # ---------------------------------------------------------------------
+  # hallucination_bait — questions phrased to tempt label/collection invention
+  # ---------------------------------------------------------------------
+  - id: eval_030
+    mapping_fixture: movies_pg
+    question: "List all actors"
+    expected_patterns:
+      # Movies schema uses Person + ACTED_IN, not a dedicated Actor label
+      - "(?is)Person.*ACTED_IN|ACTED_IN.*Person"
+    category: hallucination_bait
+
+  - id: eval_031
+    mapping_fixture: movies_pg
+    question: "Count the cast of each film"
+    expected_patterns:
+      - "(?is)Person.*ACTED_IN.*Movie|Movie.*ACTED_IN.*Person"
+      - "(?is)count\\("
+    category: hallucination_bait
+
+  - id: eval_032
+    mapping_fixture: movies_pg
+    question: "Which reviewers rated movies?"
+    expected_patterns:
+      - "(?is)Person.*REVIEWED.*Movie"
+    category: hallucination_bait

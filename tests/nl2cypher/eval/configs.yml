@@ -1,0 +1,25 @@
+version: 1
+# Named configurations for the eval runner.  Each config toggles the
+# WP-25 features independently so we can measure the marginal lift of
+# each one.  The gate (tests/test_nl2cypher_eval_gate.py) runs against
+# `full` by default.
+configs:
+  - name: zero_shot
+    use_fewshot: false
+    use_entity_resolution: false
+    use_execution_grounded: false
+
+  - name: few_shot
+    use_fewshot: true
+    use_entity_resolution: false
+    use_execution_grounded: false
+
+  - name: few_shot_plus_entity
+    use_fewshot: true
+    use_entity_resolution: true
+    use_execution_grounded: false
+
+  - name: full
+    use_fewshot: true
+    use_entity_resolution: true
+    use_execution_grounded: true

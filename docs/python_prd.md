@@ -1,6 +1,6 @@
 # Arango Cypher (Python) — PRD + Implementation Plan
 Date: 2026-02-17  
-Last updated: 2026-04-17  
+Last updated: 2026-04-18  
 Workspace: `arango-cypher-py`  
 Related repos:
 - `~/code/arango-cypher-foxx` (Foxx/JS implementation; renamed from `arango-cypher` on 2026-04-17 — see §11 naming resolution)
@@ -9,6 +9,7 @@ Related repos:
 ### Changelog
 | Date | Changes |
 |------|---------|
+| 2026-04-18 | **WP-25 complete (NL→Cypher pipeline hardening).** All five sub-packages landed on `main`: WP-25.1 dynamic few-shot retrieval (BM25-backed `FewShotIndex` over shipped `movies/northwind/social` corpora), WP-25.2 pre-flight entity resolution (`EntityResolver` / `ResolvedEntity` with DB-path for both `COLLECTION` and `LABEL` mapping styles, plus a null-resolver fallback), WP-25.3 execution-grounded validation (`explain_aql` + EXPLAIN feedback in the retry loop), WP-25.4 prompt caching (cache-friendly section ordering in `PromptBuilder`, `cached_tokens` propagation from OpenAI `usage.prompt_tokens_details.cached_tokens` into `NL2CypherResult` / `NL2AqlResult` / HTTP responses, Anthropic `cache_control` splitter + stub provider), WP-25.5 eval harness + regression gate (`tests/nl2cypher/eval/{corpus.yml,configs.yml,runner.py,baseline.json}` + `tests/test_nl2cypher_eval_gate.py` with a 5 pp / +20 % / +0.3-retry tolerance policy, gated behind `RUN_NL2CYPHER_EVAL=1`). HTTP surface (`/nl2cypher`, `/nl2aql`) now accepts `use_fewshot`, `use_entity_resolution`, `session_token` and returns `cached_tokens` + `retries`. Full unit suite still green (651 passing, 16 skipped). Known follow-ups: refresh `baseline.json` against a live LLM, stand up a real `AnthropicProvider` behind the existing splitter, and grow the eval corpus. |
 | 2026-04-17 | **Clarified product scope: service is the product, UI is debug/demo.** Added a "Product scope" key decision to the Executive summary, a primary-product goal in §2, a matching non-goal carving out multi-user workbench features, a scope banner at the head of §4.4 (Cypher Workbench UI), and a "What gets deployed" note in §15 stating the default platform deployment is headless. Triggered by the realization (post-WP-25 scoping) that undirected UI expansion would compete for engineering cycles against the conversion service + NL pipelines, which are the actual deliverable. The UI remains valuable for two things — debugging translations during development, and demoing the service to prospects — but is explicitly **not** a production multi-user workbench: no authn/authz, no multi-tenant isolation, no server-side persistence beyond what the service already stores, no collaboration. Any future "UI-included" deployment variant must be opt-in and separately versioned. |
 | 2026-04-17 | **Added §1.2.1 "SOTA techniques, current gaps, and hardening plan"** and scoped **WP-25 (NL→Cypher pipeline hardening)** into five sub-packages. Triggered by research notes in `docs/research/nl2cypher.md` and `docs/research/nl2cypher2aql_analysis.md`. The current `nl2cypher.py` implements the zero-shot baseline (logical-only prompt, ANTLR-based self-healing) — correct but minimal. SOTA has moved to: (1) dynamic few-shot retrieval from a curated NL→Cypher corpus, (2) pre-flight entity resolution for labels and property values, (3) execution-grounded validation via AQL `EXPLAIN` in the retry loop, (4) prompt caching on the schema prefix, (5) evaluation harness + regression gate. WP-25.1/.2/.3/.4 are parallelizable (disjoint modules, single merge point in `nl2cypher.py`); WP-25.5 runs after .1 and .2. Task decomposition / multi-agent orchestration and SLM fine-tuning are explicitly deferred (the `LLMProvider` protocol already accommodates a fine-tuned endpoint when the time comes). The §1.2 invariant — LLM sees only the conceptual schema — is preserved; few-shot examples are conceptual-Cypher and entity resolution only rewrites string literals. Multi-subagent prompts for parallel execution added as "Wave 4" in `docs/agent_prompts.md`. |
 | 2026-04-17 | **Naming resolved (§11).** Project name stabilized as `arango-cypher-py`, symmetric with the newly renamed Foxx sibling `arango-cypher-foxx`. The `-py` / `-foxx` suffixes are honest about what each package is (Python out-of-process distribution vs. Foxx in-database microservice) and leave the bare `arango-cypher` name free for a potential future umbrella/spec repo on the `arango-solutions` org. Distribution name in `pyproject.toml`, CLI command, `[project.urls]` (target: `arango-solutions/arango-cypher-py`), READMEs, PRD, and implementation plan all aligned. Python import package remains `arango_cypher` (unchanged — no import breakage). No PyPI migration needed (never published). GitHub org rename (`arango-solutions/arango-cypher` → `arango-solutions/arango-cypher-py`) is pending org-admin action; until that lands, the `pushurl` points at the current URL and GitHub auto-redirects will keep working. Local checkout directory `~/code/arango-cypher-py` unchanged. |
@@ -244,15 +245,21 @@ The §1.2 pipeline as implemented today (`arango_cypher/nl2cypher.py`) is a **co
 
 **Hardening plan (WP-25 in the implementation plan, scoped for multi-subagent execution):**
 
-| Sub-package | Technique | Effort | Impact | Depends on |
-|-------------|-----------|--------|--------|-----------|
-| **WP-25.1** | Dynamic few-shot retrieval | Low (3–5 d) | High | — |
-| **WP-25.2** | Pre-flight entity resolution (labels + values) | Medium (5–7 d) | High | ArangoSearch view (optional; BM25/regex fallback when absent) |
-| **WP-25.3** | Execution-grounded validation loop (AQL `EXPLAIN`) | Medium (5 d) | Medium | WP-25.1 (for non-regression comparison) |
-| **WP-25.4** | Prompt caching (OpenAI + Anthropic) | Low (2 d) | Cost-only (no accuracy gain) | — |
-| **WP-25.5** | Evaluation harness & regression gate | Medium (3–4 d) | Meta (measures all of the above) | WP-25.1, WP-25.2 |
+| Sub-package | Technique | Effort | Impact | Depends on | Status |
+|-------------|-----------|--------|--------|-----------|--------|
+| **WP-25.1** | Dynamic few-shot retrieval | Low (3–5 d) | High | — | **Done (2026-04-18)** |
+| **WP-25.2** | Pre-flight entity resolution (labels + values) | Medium (5–7 d) | High | ArangoSearch view (optional; BM25/regex fallback when absent) | **Done (2026-04-18)** |
+| **WP-25.3** | Execution-grounded validation loop (AQL `EXPLAIN`) | Medium (5 d) | Medium | WP-25.1 (for non-regression comparison) | **Done (2026-04-18)** |
+| **WP-25.4** | Prompt caching (OpenAI + Anthropic) | Low (2 d) | Cost-only (no accuracy gain) | — | **Done (2026-04-18)** — OpenAI cached-token telemetry live; Anthropic wired behind a stub `AnthropicProvider` (cache-control splitter + system-blocks helper) pending a live provider integration. |
+| **WP-25.5** | Evaluation harness & regression gate | Medium (3–4 d) | Meta (measures all of the above) | WP-25.1, WP-25.2 | **Done (2026-04-18)** — corpus + configs + runner + CLI + placeholder baseline shipped. Live gate (`RUN_NL2CYPHER_EVAL=1`) runs against a committed `baseline.json`, which needs a real-LLM refresh before CI enforcement. |
 
-WP-25.1 / .2 / .3 / .4 can execute in parallel — they touch disjoint modules with a small, well-defined merge point in `nl2cypher.py` (a refactor of `_SYSTEM_PROMPT` into a `_build_prompt()` builder performed as the first step in each sub-agent's branch). WP-25.5 runs after .1 and .2 land so it can measure their effect. Full ready-to-launch sub-agent prompts live in `docs/agent_prompts.md` ("Wave 4").
+WP-25.1 / .2 / .3 / .4 executed in parallel during the Wave-4 rollout (disjoint modules with a single merge point in `arango_cypher/nl2cypher/_core.py`'s `PromptBuilder`). WP-25.5 followed once .1 and .2 had landed. Ready-to-launch sub-agent prompts remain archived in `docs/agent_prompts.md` under "Wave 4".
+
+**Follow-ups carried out of WP-25:**
+
+- Refresh `tests/nl2cypher/eval/baseline.json` with a real-LLM report and turn the gate on in nightly CI (currently placeholder values, gate opt-in via `RUN_NL2CYPHER_EVAL=1`).
+- Implement the Anthropic provider behind the existing `AnthropicProvider` stub and verify `cache_read_input_tokens` propagates through to `cached_tokens`.
+- Expand the eval corpus beyond the initial 13 cases across movies / northwind / social datasets.
 
 **Non-goals of WP-25:**
 

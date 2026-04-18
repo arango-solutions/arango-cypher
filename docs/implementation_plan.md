@@ -781,6 +781,16 @@ Wave 4b:   merge 4a, run unit suite, resolve any small merge conflicts
 Wave 4c:   WP-25.5 (1 agent, after 4b)
 ```
 
+#### Status (2026-04-18)
+
+All five sub-packages landed on `main`:
+
+- **WP-25.1 (Dynamic few-shot retrieval)** — `arango_cypher/nl2cypher/fewshot.py` ships a `Retriever` protocol, a BM25 implementation (backed by the optional `rank_bm25` dependency, with a token-overlap fallback), and a `FewShotIndex` loaded from `arango_cypher/nl2cypher/corpora/{movies,northwind,social}.yml`. `PromptBuilder.few_shot` renders the top-K examples ahead of the user question. Toggled via `use_fewshot` on `nl_to_cypher` and on the `/nl2cypher` HTTP endpoint.
+- **WP-25.2 (Pre-flight entity resolution)** — `arango_cypher/nl2cypher/entity_resolution.py` exposes `EntityResolver` + `ResolvedEntity`. Candidates are extracted with conservative regex heuristics (quoted strings, Title-Case phrases, stopword-filtered tokens) and resolved against string-valued properties via `MappingResolver.resolve_entity`. Respects both `COLLECTION` and `LABEL` mapping styles. Degrades to a null resolver when no DB handle is supplied.
+- **WP-25.3 (Execution-grounded validation)** — `arango_query_core.exec.explain_aql` plans the translated AQL with `db.aql.explain`; `_call_llm_with_retry` now feeds EXPLAIN errors back into the retry prompt alongside parse errors. Skips cleanly when no DB is wired.
+- **WP-25.4 (Prompt caching)** — `PromptBuilder` orders sections `prelude → schema → few-shot → resolved entities → question → retry-context`, maximising prefix stability. `_BaseChatProvider._chat` surfaces `usage.prompt_tokens_details.cached_tokens`; it is summed across retries and propagated on `NL2CypherResult.cached_tokens` / `NL2AqlResult.cached_tokens` and the HTTP responses. A stub `AnthropicProvider` + `split_system_for_anthropic_cache` helper captures the `cache_control` interface for the upcoming Anthropic integration.
+- **WP-25.5 (Eval harness + regression gate)** — `tests/nl2cypher/eval/{corpus.yml,configs.yml,runner.py,baseline.json}` drive a reproducible evaluation. The runner is importable by unit tests with a scripted provider, and exposes a `python -m tests.nl2cypher.eval.runner --config full [--baseline]` CLI for refreshing reports. `tests/test_nl2cypher_eval_gate.py::test_gate_against_baseline` enforces the regression policy (parse_ok / pattern_match within 5 pp, mean tokens within +20 %, mean retries within +0.3) when `RUN_NL2CYPHER_EVAL=1` is set; the committed `baseline.json` is a placeholder and should be refreshed against a live LLM before CI enforcement.
+
 #### Out of scope for WP-25 (tracked as future work)
 
 - **Task decomposition** — multi-agent splitting of complex questions into sub-queries. Revisit after the eval harness tells us whether single-shot is ceiling-bound.
@@ -938,4 +948,4 @@ Update this table as work packages are completed:
 | WP-22 | Results export (CSV/JSON) | v0.4 | **Done** | 2026-04-13 |
 | WP-23 | Agentic tools | v0.4 | **Done** | 2026-04-13 |
 | WP-24 | WITH from multiple MATCHes | v0.4 | **Done** | 2026-04-13 |
-| WP-25 | NL→Cypher pipeline hardening (SOTA upgrades) | v0.4 | Not started | Scoped 2026-04-17 (PRD §1.2.1). Five sub-packages; .1/.2/.3/.4 parallelizable, .5 sequential. |
+| WP-25 | NL→Cypher pipeline hardening (SOTA upgrades) | v0.4 | **Done** | 2026-04-18. All five sub-packages landed: WP-25.1 dynamic few-shot (BM25 retriever + shipped corpora), WP-25.2 pre-flight entity resolution, WP-25.3 execution-grounded validation via `_api/explain`, WP-25.4 prompt-cache-friendly section ordering + `cached_tokens` propagation + Anthropic stub, WP-25.5 eval harness + regression gate (corpus + configs + runner + `baseline.json`; live gate guarded by `RUN_NL2CYPHER_EVAL=1`). |
