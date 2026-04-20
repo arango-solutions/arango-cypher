@@ -128,10 +128,16 @@ def _evict_lru() -> None:
 
 def _get_session(request: Request) -> _Session:
     _prune_expired()
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
+    # Prefer X-Arango-Session: the ArangoDB platform proxy replaces the standard
+    # Authorization header with its own platform JWT before forwarding to the
+    # BYOC container, making Bearer tokens unusable for app-level session auth.
+    token = request.headers.get("X-Arango-Session", "")
+    if not token:
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            token = auth[7:]
+    if not token:
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-    token = auth[7:]
     session = _sessions.get(token)
     if session is None or session.expired:
         if session and session.expired:

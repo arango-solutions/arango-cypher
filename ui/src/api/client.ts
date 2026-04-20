@@ -54,7 +54,19 @@ export interface ProfileResponse {
 }
 
 function authHeaders(token: string): Record<string, string> {
-  return { Authorization: `Bearer ${token}` };
+  // Use a custom header — the ArangoDB platform proxy strips Authorization:Bearer
+  // (it uses that header for its own JWT auth) before forwarding to the container.
+  return { "X-Arango-Session": token };
+}
+
+// The SPA is served at …/frontend/. API endpoints live one level up at …/arango-cypher/.
+// Root-relative fetch("/connect") would hit the domain root (ArangoDB itself) instead
+// of the service. Strip "/frontend[/…]" from the current pathname to get the right prefix:
+//   /_service/uds_db/<db>/<instance>/frontend/ → /_service/uds_db/<db>/<instance>
+//   /frontend/ (localhost)                     → ""
+function apiBase(): string {
+  const idx = window.location.pathname.indexOf("/frontend");
+  return idx >= 0 ? window.location.pathname.slice(0, idx) : "";
 }
 
 async function request<T>(
@@ -62,7 +74,7 @@ async function request<T>(
   options: RequestInit = {},
 ): Promise<T> {
   const { headers: extraHeaders, ...rest } = options;
-  const res = await fetch(path, {
+  const res = await fetch(apiBase() + path, {
     ...rest,
     headers: {
       "Content-Type": "application/json",
