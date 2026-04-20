@@ -1,0 +1,54 @@
+{
+  "config_name": "full",
+  "generated_at": "2026-04-20T13:55:24Z",
+  "case_count": 31,
+  "parse_ok_rate": 1.0,
+  "pattern_match_rate": 1.0,
+  "explain_ok_rate": null,
+  "row_match_rate": null,
+  "tokens_mean": 522.0967741935484,
+  "cached_tokens_mean": 0,
+  "retries_mean": 0,
+  "latency_mean_ms": 3425.074193548387,
+  "by_category": {
+    "baseline": {
+      "n": 9,
+      "parse_ok_rate": 1.0,
+      "pattern_match_rate": 1.0,
+      "tokens_mean": 499.6666666666667,
+      "retries_mean": 0
+    },
+    "few_shot_bait": {
+      "n": 6,
+      "parse_ok_rate": 1.0,
+      "pattern_match_rate": 1.0,
+      "tokens_mean": 533.5,
+      "retries_mean": 0
+    },
+    "hallucination_bait": {
+      "n": 7,
+      "parse_ok_rate": 1.0,
+      "pattern_match_rate": 1.0,
+      "tokens_mean": 503.57142857142856,
+      "retries_mean": 0
+    },
+    "multi_hop": {
+      "n": 3,
+      "parse_ok_rate": 1.0,
+      "pattern_match_rate": 1.0,
+      "tokens_mean": 582.3333333333334,
+      "retries_mean": 0
+    },
+    "typo": {
+      "n": 6,
+      "parse_ok_rate": 1.0,
+      "pattern_match_rate": 1.0,
+      "tokens_mean": 535.8333333333334,
+      "retries_mean": 0
+    }
+  },
+  "results": [],
+  "_provider": "anthropic",
+  "_model": "claude-haiku-4-5",
+  "_comment": "Cross-provider baseline for the NL->Cypher regression gate against Anthropic. Regenerate with `LLM_PROVIDER=anthropic ANTHROPIC_MODEL=claude-haiku-4-5 python -m tests.nl2cypher.eval.runner --config full --with-db` then strip the per-case `results: []` list and copy from `tests/nl2cypher/eval/reports/`. Note: cached_tokens_mean is 0 because Haiku 4.5 requires a 4096-token minimum cacheable prefix and our prompts are ~500 tokens; the AnthropicProvider cache plumbing is separately verified against claude-sonnet-4-5 (1024-token floor) in the ad-hoc smoke test -- call 2 served 2346/2357 input tokens from cache, proving end-to-end cache_read_input_tokens propagation."
+}

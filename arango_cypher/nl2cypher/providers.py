@@ -223,7 +223,7 @@ class AnthropicProvider:
 
       - ``api_key``  / ``ANTHROPIC_API_KEY``
       - ``base_url`` / ``ANTHROPIC_BASE_URL`` (default: api.anthropic.com)
-      - ``model``    / ``ANTHROPIC_MODEL``    (default: claude-3-5-sonnet-latest)
+      - ``model``    / ``ANTHROPIC_MODEL``    (default: claude-sonnet-4-5)
 
     The system prompt is split via
     :func:`split_system_for_anthropic_cache` into a cached prefix
@@ -261,7 +261,7 @@ class AnthropicProvider:
             or os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")
         ).rstrip("/")
         self.model = model or os.environ.get(
-            "ANTHROPIC_MODEL", "claude-3-5-sonnet-latest",
+            "ANTHROPIC_MODEL", "claude-sonnet-4-5",
         )
         self.temperature = temperature
         self.max_tokens = max_tokens

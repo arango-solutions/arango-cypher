@@ -28,6 +28,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    strategy:
+      # Run both providers independently; a regression in one should not
+      # mask a regression in the other, so fail-fast is off.
+      fail-fast: false
+      matrix:
+        provider:
+          - name: openai
+            # Gate reference -- calibrated in tests/nl2cypher/eval/baseline.json.
+            env_provider: openai
+            model: ""  # use provider default (gpt-4o-mini)
+          - name: anthropic
+            # Cross-provider regression signal -- calibrated in
+            # tests/nl2cypher/eval/baseline.anthropic.json.
+            env_provider: anthropic
+            model: "claude-haiku-4-5"
+
+    name: eval (${{ matrix.provider.name }})
+
     services:
       arangodb:
         image: arangodb/arangodb:3.11
@@ -62,6 +80,19 @@ jobs:
       # red-light on day one).
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      # Pin the provider + model per matrix entry.  `LLM_PROVIDER` takes
+      # precedence over the auto-detect order in `get_llm_provider()` so
+      # the openai row really runs against OpenAI even if
+      # ANTHROPIC_API_KEY is also set in repo secrets.
+      LLM_PROVIDER: ${{ matrix.provider.env_provider }}
+      ANTHROPIC_MODEL: ${{ matrix.provider.model }}
+
+      # Gate test picks up the provider-specific baseline by name; see
+      # tests/test_nl2cypher_eval_gate.py::test_gate_against_baseline
+      # for the lookup (falls back to baseline.json for openai).
+      NL2CYPHER_EVAL_PROVIDER: ${{ matrix.provider.name }}
 
     steps:
       - uses: actions/checkout@v4
@@ -118,7 +149,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: nl2cypher-eval-reports
+          name: nl2cypher-eval-reports-${{ matrix.provider.name }}
           path: tests/nl2cypher/eval/reports/
           if-no-files-found: ignore
           retention-days: 14

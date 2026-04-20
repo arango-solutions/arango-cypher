@@ -43,7 +43,7 @@ The schema-first layout lets provider-side prefix caching kick in:
   it as `cached_tokens` on the result — same shape as the OpenAI path
   so downstream telemetry stays provider-agnostic. Configured via
   `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` / `ANTHROPIC_MODEL`
-  (default model: `claude-3-5-sonnet-latest`). Auto-detected by
+  (default model: `claude-sonnet-4-5`). Auto-detected by
   `get_llm_provider()` when no OpenAI/OpenRouter key is present, or
   selected explicitly via `LLM_PROVIDER=anthropic`.
 

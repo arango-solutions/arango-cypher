@@ -32,6 +32,22 @@ from tests.nl2cypher.eval.runner import (
 BASELINE_PATH = Path(__file__).parent / "nl2cypher" / "eval" / "baseline.json"
 
 
+def _baseline_path_for_provider() -> Path:
+    """Return the baseline file that matches the active provider.
+
+    Selects on ``NL2CYPHER_EVAL_PROVIDER`` (set by the nightly CI matrix)
+    so the anthropic row gates against ``baseline.anthropic.json`` rather
+    than the openai-calibrated ``baseline.json``.  Unset / ``openai`` /
+    ``openrouter`` fall through to the default openai baseline because
+    OpenAI is the gate reference.
+    """
+    provider = os.environ.get("NL2CYPHER_EVAL_PROVIDER", "").lower().strip()
+    eval_dir = Path(__file__).parent / "nl2cypher" / "eval"
+    if provider == "anthropic":
+        return eval_dir / "baseline.anthropic.json"
+    return eval_dir / "baseline.json"
+
+
 class _ScriptedProvider:
     """Returns scripted Cypher responses keyed by question substring."""
 
@@ -275,20 +291,26 @@ def test_gate_against_baseline() -> None:
     ``ARANGO_PASS`` and seeded fixture databases (see runner CLI's
     ``--with-db`` flag and ``open_eval_db_handles`` for the env-var contract).
 
-    The baseline is committed at ``tests/nl2cypher/eval/baseline.json`` —
-    refresh by running the runner with the ``full`` config (and ideally
+    The baseline is committed at ``tests/nl2cypher/eval/baseline.json``
+    (openai) or ``tests/nl2cypher/eval/baseline.anthropic.json``
+    (selected via ``NL2CYPHER_EVAL_PROVIDER=anthropic``) — refresh by
+    running the runner with the ``full`` config (and ideally
     ``--with-db``) and copying the fresh report over the baseline.
     """
-    if not BASELINE_PATH.exists():
-        pytest.skip(f"baseline not present at {BASELINE_PATH}; create it first")
+    baseline_path = _baseline_path_for_provider()
+    if not baseline_path.exists():
+        pytest.skip(f"baseline not present at {baseline_path}; create it first")
 
     from arango_cypher.nl2cypher import get_llm_provider
 
     provider = get_llm_provider()
     if provider is None:
-        pytest.skip("no LLM provider configured (set OPENAI_API_KEY or OPENROUTER_API_KEY)")
+        pytest.skip(
+            "no LLM provider configured "
+            "(set OPENAI_API_KEY, OPENROUTER_API_KEY, or ANTHROPIC_API_KEY)",
+        )
 
-    baseline = json.loads(BASELINE_PATH.read_text(encoding="utf-8"))
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     full_cfg = next(
         (c for c in load_configs() if c.get("name") == "full"),
         {"name": "full"},
@@ -319,6 +341,51 @@ def test_gate_against_baseline() -> None:
 def test_corpus_file_exists() -> None:
     """Sanity check: corpus.yml must ship with the package."""
     assert CORPUS_PATH.exists(), f"missing {CORPUS_PATH}"
+
+
+class TestBaselinePerProviderLookup:
+    """WP-25.5 follow-up: cross-provider baseline selection for nightly CI."""
+
+    def test_default_is_openai_baseline(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unset NL2CYPHER_EVAL_PROVIDER must resolve to baseline.json."""
+        monkeypatch.delenv("NL2CYPHER_EVAL_PROVIDER", raising=False)
+        path = _baseline_path_for_provider()
+        assert path.name == "baseline.json"
+
+    def test_openai_resolves_to_default_baseline(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """openai (gate reference) keeps the unqualified baseline filename."""
+        monkeypatch.setenv("NL2CYPHER_EVAL_PROVIDER", "openai")
+        assert _baseline_path_for_provider().name == "baseline.json"
+
+    def test_openrouter_falls_through_to_default(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """OpenRouter is OpenAI-compatible, so it reuses baseline.json."""
+        monkeypatch.setenv("NL2CYPHER_EVAL_PROVIDER", "openrouter")
+        assert _baseline_path_for_provider().name == "baseline.json"
+
+    def test_anthropic_resolves_to_anthropic_baseline(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """anthropic must gate against baseline.anthropic.json, not baseline.json."""
+        monkeypatch.setenv("NL2CYPHER_EVAL_PROVIDER", "anthropic")
+        assert _baseline_path_for_provider().name == "baseline.anthropic.json"
+
+    def test_anthropic_baseline_file_is_checked_in(self) -> None:
+        """The cross-provider baseline is a shipped artifact."""
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setenv("NL2CYPHER_EVAL_PROVIDER", "anthropic")
+        try:
+            assert _baseline_path_for_provider().exists()
+        finally:
+            monkeypatch.undo()
+
+    def test_case_insensitive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Mixed-case provider names from env vars still resolve correctly."""
+        monkeypatch.setenv("NL2CYPHER_EVAL_PROVIDER", "Anthropic")
+        assert _baseline_path_for_provider().name == "baseline.anthropic.json"
 
 
 class TestRunnerDbPlumbing:
