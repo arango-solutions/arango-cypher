@@ -296,7 +296,7 @@ def _extract_aql_from_response(text: str) -> tuple[str, dict[str, Any]]:
     m = re.search(r"```(?:aql)?\s*\n(.*?)```", text, re.DOTALL)
     if m:
         return m.group(1).strip(), {}
-    lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
     aql_lines = []
     for line in lines:
         upper = line.upper()

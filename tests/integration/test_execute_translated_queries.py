@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import os
 from collections import Counter
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 from arango import ArangoClient

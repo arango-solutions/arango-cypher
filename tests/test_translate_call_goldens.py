@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import pytest
-from arango_query_core import ExtensionPolicy, ExtensionRegistry
 
 from arango_cypher import register_all_extensions, translate
+from arango_query_core import ExtensionPolicy, ExtensionRegistry
 from tests.helpers.mapping_fixtures import mapping_bundle_for
 
 

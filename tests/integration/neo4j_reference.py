@@ -248,7 +248,7 @@ def seed_neo4j_pg(
     with driver.session() as sess:
         sess.run("MATCH (n) DETACH DELETE n").consume()
 
-        for coll, label in coll_to_label.items():
+        for _coll, label in coll_to_label.items():
             sess.run(
                 f"CREATE CONSTRAINT `uniq_{label}_key` IF NOT EXISTS "
                 f"FOR (n:`{label}`) REQUIRE n._key IS UNIQUE"

@@ -23,7 +23,6 @@ import argparse
 import csv
 import json
 import sys
-from io import StringIO
 from pathlib import Path
 
 # ── Schema constants ─────────────────────────────────────────────────

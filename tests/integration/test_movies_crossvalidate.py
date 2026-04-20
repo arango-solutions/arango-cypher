@@ -35,7 +35,6 @@ from arango_query_core.exec import AqlExecutor
 from tests.helpers.mapping_fixtures import mapping_bundle_for
 from tests.integration.datasets import seed_movies_lpg_dataset
 
-
 # ---------------------------------------------------------------------------
 # Activation & fixtures
 # ---------------------------------------------------------------------------

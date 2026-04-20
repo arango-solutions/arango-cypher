@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from arango_query_core import CoreError
 from arango_cypher import parse_cypher
+from arango_query_core import CoreError
 
 
 def test_parse_all_corpus_cases(corpus_cases):

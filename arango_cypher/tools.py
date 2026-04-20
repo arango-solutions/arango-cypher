@@ -19,9 +19,8 @@ from typing import Any
 
 from arango_query_core import CoreError, MappingBundle, MappingResolver
 
-from .api import translate, get_cypher_profile, clear_translate_cache
+from .api import get_cypher_profile, translate
 from .parser import parse_cypher
-
 
 # ---------------------------------------------------------------------------
 # Tool: translate

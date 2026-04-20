@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-
 TCK_BASE_API_URL = "https://api.github.com/repos/opencypher/openCypher/contents/tck/features"
 
 

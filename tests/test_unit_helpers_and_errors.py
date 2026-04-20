@@ -4,8 +4,13 @@ import pytest
 
 from arango_cypher import translate
 from arango_cypher.api import TranspiledQuery
-from arango_cypher.translate_v0 import translate_v0
-from arango_cypher.translate_v0 import _aql_collection_ref, _compile_type_of_relationship, _pick_bind_key, _pick_fresh_var
+from arango_cypher.translate_v0 import (
+    _aql_collection_ref,
+    _compile_type_of_relationship,
+    _pick_bind_key,
+    _pick_fresh_var,
+    translate_v0,
+)
 from arango_query_core import CoreError, ExtensionPolicy, MappingBundle
 from arango_query_core.aql import AqlFragment
 from arango_query_core.exec import AqlExecutor

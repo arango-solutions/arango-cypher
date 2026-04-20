@@ -25,10 +25,10 @@ _active_resolver: ContextVar[MappingResolver | None] = ContextVar(
     "_active_resolver", default=None,
 )
 _active_warnings: ContextVar[list[str]] = ContextVar(
-    "_active_warnings", default=[],
+    "_active_warnings", default=[],  # noqa: B039  # always .set() before .get() in _run_translation
 )
 _active_path_vars: ContextVar[dict[str, tuple[list[str], list[str]]]] = ContextVar(
-    "_active_path_vars", default={},
+    "_active_path_vars", default={},  # noqa: B039  # always .set() before .get() in _run_translation
 )
 
 
@@ -88,7 +88,7 @@ def _warn_missing_vci(resolver: MappingResolver, rel_type: str, r_map: dict) -> 
 
 
 def _build_vci_options(
-    hops: list["_HopMeta"],
+    hops: list[_HopMeta],
     resolver: MappingResolver,
 ) -> str | None:
     """Build an OPTIONS { indexHint: ... } clause for traversal VCI hints.
@@ -1381,7 +1381,7 @@ def _translate_match_body(
     # already prevents repeated edges.
     if len(groups) > 1:
         cross_group_rels: list[str] = []
-        for gi, group in enumerate(groups):
+        for _gi, group in enumerate(groups):
             if len(group) != 1:
                 # Merged group: intermediate edges may not have a stable
                 # binding.  Skip cross-uniqueness emission for now; the
@@ -1677,7 +1677,7 @@ def _translate_mutating_query(
 
         for target_var, fields in update_fields.items():
             pairs = ", ".join(f"{k}: {v}" for k, v in fields.items())
-            target_coll = f"@@collection"
+            target_coll = "@@collection"
             if target_var != var and target_var in trav_vars:
                 tc_key = _pick_bind_key("@setCollection", bind_vars)
                 # Determine collection from traversal context
@@ -2608,7 +2608,7 @@ def _compile_optional_node_only(
         if map_lit is not None:
             keys = map_lit.oC_PropertyKeyName() or []
             vals = map_lit.oC_Expression() or []
-            for k_ctx, v_ctx in zip(keys, vals):
+            for k_ctx, v_ctx in zip(keys, vals, strict=False):
                 k = k_ctx.getText().strip()
                 val = _compile_expression(v_ctx, bind_vars)
                 sub_filters.append(f"{inner_var}.{k} == {val}")
@@ -2623,7 +2623,7 @@ def _compile_optional_node_only(
     sub_lines = [f"FOR {inner_var} IN {coll_ref}"]
     for sf in sub_filters:
         sub_lines.append(f"  FILTER {sf}")
-    sub_lines.append(f"  LIMIT 1")
+    sub_lines.append("  LIMIT 1")
     sub_lines.append(f"  RETURN {inner_var}")
     subquery = "\n    ".join(sub_lines)
 
@@ -2714,7 +2714,7 @@ def _compile_optional_with_chains(
             if map_lit is not None:
                 keys = map_lit.oC_PropertyKeyName() or []
                 vals = map_lit.oC_Expression() or []
-                for k_ctx, v_ctx in zip(keys, vals):
+                for k_ctx, v_ctx in zip(keys, vals, strict=False):
                     k = k_ctx.getText().strip()
                     val = _compile_expression(v_ctx, bind_vars)
                     hop_filters.append(f"{inner_v}.{k} == {val}")
@@ -2762,7 +2762,7 @@ def _compile_optional_with_chains(
         extra_env[cv] = let_var
 
         # Expose relationship var
-        for rel_cv, rel_iv, rel_p in all_rel_vars:
+        for rel_cv, rel_iv, _rel_p in all_rel_vars:
             rel_let = _pick_fresh_var(rel_cv, forbidden_vars=forbidden_vars)
             # Re-emit the traversal to get the edge
             r_sub = list(sub_lines)
@@ -4529,9 +4529,6 @@ def _compile_pattern_comprehension(
         except CoreError:
             pass
 
-    where_ctx = ctx.oC_Expression()
-    exprs = ctx.oC_Expression() if not isinstance(ctx.oC_Expression(), list) else ctx.oC_Expression()
-
     all_exprs = ctx.oC_Expression()
     if not isinstance(all_exprs, list):
         all_exprs = [all_exprs] if all_exprs else []
@@ -4540,7 +4537,6 @@ def _compile_pattern_comprehension(
     for child in ctx.children or []:
         text = getattr(child, "symbol", None)
         if text and hasattr(text, "text") and text.text == "WHERE":
-            idx = list(ctx.children).index(child)
             where_node = all_exprs[0] if all_exprs else None
             break
 
@@ -4811,7 +4807,10 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
             ml = ctx.oC_MapLiteral()
             keys = ml.oC_PropertyKeyName() or []
             vals = ml.oC_Expression() or []
-            pairs = [f"{k.getText().strip()}: {_compile_expression(v, bind_vars)}" for k, v in zip(keys, vals)]
+            pairs = [
+                f"{k.getText().strip()}: {_compile_expression(v, bind_vars)}"
+                for k, v in zip(keys, vals, strict=False)
+            ]
             return "{" + ", ".join(pairs) + "}"
         raise CoreError("Unsupported literal in v0", code="UNSUPPORTED")
 
@@ -5003,7 +5002,7 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
             resolver = _active_resolver.get()
             if resolver is not None:
                 entity_defs = resolver.bundle.physical_mapping.get("entityLabels", {})
-                for ek, ev in entity_defs.items():
+                for _ek, ev in entity_defs.items():
                     if ev.get("style") == "LABEL" and ev.get("typeField"):
                         tf = ev["typeField"]
                         return f"[{compiled_args[0]}.{tf}]"

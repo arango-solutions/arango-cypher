@@ -24,11 +24,11 @@ def parse_owl_with_rdflib(turtle_text: str) -> MappingBundle:
     """
     try:
         import rdflib
-    except ImportError:
+    except ImportError as e:
         raise ImportError(
             "rdflib is required for OWL ingestion. "
             "Install with: pip install arango-cypher-py[owl]"
-        )
+        ) from e
 
     g = rdflib.Graph()
     g.parse(data=turtle_text, format="turtle")

@@ -318,7 +318,7 @@ def _extract_cypher_from_response(text: str) -> str:
     m = re.search(r"```(?:cypher)?\s*\n(.*?)```", text, re.DOTALL)
     if m:
         return m.group(1).strip()
-    lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
     cypher_lines = []
     for line in lines:
         upper = line.upper()
@@ -585,7 +585,7 @@ def _build_schema_context(bundle: MappingBundle) -> _SchemaCtx:
     }
     role_to_rel: dict[str, dict] = {}
     for rkey, rdef in relationships.items():
-        for synonyms in _ROLE_SYNONYMS.values():
+        for _synonyms in _ROLE_SYNONYMS.values():
             normalized_rkey = rkey.replace("_", "")
             for syn_key, syn_list in _ROLE_SYNONYMS.items():
                 if syn_key.replace("_", "") == normalized_rkey or syn_key == rkey:

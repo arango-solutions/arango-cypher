@@ -19,7 +19,7 @@ from tests.integration.seed import (
 )
 
 from .gherkin import Feature, Scenario, parse_feature
-from .normalize import parse_param_value, results_match, results_contain
+from .normalize import parse_param_value, results_contain, results_match
 
 logger = logging.getLogger(__name__)
 

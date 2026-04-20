@@ -8,7 +8,6 @@ import pytest
 from arango_query_core.mapping import MappingBundle, MappingSource
 from arango_query_core.owl_turtle import mapping_to_turtle, turtle_to_mapping
 
-
 _FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "mappings"
 
 

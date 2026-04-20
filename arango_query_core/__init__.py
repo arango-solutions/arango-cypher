@@ -19,6 +19,7 @@ __all__ = [
     "MappingBundle",
     "MappingResolver",
     "MappingSource",
+    "PropertyInfo",
     "RelationshipStats",
     "mapping_to_turtle",
     "parse_owl_with_rdflib",

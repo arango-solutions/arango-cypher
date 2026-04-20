@@ -38,6 +38,8 @@ dev = [
   "PyYAML>=6.0.0",
   "httpx>=0.24.0",
   "rank_bm25>=0.2.2",
+  "fastapi>=0.100.0",
+  "uvicorn[standard]>=0.20.0",
 ]
 neo4j = [
   "neo4j>=5.0",
@@ -55,9 +57,20 @@ markers = [
 [tool.ruff]
 line-length = 110
 target-version = "py310"
+extend-exclude = [
+  "arango_cypher/_antlr",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+ignore = [
+  "E501",
+  "B008",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["E402", "F401", "F841"]
+"scripts/**/*.py" = ["E402"]
 
 [project.scripts]
 arango-cypher-py = "arango_cypher.cli:app"

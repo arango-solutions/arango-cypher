@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from arango_cypher.nl2cypher import nl_to_cypher, NL2CypherResult
+from arango_cypher.nl2cypher import NL2CypherResult, nl_to_cypher
 from tests.helpers.mapping_fixtures import mapping_bundle_for
 
 

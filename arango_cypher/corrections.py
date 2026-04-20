@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-
 _DB_PATH = os.getenv("CORRECTIONS_DB", "corrections.db")
 _lock = threading.Lock()
 _conn: sqlite3.Connection | None = None

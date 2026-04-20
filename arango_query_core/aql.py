@@ -11,7 +11,7 @@ class AqlFragment:
     text: str
     bind_vars: dict[str, Any] = field(default_factory=dict)
 
-    def __add__(self, other: "AqlFragment") -> "AqlFragment":
+    def __add__(self, other: AqlFragment) -> AqlFragment:
         if not isinstance(other, AqlFragment):
             return NotImplemented
         text = self.text.rstrip()

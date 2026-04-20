@@ -5,7 +5,6 @@ import pytest
 from arango_cypher import translate
 from tests.helpers.mapping_fixtures import mapping_bundle_for
 
-
 WRITE_CLAUSE_IDS = (
     # SET
     [f"C{n}" for n in range(400, 406)]

@@ -10,6 +10,7 @@ Usage::
 
 from __future__ import annotations
 
+import logging as _logging
 import os
 import re
 import secrets
@@ -26,8 +27,9 @@ except ImportError:
 from arango import ArangoClient
 from arango.database import StandardDatabase
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -64,12 +66,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-import logging as _logging
-
 _svc_logger = _logging.getLogger("arango_cypher.service")
-
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
 
 
 @app.exception_handler(RequestValidationError)
@@ -303,7 +300,10 @@ def connect(req: ConnectRequest):
         db = client.db(req.database, username=req.username, password=req.password)
         db.version()
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Connection failed: {_sanitize_error(str(e))}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Connection failed: {_sanitize_error(str(e))}",
+        ) from e
 
     _evict_lru()
     token = secrets.token_urlsafe(32)
@@ -404,7 +404,10 @@ def translate_endpoint(req: TranslateRequest):
         _log.getLogger("arango_cypher.service").warning(
             "translate CoreError: %s (code=%s) for cypher=%r", e, e.code, req.cypher[:80],
         )
-        raise HTTPException(status_code=422, detail={"error": _sanitize_error(str(e)), "code": e.code})
+        raise HTTPException(
+            status_code=422,
+            detail={"error": _sanitize_error(str(e)), "code": e.code},
+        ) from e
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
 
     correction = _corrections.lookup(req.cypher, req.mapping)
@@ -440,7 +443,10 @@ def execute_endpoint(req: ExecuteRequest, session: _Session = Depends(_get_sessi
             params=req.params,
         )
     except CoreError as e:
-        raise HTTPException(status_code=422, detail={"error": _sanitize_error(str(e)), "code": e.code})
+        raise HTTPException(
+            status_code=422,
+            detail={"error": _sanitize_error(str(e)), "code": e.code},
+        ) from e
 
     correction = _corrections.lookup(req.cypher, req.mapping)
     run_aql = correction.corrected_aql if correction else transpiled.aql
@@ -455,7 +461,10 @@ def execute_endpoint(req: ExecuteRequest, session: _Session = Depends(_get_sessi
         results = list(cursor)
         exec_ms = round((time.perf_counter() - t_exec) * 1000, 1)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AQL execution failed: {_sanitize_error(str(e))}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"AQL execution failed: {_sanitize_error(str(e))}",
+        ) from e
 
     return ExecuteResponse(
         results=results,
@@ -480,7 +489,10 @@ def execute_aql_endpoint(req: ExecuteAqlRequest, session: _Session = Depends(_ge
         results = list(cursor)
         exec_ms = round((time.perf_counter() - t_exec) * 1000, 1)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AQL execution failed: {_sanitize_error(str(e))}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"AQL execution failed: {_sanitize_error(str(e))}",
+        ) from e
 
     return ExecuteResponse(
         results=results,
@@ -522,12 +534,18 @@ def explain_endpoint(req: TranslateRequest, session: _Session = Depends(_get_ses
             params=req.params,
         )
     except CoreError as e:
-        raise HTTPException(status_code=422, detail={"error": _sanitize_error(str(e)), "code": e.code})
+        raise HTTPException(
+            status_code=422,
+            detail={"error": _sanitize_error(str(e)), "code": e.code},
+        ) from e
 
     try:
         plan = session.db.aql.explain(transpiled.aql, bind_vars=transpiled.bind_vars)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AQL EXPLAIN failed: {_sanitize_error(str(e))}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"AQL EXPLAIN failed: {_sanitize_error(str(e))}",
+        ) from e
 
     return {
         "aql": transpiled.aql,
@@ -552,7 +570,10 @@ def aql_profile_endpoint(req: TranslateRequest, session: _Session = Depends(_get
             params=req.params,
         )
     except CoreError as e:
-        raise HTTPException(status_code=422, detail={"error": _sanitize_error(str(e)), "code": e.code})
+        raise HTTPException(
+            status_code=422,
+            detail={"error": _sanitize_error(str(e)), "code": e.code},
+        ) from e
 
     try:
         cursor = session.db.aql.execute(
@@ -564,7 +585,10 @@ def aql_profile_endpoint(req: TranslateRequest, session: _Session = Depends(_get
         stats = cursor.statistics()
         profile_data = cursor.profile() if hasattr(cursor, "profile") else None
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AQL profiled execution failed: {_sanitize_error(str(e))}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"AQL profiled execution failed: {_sanitize_error(str(e))}",
+        ) from e
 
     return {
         "aql": transpiled.aql,
@@ -1068,7 +1092,7 @@ def import_owl(req: OwlImportRequest):
 # Corrections (local learning) endpoints
 # ---------------------------------------------------------------------------
 
-from . import corrections as _corrections
+from . import corrections as _corrections  # noqa: E402
 
 
 class CorrectionRequest(BaseModel):
@@ -1145,7 +1169,7 @@ def delete_all_corrections():
 # benefit. The two stores are deliberately separate — they have different
 # lookup keys, different lifecycle triggers, and different callers.
 
-from . import nl_corrections as _nl_corrections
+from . import nl_corrections as _nl_corrections  # noqa: E402
 
 
 class NLCorrectionRequest(BaseModel):
@@ -1175,7 +1199,7 @@ def save_nl_correction(req: NLCorrectionRequest):
             note=req.note,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"id": row_id, "status": "saved"}
 
 
