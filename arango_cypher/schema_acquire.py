@@ -10,25 +10,20 @@ Provides three tiers of mapping acquisition:
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-# Upstream fingerprint primitives (arangodb-schema-analyzer >= 0.3.0). We re-
-# export them as _shape_fingerprint / _full_fingerprint below so callers and
-# tests that import those names continue to work; the thin wrappers also bake
-# in our cache-collection exclusion (see §5 of docs/schema_analyzer_issues/
-# WAVE_4M_ARCHITECTURE.md for why excluding the cache collection is a
-# correctness invariant, not a perf tweak).
-from schema_analyzer import (
-    fingerprint_physical_counts as _upstream_fingerprint_counts,
-)
-from schema_analyzer import (
-    fingerprint_physical_shape as _upstream_fingerprint_shape,
-)
-
+# Upstream fingerprint primitives (arangodb-schema-analyzer >= 0.3.0) are
+# imported lazily inside :func:`_shape_fingerprint` / :func:`_full_fingerprint`.
+# Lazy so this module keeps working when only the heuristic mapping tier is
+# installed (the `analyzer` extra is optional — see module docstring tier 2).
+# The wrappers bake in our cache-collection exclusion; see §5 of
+# docs/schema_analyzer_issues/WAVE_4M_ARCHITECTURE.md for why excluding the
+# cache collection is a correctness invariant, not a perf tweak.
 from arango_query_core import CoreError, MappingBundle, MappingSource
 
 from .schema_cache import (
@@ -60,6 +55,38 @@ def _cache_key(db: StandardDatabase) -> str:
         return ""
 
 
+def _fallback_fingerprint(db: StandardDatabase, *, include_counts: bool) -> str:
+    """Coarse local fingerprint used only when ``schema_analyzer`` is unavailable.
+
+    The heuristic mapping tier is advertised as "works without the analyzer
+    extra" (see module docstring), so we still need *some* stable digest for
+    the cache-freshness check. Upstream hashes far more (types + every index
+    signature); this fallback only notices collection set / count changes.
+    Acceptable because the degraded path already opts out of analyzer-level
+    precision. Re-introduces ~6 LOC versus the ~51 LOC removed in PR-2.
+    """
+    try:
+        cols = db.collections() or []
+    except Exception:
+        cols = []
+    names = sorted(
+        c.get("name", "")
+        for c in cols
+        if isinstance(c, dict)
+        and isinstance(c.get("name"), str)
+        and not c["name"].startswith("_")
+        and c["name"] != DEFAULT_CACHE_COLLECTION
+    )
+    parts = [db.name, *names]
+    if include_counts:
+        for name in names:
+            try:
+                parts.append(f"{name}:{db.collection(name).count()}")
+            except Exception:
+                parts.append(f"{name}:-1")
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()
+
+
 def _shape_fingerprint(db: StandardDatabase) -> str:
     """Hash of the schema *shape*: collection set, types, and index digests.
 
@@ -80,7 +107,12 @@ def _shape_fingerprint(db: StandardDatabase) -> str:
     ``get_mapping()`` call after deployment refills the cache under the new
     fingerprint.
     """
-    return _upstream_fingerprint_shape(db, exclude_collections={DEFAULT_CACHE_COLLECTION})
+    try:
+        from schema_analyzer import fingerprint_physical_shape
+    except ImportError:
+        return _fallback_fingerprint(db, include_counts=False)
+
+    return fingerprint_physical_shape(db, exclude_collections={DEFAULT_CACHE_COLLECTION})
 
 
 def _full_fingerprint(db: StandardDatabase) -> str:
@@ -96,7 +128,12 @@ def _full_fingerprint(db: StandardDatabase) -> str:
     cached mapping remains valid and only cardinality statistics need
     re-computation (the stats-only refresh path).
     """
-    return _upstream_fingerprint_counts(db, exclude_collections={DEFAULT_CACHE_COLLECTION})
+    try:
+        from schema_analyzer import fingerprint_physical_counts
+    except ImportError:
+        return _fallback_fingerprint(db, include_counts=True)
+
+    return fingerprint_physical_counts(db, exclude_collections={DEFAULT_CACHE_COLLECTION})
 
 
 @dataclass(frozen=True)
