@@ -1,7 +1,0 @@
-./servicemaker/target/release/servicemaker \
-  --project-home Arango-Cypher \
-  --name arango-cypher \
-  --port 8000 \
-  --image-name arango-cypher:latest \
-  --entrypoint main.py \
-  --make-tar-gz

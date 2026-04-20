@@ -19,9 +19,16 @@ No matching distribution found for arangodb-schema-analyzer
 There are two ways to unblock a deploy:
 
 1. **Recommended (permanent fix)** — publish `arangodb-schema-analyzer` to PyPI (or the ArangoDB internal PyPI mirror). Tracked in [`~/code/arango-schema-mapper`](https://github.com/). Once published, pin it in `pyproject.toml` (`arangodb-schema-analyzer>=<published-version>`) and proceed.
-2. **Interim (partial deploy)** — install *without* the `[analyzer]` extra. The analyzer powers the `/analyze` route and the `arango-cypher-py analyze` CLI command (schema-from-live-DB generation). Every other code path — the Cypher→AQL transpiler, the NL→Cypher pipeline (WP-25), `/translate`, `/validate`, `/nl2cypher`, `/nl2aql` — works without it.
+2. **Interim (partial deploy)** — install *without* the `[analyzer]` extra. The analyzer powers the `/schema/introspect` route and the `arango-cypher-py mapping --strategy analyzer` CLI command (schema-from-live-DB generation). Every other code path — the Cypher→AQL transpiler, the NL→Cypher pipeline (WP-25), `/translate`, `/validate`, `/nl2cypher`, `/nl2aql` — works without it.
 
-   Use this mode by *not* listing `analyzer` in the extras the build container installs. Operators who need `/analyze` can generate mappings offline (with an analyzer-installed dev checkout) and POST them via the existing mapping endpoints.
+   Use this mode by *not* listing `analyzer` in the extras the build container installs. Operators who need the analyzer's precision can generate mappings offline (with an analyzer-installed dev checkout) and POST them via the existing mapping endpoints:
+
+   ```bash
+   # From a dev checkout with arangodb-schema-analyzer installed:
+   python -m arango_cypher.cli mapping --strategy analyzer --db <my-db> > precise_mapping.json
+
+   # Use this mapping in subsequent /translate calls or CLI operations.
+   ```
 
 Do not switch the dependency to a `git+ssh://` URL — rejected in PRD §15.2 because it bakes SSH auth into the build container.
 
@@ -37,6 +44,7 @@ Populated on the Container Manager deployment spec, **not** baked into the tarba
 | Variable | Required | Notes |
 |----------|----------|-------|
 | `ARANGO_URL` | yes | e.g. `http://arangodb:8529`. Set to whatever the deployed service should reach. |
+| `ROOT_PATH` | yes (Platform) | The subpath where the service is mounted on the Arango Platform (e.g., `/_service/uds/_db/my_db/my_mount`). Required for `/docs` and `/frontend` to load assets correctly. |
 | `ARANGO_DB` | default `_system` | Default DB for `/connect` form pre-fill only; every request supplies its own. |
 | `ARANGO_USER`, `ARANGO_PASS` | yes if using the defaults path | Same — used to pre-fill the `/connect-defaults` endpoint; per-request creds override. |
 | `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENROUTER_API_KEY` | at least one, only if NL endpoints are used | Drives the `/nl2cypher` and `/nl2aql` pipelines. Pure Cypher→AQL does **not** need an LLM. |
@@ -87,4 +95,3 @@ git tag -a v0.1.0-snapshot -m "snapshot for platform packaging"
 git push origin v0.1.0-snapshot
 ```
 
-Emmet (or any downstream packager) pulls against the tag, not HEAD, so that whatever ships is reproducible.

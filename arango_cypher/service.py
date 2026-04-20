@@ -47,6 +47,7 @@ app = FastAPI(
     title="Arango Cypher Transpiler",
     description="Cypher → AQL translation service for ArangoDB",
     version="0.1.0",
+    root_path=os.getenv("ROOT_PATH", ""),
 )
 
 _cors_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "*")
@@ -1223,7 +1224,7 @@ _UI_DIR = Path(__file__).resolve().parent.parent / "ui" / "dist"
 
 if _UI_DIR.is_dir():
 
-    @app.get("/ui/{full_path:path}")
+    @app.get("/frontend/{full_path:path}")
     async def _spa_fallback(full_path: str):
         """Serve index.html for any UI route that is not a static asset."""
         file = _UI_DIR / full_path
@@ -1231,7 +1232,7 @@ if _UI_DIR.is_dir():
             return FileResponse(file)
         return FileResponse(_UI_DIR / "index.html")
 
-    app.mount("/ui", StaticFiles(directory=str(_UI_DIR), html=True), name="ui")
+    app.mount("/frontend", StaticFiles(directory=str(_UI_DIR), html=True), name="frontend")
 
     # The Vite build emits root-relative URLs (`/assets/...`, `/favicon.svg`,
     # `/icons.svg`) to match its dev server (`port: 5173`, no `base: '/ui/'`).
