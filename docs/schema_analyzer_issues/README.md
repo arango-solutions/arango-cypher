@@ -9,9 +9,9 @@ Companion reference: [`WAVE_4M_ARCHITECTURE.md`](./WAVE_4M_ARCHITECTURE.md) — 
 | # | Title | Removes from arango-cypher-py | Upstream | Downstream |
 |---|---|---|---|---|
 | [01](./01-emit-vci-and-deduplicate-flags.md) | Emit `vci` and `deduplicate` flags on physical-mapping indexes | (none — fills a capability gap) | shipped in v0.2.0 | already consumed |
-| [02](./02-emit-statistics-block.md) | Emit a `statistics` block with per-relationship cardinality and selectivity | `compute_statistics`, `_classify_cardinality`, `enrich_bundle_with_statistics` (~170 LOC) | shipped in v0.2.0 | PR-3 (optional adoption) |
-| [03](./03-split-multi-type-edge-collections.md) | Detect multi-type edge collections and emit per-type `GENERIC_WITH_TYPE` entries | `_fixup_dedicated_edges` (~80 LOC) | shipped in v0.2.0 | PR-3 |
-| [04](./04-discover-collections-outside-named-graphs.md) | Discover all non-system collections, not just those in a named graph | `_backfill_missing_collections` (~160 LOC) | shipped in v0.2.0 | PR-3 |
+| [02](./02-emit-statistics-block.md) | Emit a `statistics` block with per-relationship cardinality and selectivity | `compute_statistics`, `_classify_cardinality`, `enrich_bundle_with_statistics` (~170 LOC) | shipped in v0.2.0 | **PR-3 (adopted; local retained as fallback)** |
+| [03](./03-split-multi-type-edge-collections.md) | Detect multi-type edge collections and emit per-type `GENERIC_WITH_TYPE` entries | `_fixup_dedicated_edges` (~80 LOC) | shipped in v0.2.0 | **PR-3 (this wave — deleted)** |
+| [04](./04-discover-collections-outside-named-graphs.md) | Discover all non-system collections, not just those in a named graph | `_backfill_missing_collections` (~160 LOC) | shipped in v0.2.0 | **PR-3 (this wave — deleted)** |
 | [05](./05-align-property-key-naming.md) | Emit `field` (not `physicalFieldName`) and `edgeCollectionName` (not `collectionName`) | `_normalize_analyzer_pm`, `_normalize_props` (~30 LOC) | shipped in v0.2.0 | **PR-1 (this wave)** |
 | [06](./06-cheap-shape-fingerprint-probe.md) | Add cheap `fingerprint_physical_shape(db)` / `fingerprint_physical_counts(db)` (no snapshot required) | `_shape_fingerprint`, `_full_fingerprint`, `_index_digest`, `_iter_user_collections` (~60 LOC) | shipped in v0.3.0 | **PR-2 (this wave)** |
 | [07](./07-prd-3-13-schema-change-detection.md) | PRD §3.13 revision: two-fingerprint model + four-state change report + storage-agnostic cache | (docs only; sanctions the pattern) | shipped in v0.3.0 | n/a (docs-only upstream) |

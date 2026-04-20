@@ -992,250 +992,40 @@ def acquire_mapping_bundle(db: StandardDatabase, *, include_owl: bool = False) -
         ),
     )
 
-    bundle = _fixup_dedicated_edges(bundle, db)
-    bundle = _backfill_missing_collections(bundle, db)
+    # Surface upstream reconciliation (issue #4 / PR-3): the analyzer's
+    # reconcile pass may backfill collections the LLM missed. When the
+    # LLM-path is used (not the baseline), emit an observability warning so
+    # we retain visibility we used to get from running the backfill here.
+    recon = bundle.metadata.get("reconciliation") if bundle.metadata else None
+    if isinstance(recon, dict):
+        backfilled = recon.get("backfilled_collections") or recon.get("backfilledCollections")
+        if backfilled:
+            logger.warning(
+                "schema_analyzer backfilled %d collection(s) missing from the LLM mapping: %s",
+                len(backfilled),
+                sorted(backfilled) if isinstance(backfilled, list | tuple | set) else backfilled,
+            )
+
     return bundle
 
 
-def _backfill_missing_collections(
-    bundle: MappingBundle,
-    db: StandardDatabase,
-) -> MappingBundle:
-    """Ensure every non-system collection in the database is represented.
-
-    The external schema-analyzer may only discover collections that appear in
-    a named graph definition, missing standalone document or edge collections.
-    This post-processor lists all collections, compares with what the analyzer
-    found, and fills in any gaps using the heuristic approach.
-    """
-    try:
-        all_cols = db.collections()
-    except Exception:
-        return bundle
-
-    db_doc_cols: set[str] = set()
-    db_edge_cols: set[str] = set()
-    for c in all_cols:
-        if not isinstance(c, dict):
-            continue
-        name = c.get("name", "")
-        if name.startswith("_"):
-            continue
-        if c.get("type") in (3, "edge"):
-            db_edge_cols.add(name)
-        else:
-            db_doc_cols.add(name)
-
-    pm = bundle.physical_mapping
-    cs = bundle.conceptual_schema
-
-    entities_pm = dict(pm.get("entities") or {})
-    rels_pm = dict(pm.get("relationships") or {})
-    entities_cs = list(cs.get("entities") or [])
-    rels_cs = list(cs.get("relationships") or [])
-
-    known_doc_cols: set[str] = set()
-    for emap in entities_pm.values():
-        col = emap.get("collectionName", "")
-        if col:
-            known_doc_cols.add(col)
-
-    known_edge_cols: set[str] = set()
-    for rmap in rels_pm.values():
-        col = rmap.get("edgeCollectionName", "")
-        if col:
-            known_edge_cols.add(col)
-
-    missing_doc = db_doc_cols - known_doc_cols
-    missing_edge = db_edge_cols - known_edge_cols
-    if not missing_doc and not missing_edge:
-        return bundle
-
-    if missing_doc or missing_edge:
-        logger.info(
-            "Backfilling %d missing document and %d missing edge collections",
-            len(missing_doc), len(missing_edge),
-        )
-
-    def _props_to_pm(props: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-        out: dict[str, dict[str, Any]] = {}
-        for p in props:
-            name = p.get("name", "")
-            if not name:
-                continue
-            entry: dict[str, Any] = {
-                "field": p.get("field", name),
-                "type": p.get("type", "string"),
-            }
-            for k in ("sentinelValues", "numericLike", "sampleValues", "required"):
-                if k in p:
-                    entry[k] = p[k]
-            out[name] = entry
-        return out
-
-    for col_name in sorted(missing_doc):
-        type_field = _detect_type_field(db, col_name)
-        if type_field:
-            values = _type_field_values(db, col_name, type_field)
-            for val in values:
-                label = _pascal_case(val) if val else _collection_label(col_name)
-                if label in entities_pm:
-                    continue
-                props = _sample_properties_filtered(db, col_name, type_field, val)
-                entities_cs.append({"name": label, "labels": [label], "properties": props})
-                entities_pm[label] = {
-                    "style": "LABEL",
-                    "collectionName": col_name,
-                    "typeField": type_field,
-                    "typeValue": val,
-                    "properties": _props_to_pm(props),
-                }
-        else:
-            label = _collection_label(col_name)
-            if label in entities_pm:
-                continue
-            props = _sample_properties(db, col_name)
-            entities_cs.append({"name": label, "labels": [label], "properties": props})
-            entities_pm[label] = {
-                "style": "COLLECTION",
-                "collectionName": col_name,
-                "properties": _props_to_pm(props),
-            }
-
-    for col_name in sorted(missing_edge):
-        detected_field = _detect_type_field(db, col_name, candidates=_EDGE_TYPE_FIELDS)
-        if detected_field:
-            values = _type_field_values(db, col_name, detected_field)
-            for val in values:
-                if val in rels_pm:
-                    continue
-                domain, range_ = _infer_lpg_edge_endpoints(db, col_name, detected_field, val, entities_pm)
-                props = _sample_properties_filtered(db, col_name, detected_field, val)
-                rels_cs.append({
-                    "type": val,
-                    "fromEntity": domain,
-                    "toEntity": range_,
-                    "properties": props,
-                })
-                rels_pm[val] = {
-                    "style": "GENERIC_WITH_TYPE",
-                    "edgeCollectionName": col_name,
-                    "typeField": detected_field,
-                    "typeValue": val,
-                    "properties": _props_to_pm(props),
-                }
-        else:
-            rel_type = _collection_label(col_name).upper()
-            if rel_type in rels_pm:
-                continue
-            props = _sample_properties(db, col_name)
-            domain, range_ = _infer_dedicated_edge_endpoints(db, col_name, entities_pm)
-            rels_cs.append({
-                "type": rel_type,
-                "fromEntity": domain,
-                "toEntity": range_,
-                "properties": props,
-            })
-            rels_pm[rel_type] = {
-                "style": "DEDICATED_COLLECTION",
-                "edgeCollectionName": col_name,
-                "domain": domain,
-                "range": range_,
-                "properties": _props_to_pm(props),
-            }
-
-    new_pm = {**pm, "entities": entities_pm, "relationships": rels_pm}
-    new_cs = {**cs, "entities": entities_cs, "relationships": rels_cs}
-    return MappingBundle(
-        conceptual_schema=new_cs,
-        physical_mapping=new_pm,
-        metadata=bundle.metadata,
-        owl_turtle=bundle.owl_turtle,
-        source=MappingSource(
-            kind=bundle.source.kind if bundle.source else "heuristic",
-            notes=(bundle.source.notes or "") + " + backfill" if bundle.source else "backfill",
-        ),
-    )
-
-
-def _fixup_dedicated_edges(
-    bundle: MappingBundle,
-    db: StandardDatabase,
-) -> MappingBundle:
-    """Detect DEDICATED_COLLECTION edges that have a type discriminator and split them.
-
-    The analyzer sometimes treats a multi-type edge collection as a single
-    DEDICATED_COLLECTION.  This post-processor queries the database for a type
-    discriminator field and, when found, replaces the single entry with per-type
-    GENERIC_WITH_TYPE entries.
-    """
-    pm = bundle.physical_mapping
-    cs = bundle.conceptual_schema
-    rels_pm = pm.get("relationships") or {}
-    rels_cs = cs.get("relationships") or []
-    entities_pm = pm.get("entities") or {}
-
-    replacements: dict[str, list[tuple[str, dict, dict]]] = {}
-
-    for rel_name, rmap in list(rels_pm.items()):
-        if rmap.get("style") != "DEDICATED_COLLECTION":
-            continue
-        edge_col = rmap.get("edgeCollectionName") or ""
-        if not edge_col:
-            continue
-
-        detected = _detect_type_field(db, edge_col, candidates=_EDGE_TYPE_FIELDS)
-        if not detected:
-            continue
-
-        values = _type_field_values(db, edge_col, detected)
-        if len(values) < 1:
-            continue
-
-        new_entries: list[tuple[str, dict, dict]] = []
-        for val in values:
-            domain, range_ = _infer_lpg_edge_endpoints(db, edge_col, detected, val, entities_pm)
-            props = _sample_properties_filtered(db, edge_col, detected, val)
-            new_pm = {
-                "style": "GENERIC_WITH_TYPE",
-                "edgeCollectionName": edge_col,
-                "typeField": detected,
-                "typeValue": val,
-                "properties": {p["name"]: {"field": p["name"], "type": "string"} for p in props},
-            }
-            new_cs = {
-                "type": val,
-                "fromEntity": domain,
-                "toEntity": range_,
-                "properties": props,
-            }
-            new_entries.append((val, new_pm, new_cs))
-
-        if new_entries:
-            replacements[rel_name] = new_entries
-
-    if not replacements:
-        return bundle
-
-    new_rels_pm = {}
-    new_rels_cs = [r for r in rels_cs if r.get("type") not in replacements]
-    for rel_name, rmap in rels_pm.items():
-        if rel_name in replacements:
-            for val, new_pm, new_cs in replacements[rel_name]:
-                new_rels_pm[val] = new_pm
-                new_rels_cs.append(new_cs)
-        else:
-            new_rels_pm[rel_name] = rmap
-
-    new_pm = {**pm, "relationships": new_rels_pm}
-    new_cs = {**cs, "relationships": new_rels_cs}
-    return MappingBundle(
-        conceptual_schema=new_cs,
-        physical_mapping=new_pm,
-        metadata=bundle.metadata,
-        owl_turtle=bundle.owl_turtle,
-        source=bundle.source,
-    )
+# NOTE (PR-3, 2026-04-20): `_backfill_missing_collections` (~160 LOC) and
+# `_fixup_dedicated_edges` (~80 LOC) used to live here. Both closed
+# schema-analyzer capability gaps (issues #3 and #4) that shipped upstream
+# in arangodb-schema-analyzer v0.2.0 and are now invariants of the
+# `AgenticSchemaAnalyzer.analyze_physical_schema` pipeline:
+#
+#   - Multi-type edge detection → `GENERIC_WITH_TYPE` splits: handled by
+#     upstream `analyzer._prepare_analysis` + `export_mapping`.
+#   - Collection reconciliation / backfill for LLM omissions: handled by
+#     upstream `schema_analyzer.reconcile.reconcile_physical_mapping`; its
+#     summary surfaces in `metadata.reconciliation` (consumed above in
+#     `acquire_mapping_bundle` to emit a warning when backfilling occurred).
+#
+# The golden-diff gate (`scripts/pr3_workaround_diff.py`) confirmed that
+# upstream output is byte-identical with vs. without these post-processors
+# across every fixture DB (movies_pg, movies_lpg, cypher_{pg,lpg,hybrid},
+# northwind_test), so deleting them is a safe no-op on the output contract.
 
 
 def compute_statistics(
@@ -1545,7 +1335,27 @@ def _safe_refresh_statistics(
     Statistics are a best-effort metadata enrichment: a failure here (e.g.
     permission denied on a typed edge COLLECT) must not prevent the caller
     from getting their mapping back.
+
+    PR-3 (2026-04-20) short-circuit: when the analyzer has already populated
+    ``metadata.statistics`` with an ``ok`` status (issue #2 / upstream
+    ``schema_analyzer.statistics.compute_statistics`` shipped in v0.2.0),
+    the upstream block is byte-identical to what the local
+    :func:`compute_statistics` would produce and we skip the duplicate pass.
+    The local implementation is retained as the fallback for (a) the
+    heuristic tier whose bundles do not carry upstream stats, (b) the
+    stats-only refresh path on a cached bundle after row counts drift,
+    and (c) defensive rebuilds if upstream reports ``partial`` /
+    ``skipped_no_db``.
     """
+    meta = bundle.metadata or {}
+    existing = meta.get("statistics")
+    status = meta.get("statisticsStatus") or meta.get("statistics_status")
+    if isinstance(existing, dict) and existing.get("relationships") and status == "ok":
+        logger.debug(
+            "Using analyzer-supplied metadata.statistics; skipping local recompute"
+        )
+        return bundle
+
     try:
         return enrich_bundle_with_statistics(db, bundle)
     except Exception:
