@@ -1224,6 +1224,16 @@ _UI_DIR = Path(__file__).resolve().parent.parent / "ui" / "dist"
 
 if _UI_DIR.is_dir():
 
+    @app.get("/frontend", include_in_schema=False)
+    async def _spa_root():
+        """Serve index.html for the bare /frontend path (no trailing slash).
+
+        Without this, Starlette's StaticFiles mount issues a 307 redirect to
+        /frontend/ which the ArangoDB platform proxy does not forward to the
+        container, resulting in a platform-level 404.
+        """
+        return FileResponse(_UI_DIR / "index.html")
+
     @app.get("/frontend/{full_path:path}")
     async def _spa_fallback(full_path: str):
         """Serve index.html for any UI route that is not a static asset."""
