@@ -56,6 +56,14 @@ def seed_social_dataset(db: Any, *, mode: str) -> None:
     if m == "pg":
         users = _ensure_doc_collection(db, "users")
         follows = _ensure_edge_collection(db, "follows")
+        # The pg mapping fixture declares Doc/Person/Place entities alongside
+        # User. The translator emits "WITH docs, persons, places, users" on
+        # graph traversals (AQL requires every reachable collection be listed,
+        # even if the specific query only touches User). Create the empty
+        # collections so AQL parsing succeeds; tests never populate them.
+        _ensure_doc_collection(db, "docs")
+        _ensure_doc_collection(db, "persons")
+        _ensure_doc_collection(db, "places")
         _reset_collection(users)
         _reset_collection(follows)
 
@@ -141,6 +149,12 @@ def seed_social_dataset(db: Any, *, mode: str) -> None:
     # hybrid
     users = _ensure_doc_collection(db, "users")
     edges = _ensure_edge_collection(db, "edges")
+    # The hybrid mapping fixture declares Doc and Note entities that live in
+    # a shared "vertices" collection (LABEL style, type-discriminated). The
+    # translator emits "WITH users, vertices" on graph traversals so AQL
+    # parsing requires the vertices collection to exist, even though these
+    # User-centric tests never populate it.
+    _ensure_doc_collection(db, "vertices")
     _reset_collection(users)
     _reset_collection(edges)
 
