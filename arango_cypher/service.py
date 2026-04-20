@@ -40,7 +40,7 @@ from arango_query_core import (
     MappingSource,
 )
 
-from .api import TranspiledQuery, execute, get_cypher_profile, translate, validate_cypher_profile
+from .api import get_cypher_profile, translate, validate_cypher_profile
 from .extensions import register_all_extensions
 
 app = FastAPI(
@@ -65,10 +65,12 @@ app.add_middleware(
 )
 
 import logging as _logging
+
 _svc_logger = _logging.getLogger("arango_cypher.service")
 
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+
 
 @app.exception_handler(RequestValidationError)
 async def _validation_error_handler(request: Request, exc: RequestValidationError):
@@ -670,7 +672,8 @@ def schema_introspect(
     Pass ``force=true`` to bypass the 5-minute mapping cache.
     """
     db = session.db
-    from .schema_acquire import get_mapping as _get_mapping, _mapping_cache, _cache_key
+    from .schema_acquire import _cache_key, _mapping_cache
+    from .schema_acquire import get_mapping as _get_mapping
 
     if force:
         key = _cache_key(db)
@@ -732,13 +735,112 @@ def schema_statistics(
     Returns collection counts, per-entity estimated counts, per-relationship
     fan-out/fan-in metrics, cardinality patterns, and selectivity ratios.
     """
-    from .schema_acquire import compute_statistics as _compute_stats, get_mapping as _get_mapping
+    from .schema_acquire import compute_statistics as _compute_stats
+    from .schema_acquire import get_mapping as _get_mapping
 
     t0 = time.perf_counter()
     bundle = _get_mapping(session.db)
     stats = _compute_stats(session.db, bundle)
     elapsed = round(time.perf_counter() - t0, 3)
     return {"statistics": stats, "elapsed_seconds": elapsed}
+
+
+@app.get("/schema/status")
+def schema_status(
+    cache_collection: str | None = None,
+    cache_key: str | None = None,
+    session: _Session = Depends(_get_session),
+):
+    """Report whether the schema has changed since the cached mapping was built.
+
+    Cheap probe: runs ``db.collections()`` + per-collection ``count()`` +
+    ``indexes()``. No document sampling, no AQL, no LLM call. Typical cost
+    ~20 ms for a 50-collection schema.
+
+    ``status`` values:
+
+    * ``"unchanged"`` — the cached mapping is fully valid.
+    * ``"stats_changed"`` — shape matches but counts differ; calling a
+      mapping-consuming endpoint (e.g. ``/schema/introspect``) will refresh
+      only the statistics block.
+    * ``"shape_changed"`` — collection set, collection type, or an index
+      set has changed; a mapping-consuming endpoint will re-introspect.
+    * ``"no_cache"`` — no prior fingerprint recorded (e.g. first call
+      after service start or after ``POST /schema/invalidate-cache``).
+
+    Response also includes ``unchanged`` and ``needs_full_rebuild``
+    convenience booleans and the four fingerprints (current + cached,
+    shape + full) so callers can build their own diff UIs.
+
+    Use this to skip expensive prompt rebuilds / view cache busts /
+    downstream notifications when nothing has actually changed.
+    """
+    from .schema_acquire import (
+        DEFAULT_CACHE_COLLECTION,
+        DEFAULT_CACHE_KEY,
+    )
+    from .schema_acquire import (
+        describe_schema_change as _describe,
+    )
+
+    report = _describe(
+        session.db,
+        cache_collection=cache_collection or DEFAULT_CACHE_COLLECTION,
+        cache_key=cache_key or DEFAULT_CACHE_KEY,
+    )
+    return {
+        "status": report.status,
+        "unchanged": report.unchanged,
+        "needs_full_rebuild": report.needs_full_rebuild,
+        "current_shape_fingerprint": report.current_shape_fingerprint,
+        "current_full_fingerprint": report.current_full_fingerprint,
+        "cached_shape_fingerprint": report.cached_shape_fingerprint,
+        "cached_full_fingerprint": report.cached_full_fingerprint,
+    }
+
+
+@app.post("/schema/invalidate-cache")
+def schema_invalidate_cache(
+    cache_collection: str | None = None,
+    cache_key: str | None = None,
+    persistent: bool = True,
+    session: _Session = Depends(_get_session),
+):
+    """Drop the in-memory and (optionally) persistent mapping cache.
+
+    The next call to ``/schema/introspect`` — or any other mapping-consuming
+    endpoint — will re-introspect the schema unconditionally.
+
+    Query parameters:
+
+    * ``cache_collection`` — name of the persistent cache collection
+      (default: ``arango_cypher_schema_cache``). Used only when
+      ``persistent=true``.
+    * ``cache_key`` — key inside the cache collection (default:
+      ``mapping``). Used only when ``persistent=true``.
+    * ``persistent`` — when ``true`` (default), both the in-memory and the
+      persistent cache are dropped. When ``false``, only the in-memory
+      (process-local) cache is dropped; the persistent cache survives
+      and will be re-read on the next call from a cold process.
+
+    Use ``persistent=false`` for targeted in-process invalidation (e.g.
+    after an administrative action that you know only affects the current
+    replica's view, not the shared database state).
+    """
+    from .schema_acquire import (
+        DEFAULT_CACHE_COLLECTION,
+        DEFAULT_CACHE_KEY,
+    )
+    from .schema_acquire import (
+        invalidate_cache as _invalidate,
+    )
+
+    _invalidate(
+        session.db,
+        cache_collection=(cache_collection or DEFAULT_CACHE_COLLECTION) if persistent else None,
+        cache_key=cache_key or DEFAULT_CACHE_KEY,
+    )
+    return {"invalidated": True, "persistent": persistent}
 
 
 # ---------------------------------------------------------------------------

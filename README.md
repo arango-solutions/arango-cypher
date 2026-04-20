@@ -179,6 +179,20 @@ Caching is two-tier: a process-local `dict` (same-session hits) sits in front of
 
 Pass `cache_collection=None` to `get_mapping` / `describe_schema_change` when running as a read-only user who can't create collections; the in-memory cache still works. `force_refresh=True` rebypasses both tiers. `invalidate_cache(db)` wipes both tiers after a manual migration.
 
+The same surface is exposed through the HTTP service so UI clients, platform orchestrators, and monitoring probes can act on change detection without embedding Python:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/schema/status
+# { "status": "unchanged", "unchanged": true, "needs_full_rebuild": false,
+#   "current_shape_fingerprint": "…", "cached_shape_fingerprint": "…", … }
+
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/schema/invalidate-cache?persistent=true"
+# { "invalidated": true, "persistent": true }
+```
+
+`GET /schema/status` runs the same cheap probe (~20 ms for a 50-collection schema) and returns the same four status values. `POST /schema/invalidate-cache` drops both cache tiers by default; pass `?persistent=false` to drop only the process-local tier when you want the persistent cache to survive (e.g. after a replica-local administrative action that doesn't affect shared DB state).
+
 ### Arango Cypher profile (NL / agents)
 
 ```python
