@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 
 from arango_cypher.schema_acquire import (
-    CACHE_TTL_SECONDS,
     _build_heuristic_mapping,
     _cache_key,
     _mapping_cache,
@@ -364,14 +363,18 @@ class TestCaching:
             docs_by_collection={"users": [{"name": "A"}]},
         )
 
-        bundle1 = get_mapping(db, strategy="heuristic")
+        bundle1 = get_mapping(db, strategy="heuristic", cache_collection=None)
 
         key = _cache_key(db)
         assert key in _mapping_cache
-        _, ts, fp = _mapping_cache[key]
-        _mapping_cache[key] = (bundle1, ts, "stale-fingerprint")
+        _, ts, _shape_fp, _full_fp = _mapping_cache[key]
+        # Stale shape fingerprint forces a full re-introspection, not a
+        # stats-only refresh, so bundle2 is guaranteed to be freshly built.
+        _mapping_cache[key] = (
+            bundle1, ts, "stale-shape-fingerprint", "stale-full-fingerprint",
+        )
 
-        bundle2 = get_mapping(db, strategy="heuristic")
+        bundle2 = get_mapping(db, strategy="heuristic", cache_collection=None)
         assert bundle2 is not bundle1
 
     def test_cache_key_deterministic(self):
@@ -408,43 +411,134 @@ class TestCacheKey:
         assert _cache_key(db1) != _cache_key(db2)
 
 
-class TestSchemaFingerprint:
-    def test_empty_on_exception(self):
+class TestSchemaFingerprints:
+    """Shape and full fingerprints have distinct invalidation domains.
+
+    Shape fp must be stable under row-count changes (ordinary writes) and
+    must change when the collection set, collection types, or index shapes
+    change. Full fp rolls in row counts so it detects both shape and
+    content drift.
+    """
+
+    def _make_db(self, collections, indexes_by_col=None, counts_by_col=None):
         db = MagicMock()
+        db.name = "testdb"
+        db.collections.return_value = collections
+        idx = indexes_by_col or {}
+        cnt = counts_by_col or {}
+
+        def _col(name):
+            m = MagicMock()
+            m.count.return_value = cnt.get(name, 0)
+            m.indexes.return_value = idx.get(name, [])
+            return m
+
+        db.collection.side_effect = _col
+        return db
+
+    def test_shape_fp_empty_on_collections_failure(self):
+        from arango_cypher.schema_acquire import _shape_fingerprint
+        db = MagicMock()
+        db.name = "testdb"
         db.collections.side_effect = Exception("fail")
-        from arango_cypher.schema_acquire import _schema_fingerprint
-        assert _schema_fingerprint(db) == ""
+        # Still emits a hash — it is just a hash of an empty set.
+        # The key property is: deterministic, does not raise.
+        assert isinstance(_shape_fingerprint(db), str)
 
-    def test_deterministic(self):
-        from arango_cypher.schema_acquire import _schema_fingerprint
-        db = MagicMock()
-        db.name = "testdb"
-        db.collections.return_value = [
-            {"name": "users", "type": 2},
-            {"name": "orders", "type": 2},
-        ]
-        col_mock = MagicMock()
-        col_mock.count.return_value = 100
-        col_mock.indexes.return_value = [{"type": "persistent"}]
-        db.collection.return_value = col_mock
+    def test_shape_fp_deterministic_under_row_count_change(self):
+        """The core win: writes must NOT invalidate the mapping cache."""
+        from arango_cypher.schema_acquire import _shape_fingerprint
+        db = self._make_db(
+            [{"name": "users", "type": 2}],
+            indexes_by_col={"users": [{"type": "persistent", "fields": ["email"]}]},
+            counts_by_col={"users": 100},
+        )
+        fp_before = _shape_fingerprint(db)
 
-        fp1 = _schema_fingerprint(db)
-        fp2 = _schema_fingerprint(db)
-        assert fp1 == fp2
-        assert len(fp1) == 64
+        db = self._make_db(
+            [{"name": "users", "type": 2}],
+            indexes_by_col={"users": [{"type": "persistent", "fields": ["email"]}]},
+            counts_by_col={"users": 999_999},
+        )
+        fp_after = _shape_fingerprint(db)
 
-    def test_changes_with_count(self):
-        from arango_cypher.schema_acquire import _schema_fingerprint
-        db = MagicMock()
-        db.name = "testdb"
-        db.collections.return_value = [{"name": "users", "type": 2}]
-        col_mock = MagicMock()
-        col_mock.count.return_value = 100
-        col_mock.indexes.return_value = []
-        db.collection.return_value = col_mock
+        assert fp_before == fp_after
 
-        fp1 = _schema_fingerprint(db)
+    def test_shape_fp_changes_when_index_added(self):
+        from arango_cypher.schema_acquire import _shape_fingerprint
+        db_before = self._make_db(
+            [{"name": "users", "type": 2}],
+            indexes_by_col={"users": []},
+        )
+        db_after = self._make_db(
+            [{"name": "users", "type": 2}],
+            indexes_by_col={"users": [{"type": "persistent", "fields": ["email"]}]},
+        )
+        assert _shape_fingerprint(db_before) != _shape_fingerprint(db_after)
 
-        col_mock.count.return_value = 200
-        fp2 = _schema_fingerprint(db)
+    def test_shape_fp_changes_when_index_uniqueness_flips(self):
+        """Catches the pre-existing bug where only index COUNT was hashed."""
+        from arango_cypher.schema_acquire import _shape_fingerprint
+        db_before = self._make_db(
+            [{"name": "users", "type": 2}],
+            indexes_by_col={
+                "users": [{"type": "persistent", "fields": ["email"], "unique": False}]
+            },
+        )
+        db_after = self._make_db(
+            [{"name": "users", "type": 2}],
+            indexes_by_col={
+                "users": [{"type": "persistent", "fields": ["email"], "unique": True}]
+            },
+        )
+        assert _shape_fingerprint(db_before) != _shape_fingerprint(db_after)
+
+    def test_shape_fp_changes_when_collection_added(self):
+        from arango_cypher.schema_acquire import _shape_fingerprint
+        db_before = self._make_db([{"name": "users", "type": 2}])
+        db_after = self._make_db(
+            [{"name": "users", "type": 2}, {"name": "orders", "type": 2}]
+        )
+        assert _shape_fingerprint(db_before) != _shape_fingerprint(db_after)
+
+    def test_full_fp_changes_with_count(self):
+        from arango_cypher.schema_acquire import _full_fingerprint
+        db = self._make_db(
+            [{"name": "users", "type": 2}], counts_by_col={"users": 100}
+        )
+        fp1 = _full_fingerprint(db)
+        db = self._make_db(
+            [{"name": "users", "type": 2}], counts_by_col={"users": 200}
+        )
+        fp2 = _full_fingerprint(db)
         assert fp1 != fp2
+
+    def test_full_fp_always_differs_from_shape_fp_when_rows_present(self):
+        """Defence against a future refactor that accidentally collapses the
+        two fingerprints into the same hash.
+        """
+        from arango_cypher.schema_acquire import (
+            _full_fingerprint,
+            _shape_fingerprint,
+        )
+        db = self._make_db(
+            [{"name": "users", "type": 2}], counts_by_col={"users": 5}
+        )
+        assert _shape_fingerprint(db) != _full_fingerprint(db)
+
+    def test_cache_collection_itself_is_excluded(self):
+        """Reading the cache collection must not perturb either fingerprint.
+
+        Otherwise persisting the cache on write would invalidate it on the
+        next read — classic self-invalidation bug.
+        """
+        from arango_cypher.schema_acquire import _shape_fingerprint
+        from arango_cypher.schema_cache import DEFAULT_CACHE_COLLECTION
+        db_without = self._make_db([{"name": "users", "type": 2}])
+        db_with = self._make_db(
+            [
+                {"name": "users", "type": 2},
+                {"name": DEFAULT_CACHE_COLLECTION, "type": 2},
+            ]
+        )
+        assert _shape_fingerprint(db_without) == _shape_fingerprint(db_with)

@@ -149,6 +149,36 @@ print(result.cached_tokens)  # provider-agnostic cache-hit count
 
 Configuration is environment-driven — set `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENROUTER_API_KEY` (or pin explicitly with `LLM_PROVIDER=openai|anthropic|openrouter`). Without any key, the pipeline degrades to a rule-based fallback. See [`arango_cypher/nl2cypher/README.md`](arango_cypher/nl2cypher/README.md) for the degradation matrix and cache-telemetry details.
 
+### Schema change detection
+
+For long-running services that repeatedly call `get_mapping()`, the library exposes a cheap read-only probe so callers can skip unnecessary re-introspection:
+
+```python
+from arango_cypher import describe_schema_change, get_mapping, invalidate_cache
+
+report = describe_schema_change(db)
+# report.status: "unchanged" | "stats_changed" | "shape_changed" | "no_cache"
+# report.unchanged, report.needs_full_rebuild — ergonomic predicates
+
+if report.unchanged:
+    # Skip prompt rebuilds, downstream cache busting, client re-notification.
+    ...
+else:
+    # Let get_mapping() handle it. It picks the cheapest path internally:
+    #   "stats_changed"  → reuse mapping, refresh cardinality stats (~50 ms)
+    #   "shape_changed"  → full re-introspection
+    mapping = get_mapping(db)
+```
+
+Two fingerprints drive the decisions:
+
+- **Shape fingerprint** — hashes the collection set, types, and full index digests (type + fields + `unique` + `sparse` + VCI + `deduplicate`). Stable under ordinary writes; changes when the schema shape changes.
+- **Full fingerprint** — shape + per-collection row counts. Triggers the stats-only refresh path when it differs but the shape fingerprint matches.
+
+Caching is two-tier: a process-local `dict` (same-session hits) sits in front of an ArangoDB-collection cache (default: `arango_cypher_schema_cache`). The persistent cache survives service restarts and is shared across service instances pointed at the same DB — the containerized Arango Platform deployment path benefits directly.
+
+Pass `cache_collection=None` to `get_mapping` / `describe_schema_change` when running as a read-only user who can't create collections; the in-memory cache still works. `force_refresh=True` rebypasses both tiers. `invalidate_cache(db)` wipes both tiers after a manual migration.
+
 ### Arango Cypher profile (NL / agents)
 
 ```python

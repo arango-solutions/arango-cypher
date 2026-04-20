@@ -17,24 +17,44 @@ from .extensions import (
 from .nl2cypher import LLMProvider, NL2CypherResult, OpenAIProvider, nl_to_cypher
 from .parser import ParseResult, parse_cypher
 from .profile import PROFILE_SCHEMA_VERSION, build_cypher_profile
-from .schema_acquire import acquire_mapping_bundle, classify_schema, get_mapping
+from .schema_acquire import (
+    SchemaChangeReport,
+    acquire_mapping_bundle,
+    classify_schema,
+    describe_schema_change,
+    get_mapping,
+    invalidate_cache,
+)
+from .schema_cache import (
+    CACHE_SCHEMA_VERSION,
+    DEFAULT_CACHE_COLLECTION,
+    DEFAULT_CACHE_KEY,
+    ArangoSchemaCache,
+)
 from .translate_v0 import TranslateOptions
 
 __all__ = [
+    "ArangoSchemaCache",
+    "CACHE_SCHEMA_VERSION",
+    "DEFAULT_CACHE_COLLECTION",
+    "DEFAULT_CACHE_KEY",
     "LLMProvider",
     "NL2CypherResult",
     "OpenAIProvider",
     "ParseResult",
     "PROFILE_SCHEMA_VERSION",
+    "SchemaChangeReport",
     "TranslateOptions",
     "TranspiledQuery",
     "ValidationResult",
     "acquire_mapping_bundle",
     "build_cypher_profile",
     "classify_schema",
+    "describe_schema_change",
     "execute",
     "get_cypher_profile",
     "get_mapping",
+    "invalidate_cache",
     "nl_to_cypher",
     "parse_cypher",
     "register_all_extensions",

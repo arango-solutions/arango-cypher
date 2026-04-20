@@ -14,9 +14,16 @@ import hashlib
 import logging
 import re
 import time
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal
 
 from arango_query_core import CoreError, MappingBundle, MappingSource
+
+from .schema_cache import (
+    DEFAULT_CACHE_COLLECTION,
+    DEFAULT_CACHE_KEY,
+    ArangoSchemaCache,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,14 +32,15 @@ if TYPE_CHECKING:
 
 CACHE_TTL_SECONDS = 300
 
-_mapping_cache: dict[str, tuple[MappingBundle, float, str]] = {}
+# In-memory fast path: (bundle, ts, shape_fp, full_fp) keyed by db name + cache key.
+_mapping_cache: dict[str, tuple[MappingBundle, float, str, str]] = {}
 
 
-def _cache_key(db: "StandardDatabase") -> str:
+def _cache_key(db: StandardDatabase) -> str:
     """Stable cache key: database name only. Used as the dict key.
 
-    The actual staleness check is done via ``_schema_fingerprint`` which
-    includes collection names and counts.
+    The actual staleness check is done via :func:`_shape_fingerprint` and
+    :func:`_full_fingerprint` which inspect the live collection set.
     """
     try:
         return db.name
@@ -40,35 +48,195 @@ def _cache_key(db: "StandardDatabase") -> str:
         return ""
 
 
-def _schema_fingerprint(db: "StandardDatabase") -> str:
-    """Fast physical-schema fingerprint: names + counts + index count.
+def _index_digest(idx: Any) -> str:
+    """Stable digest for a single python-arango index dict.
 
-    This runs a single lightweight AQL query to capture the shape of the
-    schema without sampling any documents.  If the fingerprint hasn't
-    changed since the last introspection, we can safely return the
-    cached mapping.
+    Captures the identity-carrying fields (``type``, ``fields``, ``unique``,
+    ``sparse``) plus VCI / deduplicate flags so an index whose physical
+    shape changes invalidates the shape fingerprint. Excludes ``name`` and
+    ``id`` because ArangoDB auto-generates those and they can differ across
+    equivalent indexes.
+    """
+    if not isinstance(idx, dict):
+        return ""
+    idx_type = str(idx.get("type") or "")
+    if idx_type == "primary":
+        return ""
+    fields = idx.get("fields")
+    fields_part = ",".join(str(f) for f in fields) if isinstance(fields, list) else ""
+    return "|".join(
+        [
+            idx_type,
+            fields_part,
+            "u" if idx.get("unique") else "",
+            "s" if idx.get("sparse") else "",
+            "v" if idx.get("vci") else "",
+            "d" if idx.get("deduplicate") is False else "",
+        ]
+    )
+
+
+def _iter_user_collections(db: StandardDatabase) -> list[dict[str, Any]]:
+    """Return python-arango collection descriptors, sorted by name, with system
+    collections and cache-internal collections excluded.
+
+    Centralized so every fingerprint sees the same collection set.
     """
     try:
         cols = db.collections()
     except Exception:
-        return ""
-    parts: list[str] = []
-    for c in sorted(cols, key=lambda x: x.get("name", "") if isinstance(x, dict) else ""):
+        return []
+    out: list[dict[str, Any]] = []
+    for c in cols:
         if not isinstance(c, dict):
             continue
         name = c.get("name", "")
-        if name.startswith("_"):
+        if not isinstance(name, str) or name.startswith("_"):
             continue
+        if name == DEFAULT_CACHE_COLLECTION:
+            # Exclude the cache collection itself so reading the cache does
+            # not perturb its own fingerprint on the next round.
+            continue
+        out.append(c)
+    out.sort(key=lambda x: x.get("name", ""))
+    return out
+
+
+def _shape_fingerprint(db: StandardDatabase) -> str:
+    """Hash of the schema *shape*: collection set, types, and index digests.
+
+    Excludes row counts so ordinary writes (INSERT / UPDATE / REMOVE without
+    a schema shape change) do not invalidate the fingerprint. This is the
+    fingerprint that decides whether a full re-introspection is needed.
+    """
+    parts: list[str] = []
+    for c in _iter_user_collections(db):
+        name = c.get("name", "")
         col_type = "edge" if c.get("type") in (3, "edge") else "doc"
         try:
+            idxs = db.collection(name).indexes() or []
+        except Exception:
+            idxs = []
+        digests = sorted(d for d in (_index_digest(i) for i in idxs) if d)
+        parts.append(f"{name}:{col_type}:" + ";".join(digests))
+    raw = f"{db.name}|" + "|".join(parts)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _full_fingerprint(db: StandardDatabase) -> str:
+    """Shape fingerprint + per-collection row counts.
+
+    Changes whenever either the schema shape or any collection's row count
+    changes. When this differs but :func:`_shape_fingerprint` matches, the
+    cached mapping remains valid and only cardinality statistics need
+    re-computation (the stats-only refresh path).
+    """
+    parts: list[str] = []
+    for c in _iter_user_collections(db):
+        name = c.get("name", "")
+        try:
             count = db.collection(name).count()
-            idx_count = len(db.collection(name).indexes())
         except Exception:
             count = -1
-            idx_count = -1
-        parts.append(f"{name}:{col_type}:{count}:{idx_count}")
-    raw = f"{db.name}|{'|'.join(parts)}"
+        parts.append(f"{name}:{count}")
+    shape_fp = _shape_fingerprint(db)
+    raw = f"{shape_fp}|" + "|".join(parts)
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class SchemaChangeReport:
+    """Result of a lightweight schema-change probe.
+
+    Returned by :func:`describe_schema_change`. Compared to :func:`get_mapping`
+    this probe does not load or rebuild the mapping; it answers only the
+    question "would ``get_mapping()`` need to do real work?". Use it to
+    short-circuit application-level refresh logic (e.g. skip prompt rebuilds,
+    cache-bust downstream views, signal clients) when nothing has changed.
+
+    ``status`` values:
+
+    - ``"unchanged"`` — shape and counts both match cache; the cached mapping
+      is fully valid and includes up-to-date statistics.
+    - ``"stats_changed"`` — shape matches but counts differ. Calling
+      ``get_mapping()`` will reuse the cached conceptual schema + physical
+      mapping and refresh only the cardinality statistics in metadata.
+    - ``"shape_changed"`` — the collection set, a collection's type, or an
+      index set has changed. Calling ``get_mapping()`` triggers a full
+      re-introspection (analyzer or heuristic).
+    - ``"no_cache"`` — nothing cached yet; first call since service start or
+      after an explicit invalidation. ``get_mapping()`` will do a full
+      introspection.
+    """
+
+    status: Literal["unchanged", "stats_changed", "shape_changed", "no_cache"]
+    current_shape_fingerprint: str
+    current_full_fingerprint: str
+    cached_shape_fingerprint: str | None
+    cached_full_fingerprint: str | None
+
+    @property
+    def unchanged(self) -> bool:
+        """Ergonomic predicate: ``True`` iff ``status == "unchanged"``."""
+        return self.status == "unchanged"
+
+    @property
+    def needs_full_rebuild(self) -> bool:
+        """``True`` when the next ``get_mapping()`` will re-introspect."""
+        return self.status in ("shape_changed", "no_cache")
+
+
+def describe_schema_change(
+    db: StandardDatabase,
+    *,
+    cache_collection: str = DEFAULT_CACHE_COLLECTION,
+    cache_key: str = DEFAULT_CACHE_KEY,
+) -> SchemaChangeReport:
+    """Report whether the schema has changed since the last cached mapping.
+
+    Cheap: runs ``db.collections()`` + per-collection ``count()`` +
+    ``indexes()``. No document sampling, no AQL ``COLLECT``, no LLM call.
+    Typical cost: ~20 ms for a 50-collection schema.
+
+    Inspects the in-memory cache first, then the persistent ArangoDB
+    collection cache. Does not mutate either cache — purely read-only.
+    """
+    shape_fp = _shape_fingerprint(db)
+    full_fp = _full_fingerprint(db)
+    key = _cache_key(db)
+    cache = ArangoSchemaCache(
+        collection_name=cache_collection, cache_key=cache_key
+    )
+
+    cached_shape: str | None = None
+    cached_full: str | None = None
+
+    mem = _mapping_cache.get(key)
+    if mem is not None:
+        _bundle, _ts, cached_shape, cached_full = mem
+    else:
+        persisted = cache.get(db)
+        if persisted is not None:
+            _bundle, cached_shape, cached_full = persisted
+
+    if cached_shape is None:
+        status: Literal[
+            "unchanged", "stats_changed", "shape_changed", "no_cache"
+        ] = "no_cache"
+    elif cached_shape != shape_fp:
+        status = "shape_changed"
+    elif cached_full != full_fp:
+        status = "stats_changed"
+    else:
+        status = "unchanged"
+
+    return SchemaChangeReport(
+        status=status,
+        current_shape_fingerprint=shape_fp,
+        current_full_fingerprint=full_fp,
+        cached_shape_fingerprint=cached_shape,
+        cached_full_fingerprint=cached_full,
+    )
 
 
 _IES_TO_Y_WORDS = {
@@ -840,7 +1008,7 @@ def acquire_mapping_bundle(db: StandardDatabase, *, include_owl: bool = False) -
 
 def _backfill_missing_collections(
     bundle: MappingBundle,
-    db: "StandardDatabase",
+    db: StandardDatabase,
 ) -> MappingBundle:
     """Ensure every non-system collection in the database is represented.
 
@@ -1281,15 +1449,42 @@ def get_mapping(
     *,
     strategy: str = "auto",
     include_owl: bool = False,
+    cache_collection: str | None = DEFAULT_CACHE_COLLECTION,
+    cache_key: str = DEFAULT_CACHE_KEY,
+    force_refresh: bool = False,
 ) -> MappingBundle:
-    """3-tier mapping acquisition.
+    """3-tier mapping acquisition with two-tier caching.
 
-    strategy="auto": analyzer first (all schema types: PG, LPG, hybrid);
-                     heuristic fallback if analyzer not installed.
-    strategy="analyzer": always call acquire_mapping_bundle() (raises if
-                         not installed)
-    strategy="heuristic": never call analyzer, build best-effort mapping
-                          from classify_schema + heuristics
+    Strategies
+    ----------
+    ``strategy="auto"`` (default): analyzer first (all schema types: PG, LPG,
+    hybrid); heuristic fallback if the analyzer is not installed.
+
+    ``strategy="analyzer"``: always call ``acquire_mapping_bundle()`` (raises
+    if the analyzer is not installed).
+
+    ``strategy="heuristic"``: never call the analyzer; build a best-effort
+    mapping from ``classify_schema`` + heuristics.
+
+    Caching
+    -------
+    Two fingerprints drive the cache decisions:
+
+    - A *shape* fingerprint (collections + types + index digests). When it
+      matches, the cached conceptual + physical mapping is reused.
+    - A *full* fingerprint (shape + row counts). When it matches, cached
+      cardinality statistics are reused too; when only it differs,
+      statistics are recomputed on top of the cached mapping (the
+      "stats-only refresh" fast path).
+
+    Caches are layered:
+
+    1. Process-local ``dict`` for same-session hits.
+    2. Optional persistent ArangoDB collection (``cache_collection``) for
+       cross-restart and cross-instance sharing. Pass ``cache_collection=None``
+       to disable persistence (e.g. for read-only DB users).
+
+    ``force_refresh=True`` bypasses both caches and rebuilds from scratch.
     """
     if strategy not in ("auto", "analyzer", "heuristic"):
         raise CoreError(
@@ -1298,33 +1493,74 @@ def get_mapping(
         )
 
     key = _cache_key(db)
-    fp = _schema_fingerprint(db)
+    shape_fp = _shape_fingerprint(db)
+    full_fp = _full_fingerprint(db)
+    persistent = (
+        ArangoSchemaCache(collection_name=cache_collection, cache_key=cache_key)
+        if cache_collection
+        else None
+    )
 
-    if key and fp:
-        cached = _mapping_cache.get(key)
+    if not force_refresh and key:
+        cached = _lookup_cache(db, key, persistent)
         if cached is not None:
-            bundle, _ts, cached_fp = cached
-            if cached_fp == fp:
-                logger.debug("Schema fingerprint unchanged for %s; using cached mapping", key)
+            bundle, cached_shape, cached_full = cached
+            if cached_shape == shape_fp:
+                if cached_full == full_fp:
+                    logger.debug(
+                        "Schema unchanged for %s; using cached mapping", key
+                    )
+                    return bundle
+                logger.info(
+                    "Schema shape stable for %s; refreshing cardinality statistics only",
+                    key,
+                )
+                bundle = _safe_refresh_statistics(db, bundle)
+                _save_cache(db, key, bundle, shape_fp, full_fp, persistent)
                 return bundle
-            logger.info("Schema fingerprint changed for %s; re-introspecting", key)
+            logger.info(
+                "Schema shape changed for %s; full re-introspection", key
+            )
 
+    bundle = _build_fresh_bundle(db, strategy=strategy, include_owl=include_owl)
+    bundle = _safe_refresh_statistics(db, bundle)
+    if key:
+        _save_cache(db, key, bundle, shape_fp, full_fp, persistent)
+    return bundle
+
+
+def _build_fresh_bundle(
+    db: StandardDatabase,
+    *,
+    strategy: str,
+    include_owl: bool,
+) -> MappingBundle:
+    """Run the chosen acquisition strategy and attach OWL Turtle if requested."""
     if strategy == "analyzer":
         bundle = acquire_mapping_bundle(db, include_owl=include_owl)
     elif strategy == "heuristic":
         schema_type = classify_schema(db)
-        bundle = _build_heuristic_mapping(db, schema_type if schema_type in ("pg", "lpg", "hybrid") else "lpg")
+        bundle = _build_heuristic_mapping(
+            db,
+            schema_type if schema_type in ("pg", "lpg", "hybrid") else "lpg",
+        )
     else:
         try:
             bundle = acquire_mapping_bundle(db, include_owl=include_owl)
         except ImportError:
-            logger.info("arangodb-schema-analyzer not installed; using heuristic fallback")
+            logger.info(
+                "arangodb-schema-analyzer not installed; using heuristic fallback"
+            )
             schema_type = classify_schema(db)
-            bundle = _build_heuristic_mapping(db, schema_type if schema_type in ("pg", "lpg", "hybrid") else "lpg")
+            bundle = _build_heuristic_mapping(
+                db,
+                schema_type if schema_type in ("pg", "lpg", "hybrid") else "lpg",
+            )
 
     if include_owl and not bundle.owl_turtle:
         try:
             from arango_query_core.owl_turtle import mapping_to_turtle
+
             owl_turtle = mapping_to_turtle(bundle)
             bundle = MappingBundle(
                 conceptual_schema=bundle.conceptual_schema,
@@ -1334,14 +1570,89 @@ def get_mapping(
                 source=bundle.source,
             )
         except Exception:
-            logger.warning("Failed to generate OWL Turtle for heuristic mapping", exc_info=True)
-
-    try:
-        bundle = enrich_bundle_with_statistics(db, bundle)
-    except Exception:
-        logger.warning("Failed to compute cardinality statistics", exc_info=True)
-
-    if key:
-        _mapping_cache[key] = (bundle, time.time(), fp)
-
+            logger.warning(
+                "Failed to generate OWL Turtle for heuristic mapping",
+                exc_info=True,
+            )
     return bundle
+
+
+def _safe_refresh_statistics(
+    db: StandardDatabase, bundle: MappingBundle
+) -> MappingBundle:
+    """Re-compute cardinality statistics without failing the caller.
+
+    Statistics are a best-effort metadata enrichment: a failure here (e.g.
+    permission denied on a typed edge COLLECT) must not prevent the caller
+    from getting their mapping back.
+    """
+    try:
+        return enrich_bundle_with_statistics(db, bundle)
+    except Exception:
+        logger.warning(
+            "Failed to compute cardinality statistics", exc_info=True
+        )
+        return bundle
+
+
+def _lookup_cache(
+    db: StandardDatabase,
+    key: str,
+    persistent: ArangoSchemaCache | None,
+) -> tuple[MappingBundle, str, str] | None:
+    """Check the in-memory cache first, then the persistent cache.
+
+    Hydrates the in-memory cache from the persistent cache on hit so the
+    next call in this process skips the DB roundtrip.
+    """
+    mem = _mapping_cache.get(key)
+    if mem is not None:
+        bundle, _ts, shape_fp, full_fp = mem
+        return bundle, shape_fp, full_fp
+    if persistent is None:
+        return None
+    hit = persistent.get(db)
+    if hit is None:
+        return None
+    bundle, shape_fp, full_fp = hit
+    _mapping_cache[key] = (bundle, time.time(), shape_fp, full_fp)
+    return bundle, shape_fp, full_fp
+
+
+def _save_cache(
+    db: StandardDatabase,
+    key: str,
+    bundle: MappingBundle,
+    shape_fp: str,
+    full_fp: str,
+    persistent: ArangoSchemaCache | None,
+) -> None:
+    """Write to both cache tiers. Persistent failure is non-fatal."""
+    _mapping_cache[key] = (bundle, time.time(), shape_fp, full_fp)
+    if persistent is not None:
+        persistent.set(
+            db,
+            bundle=bundle,
+            shape_fingerprint=shape_fp,
+            full_fingerprint=full_fp,
+        )
+
+
+def invalidate_cache(
+    db: StandardDatabase,
+    *,
+    cache_collection: str | None = DEFAULT_CACHE_COLLECTION,
+    cache_key: str = DEFAULT_CACHE_KEY,
+) -> None:
+    """Drop both in-memory and persistent caches for this database.
+
+    Use after a manual schema migration or when you want the next
+    ``get_mapping()`` call to re-introspect unconditionally.
+    """
+    key = _cache_key(db)
+    if key:
+        _mapping_cache.pop(key, None)
+    if cache_collection:
+        ArangoSchemaCache(
+            collection_name=cache_collection, cache_key=cache_key
+        ).invalidate(db)
