@@ -384,7 +384,7 @@ def _validate_via_explain(
     return ok, err
 
 
-def _fix_labels(cypher: str, ctx: "_SchemaCtx") -> str:
+def _fix_labels(cypher: str, ctx: _SchemaCtx) -> str:
     """Rewrite Cypher labels that don't exist in the mapping to the closest match.
 
     Handles common LLM hallucinations like ``Actor`` → ``Person`` by using the
@@ -416,7 +416,7 @@ def _call_llm_with_retry(
     schema_summary: str,
     provider: LLMProvider,
     max_retries: int = 2,
-    ctx: "_SchemaCtx | None" = None,
+    ctx: _SchemaCtx | None = None,
     few_shot_examples: list[tuple[str, str]] | None = None,
     resolved_entities: list[str] | None = None,
     mapping: MappingBundle | None = None,
@@ -534,7 +534,7 @@ def _call_llm_with_retry(
     return None
 
 
-def _build_schema_context(bundle: MappingBundle) -> "_SchemaCtx":
+def _build_schema_context(bundle: MappingBundle) -> _SchemaCtx:
     """Extract entities, relationships, and derived lookup tables from the mapping."""
     cs = bundle.conceptual_schema
     pm = bundle.physical_mapping
@@ -900,31 +900,97 @@ def _parse_simple_filter(text: str, var: str) -> str | None:
 # Default few-shot index (lazy, process-wide)
 # ---------------------------------------------------------------------------
 
-_DEFAULT_FEWSHOT_INDEX: "FewShotIndex | None" = None
+_DEFAULT_FEWSHOT_INDEX: FewShotIndex | None = None
 _DEFAULT_FEWSHOT_RESOLVED = False
+_DEFAULT_FEWSHOT_INVALIDATION_REGISTERED = False
 
 
-def _get_default_fewshot_index() -> "FewShotIndex | None":
-    """Lazily build the default FewShotIndex from the shipped corpora.
+def _invalidate_default_fewshot_index() -> None:
+    """Drop the cached process-wide FewShotIndex.
 
-    Returns ``None`` if ``rank_bm25`` is unavailable or the corpora cannot
-    be loaded. The caller is responsible for falling back to a zero-shot
-    prompt in that case.
+    Wired into :mod:`arango_cypher.nl_corrections` via
+    :func:`register_invalidation_listener` so every saved / deleted NL
+    correction forces a rebuild on the next ``nl_to_cypher`` call. Also
+    exposed for tests and external callers that want to force a refresh
+    after mutating the corpus files directly.
     """
     global _DEFAULT_FEWSHOT_INDEX, _DEFAULT_FEWSHOT_RESOLVED
+    _DEFAULT_FEWSHOT_INDEX = None
+    _DEFAULT_FEWSHOT_RESOLVED = False
+
+
+def _ensure_nl_corrections_listener() -> None:
+    """Register the FewShotIndex invalidation hook exactly once per process.
+
+    Deferred to first-call time (rather than module import) so importing
+    ``arango_cypher.nl2cypher`` does not transitively import SQLite or
+    touch the nl_corrections database file. Safe to call repeatedly.
+    """
+    global _DEFAULT_FEWSHOT_INVALIDATION_REGISTERED
+    if _DEFAULT_FEWSHOT_INVALIDATION_REGISTERED:
+        return
+    try:
+        from arango_cypher import nl_corrections as _nlc
+
+        _nlc.register_invalidation_listener(_invalidate_default_fewshot_index)
+        _DEFAULT_FEWSHOT_INVALIDATION_REGISTERED = True
+    except Exception as exc:
+        logger.info("nl_corrections listener registration failed: %s", exc)
+
+
+def _get_default_fewshot_index() -> FewShotIndex | None:
+    """Lazily build the default FewShotIndex from shipped corpora + user
+    corrections.
+
+    Seed examples from ``arango_cypher/nl2cypher/corpora/*.yml`` are
+    loaded first; approved ``(question, cypher)`` pairs from the
+    :mod:`arango_cypher.nl_corrections` store are appended afterward,
+    so a user's correction wins ties against a seed example with the
+    same BM25 score.
+
+    Returns ``None`` if ``rank_bm25`` is unavailable or both the corpora
+    and the corrections store are empty. Caller falls back to a
+    zero-shot prompt in that case.
+    """
+    global _DEFAULT_FEWSHOT_INDEX, _DEFAULT_FEWSHOT_RESOLVED
+
+    _ensure_nl_corrections_listener()
+
     if _DEFAULT_FEWSHOT_RESOLVED:
         return _DEFAULT_FEWSHOT_INDEX
     _DEFAULT_FEWSHOT_RESOLVED = True
     try:
         from pathlib import Path
 
-        from .fewshot import FewShotIndex
+        from .fewshot import BM25Retriever, FewShotIndex, _NoopRetriever
+
         corpora_dir = Path(__file__).parent / "corpora"
         paths = sorted(corpora_dir.glob("*.yml"))
-        if not paths:
+
+        seed_index = FewShotIndex.from_corpus_files(paths) if paths else None
+        seed_examples: list[tuple[str, str]] = (
+            list(seed_index.examples) if seed_index is not None else []
+        )
+
+        correction_examples: list[tuple[str, str]] = []
+        try:
+            from arango_cypher import nl_corrections as _nlc
+
+            correction_examples = _nlc.all_examples()
+        except Exception as exc:
+            logger.info("nl_corrections load failed (ignored): %s", exc)
+
+        combined = seed_examples + correction_examples
+        if not combined:
             _DEFAULT_FEWSHOT_INDEX = None
             return None
-        _DEFAULT_FEWSHOT_INDEX = FewShotIndex.from_corpus_files(paths)
+
+        try:
+            retriever = BM25Retriever(combined)
+        except ImportError as exc:
+            logger.info("rank_bm25 not installed; FewShotIndex degrades to no-op: %s", exc)
+            retriever = _NoopRetriever()
+        _DEFAULT_FEWSHOT_INDEX = FewShotIndex(retriever, examples=combined)
     except Exception as exc:
         logger.info("FewShotIndex initialization failed: %s", exc)
         _DEFAULT_FEWSHOT_INDEX = None
@@ -939,7 +1005,7 @@ def nl_to_cypher(
     llm_provider: LLMProvider | None = None,
     max_retries: int = 2,
     use_fewshot: bool = True,
-    fewshot_index: "FewShotIndex | None" = None,
+    fewshot_index: FewShotIndex | None = None,
     use_entity_resolution: bool = True,
     entity_resolver: EntityResolver | None = None,
     db: Any | None = None,

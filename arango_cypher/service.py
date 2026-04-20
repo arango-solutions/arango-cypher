@@ -1135,6 +1135,87 @@ def delete_all_corrections():
 
 
 # ---------------------------------------------------------------------------
+# NL-corrections (few-shot feedback loop) endpoints
+# ---------------------------------------------------------------------------
+#
+# Cypher→AQL corrections (above) fix the transpiler's output for a specific
+# (cypher, mapping) pair. NL corrections operate one layer higher: they
+# capture approved ``(natural_language_question, cypher)`` pairs and feed
+# them into the FewShotIndex BM25 corpus so future similar questions
+# benefit. The two stores are deliberately separate — they have different
+# lookup keys, different lifecycle triggers, and different callers.
+
+from . import nl_corrections as _nl_corrections
+
+
+class NLCorrectionRequest(BaseModel):
+    question: str
+    cypher: str
+    mapping: dict[str, Any] = Field(default_factory=dict)
+    database: str = ""
+    note: str = ""
+
+
+@app.post("/nl-corrections")
+def save_nl_correction(req: NLCorrectionRequest):
+    """Save an approved (NL question → Cypher) pair for few-shot retrieval.
+
+    The pair is appended to the BM25 corpus the next time
+    ``POST /nl2cypher`` builds (or rebuilds) its default
+    :class:`FewShotIndex`. The FewShotIndex cache is invalidated
+    synchronously before this endpoint returns, so the improvement takes
+    effect on the very next translation request.
+    """
+    try:
+        row_id = _nl_corrections.save(
+            question=req.question,
+            cypher=req.cypher,
+            mapping=req.mapping or None,
+            database=req.database,
+            note=req.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"id": row_id, "status": "saved"}
+
+
+@app.get("/nl-corrections")
+def list_nl_corrections(limit: int = 100):
+    """List stored NL corrections, most recent first."""
+    items = _nl_corrections.list_all(limit=limit)
+    return {
+        "corrections": [
+            {
+                "id": c.id,
+                "question": c.question,
+                "cypher": c.cypher,
+                "mapping_hash": c.mapping_hash,
+                "database": c.database,
+                "created_at": c.created_at,
+                "note": c.note,
+            }
+            for c in items
+        ]
+    }
+
+
+@app.delete("/nl-corrections/{correction_id}")
+def delete_nl_correction(correction_id: int):
+    """Delete a single NL correction."""
+    found = _nl_corrections.delete(correction_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="NL correction not found")
+    return {"status": "deleted"}
+
+
+@app.delete("/nl-corrections")
+def delete_all_nl_corrections():
+    """Delete all NL corrections."""
+    count = _nl_corrections.delete_all()
+    return {"status": "deleted", "count": count}
+
+
+# ---------------------------------------------------------------------------
 # Static file serving for the Cypher Workbench UI
 # ---------------------------------------------------------------------------
 

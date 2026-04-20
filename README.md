@@ -193,6 +193,22 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 `GET /schema/status` runs the same cheap probe (~20 ms for a 50-collection schema) and returns the same four status values. `POST /schema/invalidate-cache` drops both cache tiers by default; pass `?persistent=false` to drop only the process-local tier when you want the persistent cache to survive (e.g. after a replica-local administrative action that doesn't affect shared DB state).
 
+### NL → Cypher feedback loop
+
+Two independent correction stores are wired into the pipeline. The existing Cypher → AQL store (`POST /corrections`) patches the transpiler's output for a specific `(cypher, mapping)` pair. The new NL → Cypher store one layer higher captures approved `(question, cypher)` pairs and re-enters them into the BM25 few-shot retriever on the very next translation request:
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"question": "How many actors won an Oscar?",
+       "cypher": "MATCH (p:Person)-[:WON]->(a:Award) RETURN count(DISTINCT p)"}' \
+  http://localhost:8000/nl-corrections
+# {"id": 1, "status": "saved"}
+```
+
+The save fires a cache-invalidation listener synchronously before returning, so the `FewShotIndex` is rebuilt lazily on the next `POST /nl2cypher` call. Pairs are appended *after* the shipped corpora (`movies.yml`, `northwind.yml`, `social.yml`), which means a user's correction wins ties against a seed example with the same BM25 score.
+
+Full surface: `POST /nl-corrections` (save), `GET /nl-corrections` (list), `DELETE /nl-corrections/{id}` (delete one), `DELETE /nl-corrections` (delete all). Persisted to `nl_corrections.db` (configurable via `NL_CORRECTIONS_DB`).
+
 ### Arango Cypher profile (NL / agents)
 
 ```python
