@@ -56,11 +56,25 @@ from .providers import (
     get_llm_provider,
     split_system_for_anthropic_cache,
 )
+from .tenant_guardrail import (
+    TenantContext,
+    TenantScopeViolation,
+    check_tenant_scope,
+    has_tenant_entity,
+)
+from .tenant_scope import (
+    EntityScope,
+    EntityTenantRole,
+    TenantScopeManifest,
+    analyze_tenant_scope,
+)
 
 __all__ = [
     "AnthropicProvider",
     "BM25Retriever",
     "EntityResolver",
+    "EntityScope",
+    "EntityTenantRole",
     "FewShotIndex",
     "LLMProvider",
     "NL2AqlResult",
@@ -70,10 +84,16 @@ __all__ = [
     "PromptBuilder",
     "ResolvedEntity",
     "Retriever",
+    "TenantContext",
+    "TenantScopeManifest",
+    "TenantScopeViolation",
     "_SYSTEM_PROMPT",
     "_build_schema_summary",
     "_extract_cypher_from_response",
+    "analyze_tenant_scope",
+    "check_tenant_scope",
     "get_llm_provider",
+    "has_tenant_entity",
     "nl_to_aql",
     "nl_to_cypher",
     "split_system_for_anthropic_cache",

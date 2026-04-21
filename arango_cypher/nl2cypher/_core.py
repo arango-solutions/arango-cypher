@@ -12,6 +12,17 @@ from .providers import (
     LLMProvider,
     _get_default_provider,
 )
+from .tenant_guardrail import (
+    TenantContext,
+    check_tenant_scope,
+)
+from .tenant_guardrail import (
+    prompt_section as _tenant_prompt_section,
+)
+from .tenant_scope import (
+    TenantScopeManifest,
+    analyze_tenant_scope,
+)
 
 if TYPE_CHECKING:
     from .entity_resolution import EntityResolver
@@ -274,12 +285,23 @@ class PromptBuilder:
     schema_summary: str
     few_shot_examples: list[tuple[str, str]] = field(default_factory=list)
     resolved_entities: list[str] = field(default_factory=list)
+    tenant_context: TenantContext | None = None
+    tenant_manifest: TenantScopeManifest | None = None
     retry_context: str = ""
 
     def render_system(self) -> str:
         base = _SYSTEM_PROMPT.replace("{schema}", self.schema_summary)
 
         extensions: list[str] = []
+        tenant_block = _tenant_prompt_section(
+            self.tenant_context, self.tenant_manifest,
+        )
+        if tenant_block:
+            # Order: tenant scope first so it's visually prominent and
+            # the LLM reads it before few-shot examples (which, absent
+            # a tenant-scoped example in the corpus, may otherwise
+            # dominate the output shape).
+            extensions.append(tenant_block)
         if self.few_shot_examples:
             extensions.append(self._render_few_shot_section())
         if self.resolved_entities:
@@ -421,6 +443,8 @@ def _call_llm_with_retry(
     resolved_entities: list[str] | None = None,
     mapping: MappingBundle | None = None,
     db: Any | None = None,
+    tenant_context: TenantContext | None = None,
+    tenant_manifest: TenantScopeManifest | None = None,
 ) -> NL2CypherResult | None:
     """Call the LLM provider with parse + execution-grounded validation and retry.
 
@@ -445,6 +469,8 @@ def _call_llm_with_retry(
         schema_summary=schema_summary,
         few_shot_examples=list(few_shot_examples) if few_shot_examples else [],
         resolved_entities=list(resolved_entities) if resolved_entities else [],
+        tenant_context=tenant_context,
+        tenant_manifest=tenant_manifest,
     )
     best_cypher = ""
     best_content = ""
@@ -482,18 +508,40 @@ def _call_llm_with_retry(
                     cypher, mapping=mapping, db=db,
                 )
                 if explain_ok:
-                    return NL2CypherResult(
-                        cypher=cypher,
-                        explanation=content,
-                        confidence=0.8,
-                        method="llm",
-                        schema_context=schema_summary,
-                        prompt_tokens=total_usage["prompt_tokens"],
-                        completion_tokens=total_usage["completion_tokens"],
-                        total_tokens=total_usage["total_tokens"],
-                        retries=attempt,
-                        cached_tokens=total_usage["cached_tokens"],
+                    # Tenant-scoping postcondition: runs after parse +
+                    # EXPLAIN so we only burn retries on a
+                    # semantically-valid Cypher that happens to escape
+                    # tenant isolation. Failure feeds a structured hint
+                    # back into the next attempt; exhaustion falls
+                    # through to the fail-closed path below.
+                    violation = check_tenant_scope(
+                        cypher,
+                        tenant_context=tenant_context,
+                        manifest=tenant_manifest,
                     )
+                    if violation is None:
+                        return NL2CypherResult(
+                            cypher=cypher,
+                            explanation=content,
+                            confidence=0.8,
+                            method="llm",
+                            schema_context=schema_summary,
+                            prompt_tokens=total_usage["prompt_tokens"],
+                            completion_tokens=total_usage["completion_tokens"],
+                            total_tokens=total_usage["total_tokens"],
+                            retries=attempt,
+                            cached_tokens=total_usage["cached_tokens"],
+                        )
+                    best_cypher = cypher
+                    best_content = content
+                    builder.retry_context = (
+                        f"{violation.reason} {violation.suggested_hint}"
+                    )
+                    logger.warning(
+                        "Tenant-scoping violation (attempt %d/%d): %s",
+                        attempt + 1, 1 + max_retries, violation.reason,
+                    )
+                    continue
                 best_cypher = cypher
                 best_content = content
                 builder.retry_context = (
@@ -516,6 +564,42 @@ def _call_llm_with_retry(
         except Exception as e:
             logger.warning("LLM call failed (attempt %d): %s", attempt + 1, e)
             builder.retry_context = str(e)
+
+    # Fail closed on tenant-scoping: if the last attempt was a
+    # violation, return an empty-Cypher result with a clear
+    # explanation. The UI treats an empty `cypher` as an error and
+    # surfaces the explanation — never a cross-tenant query.
+    if (
+        tenant_context is not None
+        and best_cypher
+        and check_tenant_scope(
+            best_cypher,
+            tenant_context=tenant_context,
+            manifest=tenant_manifest,
+        )
+        is not None
+    ):
+        return NL2CypherResult(
+            cypher="",
+            explanation=(
+                "Tenant-scoping guardrail: could not produce a Cypher "
+                f"query scoped to tenant {tenant_context.display_name!r} "
+                f"after {1 + max_retries} attempts. Last attempt was:\n\n"
+                f"{best_cypher}\n\n"
+                "Refusing to emit an unscoped query. Try rephrasing the "
+                "question to reference the entity more concretely, or "
+                "add a few-shot correction that demonstrates the "
+                "tenant traversal path for this schema."
+            ),
+            confidence=0.0,
+            method="tenant_guardrail_blocked",
+            schema_context=schema_summary,
+            prompt_tokens=total_usage["prompt_tokens"],
+            completion_tokens=total_usage["completion_tokens"],
+            total_tokens=total_usage["total_tokens"],
+            retries=max_retries,
+            cached_tokens=total_usage["cached_tokens"],
+        )
 
     if best_cypher:
         return NL2CypherResult(
@@ -1009,6 +1093,7 @@ def nl_to_cypher(
     use_entity_resolution: bool = True,
     entity_resolver: EntityResolver | None = None,
     db: Any | None = None,
+    tenant_context: TenantContext | None = None,
 ) -> NL2CypherResult:
     """Translate a natural language question to Cypher.
 
@@ -1057,6 +1142,14 @@ def nl_to_cypher(
     schema_summary = _build_schema_summary(bundle)
     ctx = _build_schema_context(bundle)
 
+    # Per-entity tenant scope manifest derived from the mapping. Cheap
+    # (sub-millisecond on schemas with hundreds of entities) and
+    # idempotent, so we re-derive on every call rather than caching
+    # against a mutable bundle reference. When ``tenant_context`` is
+    # None the manifest is built but never consulted — the cost is
+    # noise on the cold path.
+    tenant_manifest = analyze_tenant_scope(bundle) if tenant_context else None
+
     if use_llm:
         provider = llm_provider or _get_default_provider()
         if provider is not None:
@@ -1094,9 +1187,34 @@ def nl_to_cypher(
                 ctx=ctx, few_shot_examples=few_shot,
                 resolved_entities=resolved_lines,
                 mapping=bundle, db=db,
+                tenant_context=tenant_context,
+                tenant_manifest=tenant_manifest,
             )
+            # A `tenant_guardrail_blocked` result has empty `cypher` by
+            # design; return it instead of falling through to the
+            # rule-based fallback (which cannot enforce tenant
+            # scoping) so the UI surfaces the violation.
+            if result is not None and result.method == "tenant_guardrail_blocked":
+                return result
             if result and result.cypher:
                 return result
+
+    # Rule-based fallback cannot enforce tenant scoping — if a tenant
+    # context is active, fail closed rather than silently emitting an
+    # unscoped pattern from the rule-based translator.
+    if tenant_context is not None:
+        return NL2CypherResult(
+            cypher="",
+            explanation=(
+                "Tenant-scoping guardrail: no LLM provider is available "
+                "to produce a tenant-scoped Cypher query, and the "
+                "rule-based fallback cannot enforce tenant isolation. "
+                "Configure an LLM provider (e.g. set OPENAI_API_KEY) "
+                "to use this multi-tenant workspace."
+            ),
+            confidence=0.0,
+            method="tenant_guardrail_blocked",
+        )
 
     return _rule_based_translate(question, bundle)
 

@@ -13,7 +13,32 @@ the schema, and the transpiler converts it to AQL. This preserves the PRD
 | `providers.py` | `LLMProvider` protocol + `OpenAIProvider` / `OpenRouterProvider` / `AnthropicProvider` (Messages API + native prompt caching) |
 | `fewshot.py` | `FewShotIndex` + `BM25Retriever` (WP-25.1) |
 | `entity_resolution.py` | `EntityResolver` for pre-flight entity resolution (WP-25.2) |
+| `tenant_guardrail.py` | Wave 4r tenant-scoping postcondition — `TenantContext`, `check_tenant_scope()`, `prompt_section()`. Fires when a context is active and the emitted Cypher contains no `:Tenant` binding; translator fails closed after retry exhaustion. |
 | `corpora/*.yml` | Seed corpora for the default few-shot index |
+
+## Multi-tenant scoping (Wave 4r)
+
+Callers pass a `TenantContext(property, value, display)` when the
+workspace is multi-tenant. The NL pipeline then:
+
+1. Injects a "## Current tenant scope" block into the system prompt
+   between the schema and the few-shot section (so the LLM sees the
+   scope before the examples).
+2. After each LLM emission runs `check_tenant_scope(cypher, context)`;
+   a violation (Cypher with no `:Tenant` binding) feeds a structured
+   hint into the retry prompt.
+3. If the retry budget is exhausted with the violation still in
+   place, returns `NL2CypherResult(cypher="", method="tenant_guardrail_blocked", ...)` — **the translator never silently emits a cross-tenant query**.
+
+The label check is anchored (`:Tenant\b(?!\w)`) so prefix-collision
+labels like `:TenantUser`, `:TenantCVE`, `:TenantAppVersion` do **not**
+satisfy the constraint — handling those is the whole point of the
+guardrail.
+
+Zero-shot rendering stays byte-identical to the pre-4r shape when
+`tenant_context=None`, so single-tenant users pay zero prompt tokens
+for this feature (pinned by
+`tests/test_nl2cypher_tenant_guardrail.py::test_no_tenant_context_leaves_prompt_byte_identical`).
 
 ## Prompt composition (WP-25.4 prompt caching)
 

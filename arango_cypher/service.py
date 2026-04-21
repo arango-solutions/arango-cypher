@@ -223,6 +223,11 @@ class ExecuteResponse(BaseModel):
     bind_vars: dict[str, Any]
     warnings: list[dict[str, Any]] = []
     exec_ms: float | None = None
+    # Wall-clock time spent in the Cypher → AQL transpiler on this
+    # request. Surfaced separately from `exec_ms` so the UI can show
+    # both badges side-by-side after a Run; otherwise users lose
+    # visibility into translation cost the moment they execute.
+    translate_ms: float | None = None
 
 
 class ValidateRequest(BaseModel):
@@ -436,12 +441,14 @@ def execute_endpoint(req: ExecuteRequest, session: _Session = Depends(_get_sessi
 
     registry = _default_registry if req.extensions_enabled else None
     try:
+        t_translate = time.perf_counter()
         transpiled = translate(
             req.cypher,
             mapping=mapping,
             registry=registry,
             params=req.params,
         )
+        translate_ms = round((time.perf_counter() - t_translate) * 1000, 1)
     except CoreError as e:
         raise HTTPException(
             status_code=422,
@@ -472,6 +479,7 @@ def execute_endpoint(req: ExecuteRequest, session: _Session = Depends(_get_sessi
         bind_vars=run_bind,
         warnings=warnings,
         exec_ms=exec_ms,
+        translate_ms=translate_ms,
     )
 
 
@@ -527,12 +535,14 @@ def explain_endpoint(req: TranslateRequest, session: _Session = Depends(_get_ses
 
     registry = _default_registry if req.extensions_enabled else None
     try:
+        t_translate = time.perf_counter()
         transpiled = translate(
             req.cypher,
             mapping=mapping,
             registry=registry,
             params=req.params,
         )
+        translate_ms = round((time.perf_counter() - t_translate) * 1000, 1)
     except CoreError as e:
         raise HTTPException(
             status_code=422,
@@ -551,6 +561,7 @@ def explain_endpoint(req: TranslateRequest, session: _Session = Depends(_get_ses
         "aql": transpiled.aql,
         "bind_vars": transpiled.bind_vars,
         "plan": plan,
+        "translate_ms": translate_ms,
     }
 
 
@@ -563,12 +574,14 @@ def aql_profile_endpoint(req: TranslateRequest, session: _Session = Depends(_get
 
     registry = _default_registry if req.extensions_enabled else None
     try:
+        t_translate = time.perf_counter()
         transpiled = translate(
             req.cypher,
             mapping=mapping,
             registry=registry,
             params=req.params,
         )
+        translate_ms = round((time.perf_counter() - t_translate) * 1000, 1)
     except CoreError as e:
         raise HTTPException(
             status_code=422,
@@ -596,6 +609,7 @@ def aql_profile_endpoint(req: TranslateRequest, session: _Session = Depends(_get
         "results": results,
         "statistics": stats,
         "profile": profile_data,
+        "translate_ms": translate_ms,
     }
 
 
@@ -693,17 +707,18 @@ def schema_introspect(
     analyzer first (all schema types), heuristic fallback if the analyzer
     is not installed.
 
-    Pass ``force=true`` to bypass the 5-minute mapping cache.
+    Pass ``force=true`` to bypass *both* mapping cache tiers (in-process
+    and persistent ``_schemas`` collection). Previously this only
+    popped the in-process tier, which meant a stale entry in the
+    persistent cache would keep getting served forever — the user's
+    only recourse was to manually call ``/schema/invalidate-cache``,
+    which is non-discoverable. Forwarding ``force_refresh=True`` to
+    ``get_mapping`` makes the flag do what its name says.
     """
     db = session.db
-    from .schema_acquire import _cache_key, _mapping_cache
     from .schema_acquire import get_mapping as _get_mapping
 
-    if force:
-        key = _cache_key(db)
-        _mapping_cache.pop(key, None)
-
-    bundle = _get_mapping(db)
+    bundle = _get_mapping(db, force_refresh=force)
 
     resolver = MappingResolver(bundle)
     result = resolver.schema_summary()
@@ -943,6 +958,27 @@ def suggest_indexes(req: SuggestIndexesRequest):
 # ---------------------------------------------------------------------------
 
 
+class TenantContextPayload(BaseModel):
+    """Ambient tenant scope applied to NL translations in a session.
+
+    Mirrors :class:`arango_cypher.nl2cypher.tenant_guardrail.TenantContext`
+    on the wire. See ``/tenants`` for how the UI sources this.
+    """
+
+    property: str = Field(
+        ...,
+        description=(
+            "Physical property name on the Tenant entity (e.g. "
+            "'TENANT_HEX_ID', 'NAME', 'SUBDOMAIN')."
+        ),
+    )
+    value: str = Field(..., description="Exact value to match.")
+    display: str | None = Field(
+        default=None,
+        description="Optional human-readable label for prompts / UI.",
+    )
+
+
 class NL2CypherRequest(BaseModel):
     question: str
     mapping: dict[str, Any] | None = None
@@ -950,6 +986,7 @@ class NL2CypherRequest(BaseModel):
     use_fewshot: bool = True
     use_entity_resolution: bool = True
     session_token: str | None = None
+    tenant_context: TenantContextPayload | None = None
 
 
 @app.post("/nl2cypher")
@@ -964,6 +1001,7 @@ def nl2cypher_endpoint(req: NL2CypherRequest, _: None = Depends(_check_nl_rate_l
     shape.
     """
     from .nl2cypher import nl_to_cypher
+    from .nl2cypher.tenant_guardrail import TenantContext
 
     db = None
     if req.use_entity_resolution and req.session_token:
@@ -971,6 +1009,14 @@ def nl2cypher_endpoint(req: NL2CypherRequest, _: None = Depends(_check_nl_rate_l
         if sess is not None:
             db = sess.db
             sess.touch()
+
+    tenant_ctx = None
+    if req.tenant_context is not None:
+        tenant_ctx = TenantContext(
+            property=req.tenant_context.property,
+            value=req.tenant_context.value,
+            display=req.tenant_context.display,
+        )
 
     t0 = time.perf_counter()
     result = nl_to_cypher(
@@ -980,6 +1026,7 @@ def nl2cypher_endpoint(req: NL2CypherRequest, _: None = Depends(_check_nl_rate_l
         use_fewshot=req.use_fewshot,
         use_entity_resolution=req.use_entity_resolution,
         db=db,
+        tenant_context=tenant_ctx,
     )
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
     return {
@@ -1024,17 +1071,28 @@ def nl_samples_endpoint(req: NLSuggestRequest):
 class NL2AqlRequest(BaseModel):
     question: str
     mapping: dict[str, Any] | None = None
+    tenant_context: TenantContextPayload | None = None
 
 
 @app.post("/nl2aql")
 def nl2aql_endpoint(req: NL2AqlRequest, _: None = Depends(_check_nl_rate_limit)):
     """Translate a natural language question directly into AQL (bypassing Cypher)."""
     from .nl2cypher import nl_to_aql
+    from .nl2cypher.tenant_guardrail import TenantContext
+
+    tenant_ctx = None
+    if req.tenant_context is not None:
+        tenant_ctx = TenantContext(
+            property=req.tenant_context.property,
+            value=req.tenant_context.value,
+            display=req.tenant_context.display,
+        )
 
     t0 = time.perf_counter()
     result = nl_to_aql(
         req.question,
         mapping=req.mapping,
+        tenant_context=tenant_ctx,
     )
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
     return {
@@ -1048,6 +1106,104 @@ def nl2aql_endpoint(req: NL2AqlRequest, _: None = Depends(_check_nl_rate_limit))
         "completion_tokens": result.completion_tokens,
         "total_tokens": result.total_tokens,
         "cached_tokens": result.cached_tokens,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tenant catalog (multi-tenant graphs)
+# ---------------------------------------------------------------------------
+
+# Maximum number of tenants to surface in a single catalog response. 10k is
+# ample headroom for the target schemas (Dagster-style graphs top out around
+# 10³); clients that need more should paginate via a follow-up API.
+_TENANT_CATALOG_LIMIT = 10000
+
+
+@app.get("/tenants")
+def tenants_endpoint(
+    collection: str | None = None,
+    session: _Session = Depends(_get_session),
+):
+    """Return the list of tenants in the connected database, if any.
+
+    The optional ``collection`` query parameter lets the UI tell the
+    server which ArangoDB collection backs the conceptual ``Tenant``
+    entity (typically derived client-side from
+    ``physical_mapping.entities.Tenant.collectionName``). When omitted,
+    the endpoint falls back to the literal name ``Tenant`` — the
+    pre-Wave-4r behaviour, kept for compatibility with stale UIs.
+
+    Why a query param instead of POST-with-mapping? Three reasons:
+
+    1. POST-with-body for a pure read trips CORS preflights in
+       cross-origin deployments.
+    2. A new UI bundle deployed against an older service (the common
+       case during rolling deploys) would 405 on POST and silently
+       hide the selector with no diagnostic.
+    3. The mapping already lives in the UI's state; sending it back
+       just so the server can pluck a single string out wastes a
+       megabyte of payload per call on real schemas.
+
+    The response includes ``collection`` (the resolved name we
+    queried) and ``source`` (``"client"`` when the caller supplied
+    the name, ``"heuristic"`` when we fell back to ``"Tenant"``)
+    so the UI can show *why* detection succeeded or failed.
+    """
+    db = session.db
+    if collection:
+        resolved, source = collection, "client"
+    else:
+        resolved, source = "Tenant", "heuristic"
+
+    try:
+        has_collection = db.has_collection(resolved)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to inspect collections: {_sanitize_error(str(e))}",
+        ) from e
+
+    if not has_collection:
+        return {
+            "detected": False,
+            "tenants": [],
+            "collection": resolved,
+            "source": source,
+        }
+
+    aql = (
+        f"FOR t IN `{resolved}` "
+        f"LIMIT {_TENANT_CATALOG_LIMIT} "
+        "SORT t.NAME "
+        "RETURN { "
+        # `id` (full _id, e.g. 'Tenant/<uuid>') is the canonical
+        # tenant identifier — what the guardrail uses to scope
+        # generated Cypher. `key` is exposed too for tooltips and
+        # for the Cypher `{_key: '...'}` shorthand. The schema-
+        # specific NAME / SUBDOMAIN / TENANT_HEX_ID fields are
+        # surfaced for human display and search but are not
+        # required to exist; the LIMIT-projection tolerates nulls.
+        "id: t._id, "
+        "key: t._key, "
+        "name: t.NAME, "
+        "subdomain: t.SUBDOMAIN, "
+        "hex_id: t.TENANT_HEX_ID "
+        "}"
+    )
+    try:
+        cursor = db.aql.execute(aql)
+        tenants = list(cursor)
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Tenant catalog query failed: {_sanitize_error(str(e))}",
+        ) from e
+
+    return {
+        "detected": True,
+        "tenants": tenants,
+        "collection": resolved,
+        "source": source,
     }
 
 
@@ -1246,16 +1402,34 @@ def delete_all_nl_corrections():
 _UI_DIR = Path(__file__).resolve().parent.parent / "ui" / "dist"
 
 if _UI_DIR.is_dir():
+    # Cache policy:
+    #   - index.html (the SPA shell) MUST always revalidate. Without this,
+    #     Chrome's heuristic cache will pin a stale shell that keeps replaying
+    #     stale `/connect` calls or pointing at an old hashed asset bundle,
+    #     and the only fix is "Application → Clear site data" — exactly the
+    #     situation this comment is meant to prevent.
+    #   - /assets/* files are content-hashed by Vite, so they are safe to
+    #     mark immutable for a year.
+    _HTML_NO_CACHE = "no-cache, no-store, must-revalidate"
+    _ASSET_IMMUTABLE = "public, max-age=31536000, immutable"
 
-    @app.get("/ui/{full_path:path}")
-    async def _spa_fallback(full_path: str):
-        """Serve index.html for any UI route that is not a static asset."""
+    def _html_response(path: Path) -> FileResponse:
+        return FileResponse(path, headers={"Cache-Control": _HTML_NO_CACHE})
+
+    @app.api_route("/ui", methods=["GET", "HEAD"], include_in_schema=False)
+    @app.api_route("/ui/", methods=["GET", "HEAD"], include_in_schema=False)
+    async def _ui_index() -> FileResponse:
+        return _html_response(_UI_DIR / "index.html")
+
+    @app.api_route("/ui/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+    async def _spa_fallback(full_path: str) -> FileResponse:
+        """Serve a UI asset if it exists, otherwise fall back to index.html."""
         file = _UI_DIR / full_path
         if file.is_file():
-            return FileResponse(file)
-        return FileResponse(_UI_DIR / "index.html")
-
-    app.mount("/ui", StaticFiles(directory=str(_UI_DIR), html=True), name="ui")
+            # Non-hashed files under /ui (e.g. an icon) — revalidate too.
+            headers = {"Cache-Control": _HTML_NO_CACHE} if file.suffix == ".html" else None
+            return FileResponse(file, headers=headers) if headers else FileResponse(file)
+        return _html_response(_UI_DIR / "index.html")
 
     # The Vite build emits root-relative URLs (`/assets/...`, `/favicon.svg`,
     # `/icons.svg`) to match its dev server (`port: 5173`, no `base: '/ui/'`).
@@ -1263,9 +1437,18 @@ if _UI_DIR.is_dir():
     # its JS / CSS / icons without a rebuild.
     _UI_ASSETS = _UI_DIR / "assets"
     if _UI_ASSETS.is_dir():
+        class _ImmutableAssets(StaticFiles):
+            """StaticFiles subclass that marks hashed Vite assets immutable."""
+
+            async def get_response(self, path, scope):  # type: ignore[override]
+                response = await super().get_response(path, scope)
+                if response.status_code == 200:
+                    response.headers["Cache-Control"] = _ASSET_IMMUTABLE
+                return response
+
         app.mount(
             "/assets",
-            StaticFiles(directory=str(_UI_ASSETS)),
+            _ImmutableAssets(directory=str(_UI_ASSETS)),
             name="ui_assets",
         )
 

@@ -16,6 +16,19 @@ from arango_query_core.mapping import MappingBundle
 
 from ._core import _property_quality_hint
 from .providers import LLMProvider, _get_default_provider
+from .tenant_guardrail import TenantContext
+from .tenant_guardrail import prompt_section as _tenant_prompt_section
+from .tenant_scope import (
+    EntityTenantRole,
+    TenantScopeManifest,
+    analyze_tenant_scope,
+)
+
+# Match `Tenant` as a word-boundary token — any NL→AQL emission that
+# targets the tenant collection will contain it (e.g. `FOR t IN
+# Tenant`, `OUTBOUND "Tenant/..."`). Case-sensitive on purpose: the
+# collection name is canonical.
+_TENANT_COLLECTION_RE = re.compile(r"\bTenant\b")
 
 logger = logging.getLogger(__name__)
 
@@ -361,12 +374,75 @@ def _validate_aql_syntax(
     return True, ""
 
 
+def _aql_tenant_scope_satisfied(
+    aql: str,
+    *,
+    tenant_context: TenantContext,
+    manifest: TenantScopeManifest | None,
+) -> bool:
+    """Return ``True`` if the emitted AQL is tenant-scoped.
+
+    Manifest-aware acceptance, mirroring the Cypher guardrail:
+
+    1. If ``manifest`` is supplied and the AQL references **only**
+       collections classified as ``GLOBAL``, the query is
+       intentionally cross-tenant — accept.
+    2. If the AQL references the ``Tenant`` collection at all,
+       assume it is scoped via traversal — accept.
+    3. If ``manifest`` is supplied, look at every tenant-scoped
+       collection it knows about; if any of them appears in the AQL
+       *and* the AQL contains a filter equating that collection's
+       denorm field to ``tenant_context.value``, accept.
+    4. Otherwise, reject.
+
+    The manifest-less path falls back to rule (2) only — preserves
+    v1 behaviour for callers that haven't migrated.
+    """
+    referenced_names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", aql or ""))
+
+    if manifest is not None:
+        # GLOBAL-only short-circuit: only consider entity names the
+        # manifest knows about, otherwise we'd refuse to short-circuit
+        # any query that mentions an AQL keyword (FOR, FILTER, …) we
+        # haven't classified.
+        known_entities = referenced_names & set(manifest.entities.keys())
+        if known_entities:
+            roles = {manifest.role_of(name) for name in known_entities}
+            if roles and EntityTenantRole.TENANT_SCOPED not in roles \
+                    and EntityTenantRole.TENANT_ROOT not in roles:
+                return True
+
+    if _TENANT_COLLECTION_RE.search(aql or ""):
+        return True
+
+    if manifest is not None:
+        v = re.escape(tenant_context.value)
+        for entity_name in manifest.scoped_entities():
+            field_name = manifest.denorm_field_of(entity_name)
+            if not field_name:
+                continue
+            f = re.escape(field_name)
+            # Accept any of:
+            #   FILTER x.<field> == "<value>"
+            #   FILTER x.<field> == '<value>'
+            #   x.<field> == @<bind>  (with the bind value matching)
+            pattern = re.compile(
+                rf"\.\s*{f}\s*={{1,2}}\s*['\"]{v}['\"]",
+            )
+            if pattern.search(aql):
+                return True
+
+    return False
+
+
 def _call_llm_for_aql(
     question: str,
     schema_summary: str,
     provider: LLMProvider,
     max_retries: int = 2,
     known_collections: set[str] | None = None,
+    tenant_context: TenantContext | None = None,
+    tenant_manifest: TenantScopeManifest | None = None,
 ) -> NL2AqlResult | None:
     """Call the LLM to generate AQL directly, with validation and retry.
 
@@ -378,6 +454,20 @@ def _call_llm_for_aql(
     across retry attempts; only the user message changes per attempt.
     """
     system = _AQL_PROMPT_TEMPLATE.format(schema=schema_summary)
+    tenant_block = _tenant_prompt_section(tenant_context, tenant_manifest)
+    if tenant_block:
+        # Append the tenant-scope block after the schema+syntax
+        # reference so it is the last guidance the model reads, giving
+        # it strong anchor priority without interleaving with the AQL
+        # syntax primer. The manifest-aware block already lists each
+        # entity's correct scoping path, so we no longer pin the
+        # output to a hardcoded `FOR t IN Tenant` shape — that was
+        # incorrect for the GLOBAL-only and denorm-filter cases.
+        system = (
+            system.rstrip()
+            + "\n\n"
+            + tenant_block.replace(":Tenant", "the Tenant collection")
+        )
     last_error = ""
     total_usage: dict[str, int] = {
         "prompt_tokens": 0,
@@ -409,6 +499,35 @@ def _call_llm_for_aql(
                 aql, known_collections=known_collections,
             )
             if ok:
+                # AQL-level tenant postcondition. Manifest-aware:
+                # accept GLOBAL-only queries and denorm-field filters
+                # in addition to traversal-from-Tenant. See
+                # ``_aql_tenant_scope_satisfied`` for the full
+                # acceptance contract.
+                if (
+                    tenant_context is not None
+                    and not _aql_tenant_scope_satisfied(
+                        aql,
+                        tenant_context=tenant_context,
+                        manifest=tenant_manifest,
+                    )
+                ):
+                    last_error = (
+                        "Query is not scoped to the active tenant. "
+                        "Either filter a tenant-scoped collection on "
+                        "its denormalised tenant field "
+                        f"(e.g. `FILTER d.<TENANT_FIELD> == "
+                        f"\"{tenant_context.value}\"`), OR bind the "
+                        "Tenant collection by `_key` and traverse to "
+                        "the target via the schema's tenant-scoping "
+                        "edges. See the per-entity scoping rules above."
+                    )
+                    logger.warning(
+                        "AQL tenant-scoping violation (attempt %d/%d)",
+                        attempt + 1, 1 + max_retries,
+                    )
+                    continue
+
                 return NL2AqlResult(
                     aql=aql,
                     bind_vars=bind_vars,
@@ -455,6 +574,7 @@ def nl_to_aql(
     mapping: MappingBundle | dict[str, Any] | None = None,
     llm_provider: LLMProvider | None = None,
     max_retries: int = 2,
+    tenant_context: TenantContext | None = None,
 ) -> NL2AqlResult:
     """Translate a natural language question directly to AQL.
 
@@ -503,13 +623,30 @@ def nl_to_aql(
         )
 
     known_collections = _collect_known_collections(bundle)
+    tenant_manifest = analyze_tenant_scope(bundle) if tenant_context else None
     result = _call_llm_for_aql(
         question, schema_summary, base_provider,
         max_retries=max_retries,
         known_collections=known_collections,
+        tenant_context=tenant_context,
+        tenant_manifest=tenant_manifest,
     )
     if result and result.aql:
         return result
+
+    if tenant_context is not None:
+        return NL2AqlResult(
+            aql="",
+            bind_vars={},
+            explanation=(
+                "Tenant-scoping guardrail: could not produce an AQL query "
+                f"scoped to tenant {tenant_context.display_name!r} after "
+                f"{1 + max_retries} attempts. Refusing to emit an unscoped "
+                "query."
+            ),
+            confidence=0.0,
+            method="tenant_guardrail_blocked",
+        )
 
     return NL2AqlResult(
         aql="",
