@@ -175,9 +175,30 @@ Two fingerprints drive the decisions:
 - **Shape fingerprint** — hashes the collection set, types, and full index digests (type + fields + `unique` + `sparse` + VCI + `deduplicate`). Stable under ordinary writes; changes when the schema shape changes.
 - **Full fingerprint** — shape + per-collection row counts. Triggers the stats-only refresh path when it differs but the shape fingerprint matches.
 
+```mermaid
+stateDiagram-v2
+    direction LR
+
+    [*] --> probe : describe_schema_change(db)
+
+    probe --> no_cache       : no cached entry
+    probe --> unchanged      : shape & full both match
+    probe --> stats_changed  : shape matches,<br/>full differs
+    probe --> shape_changed  : shape differs
+
+    no_cache      --> Build   : full re-introspection<br/>~hundreds ms
+    shape_changed --> Build   : full re-introspection<br/>~hundreds ms
+    stats_changed --> Refresh : reuse mapping,<br/>refresh stats only<br/>~50 ms
+    unchanged     --> Serve   : serve cached bundle<br/>~1 ms
+
+    Build   --> [*]
+    Refresh --> [*]
+    Serve   --> [*]
+```
+
 Caching is two-tier: a process-local `dict` (same-session hits) sits in front of an ArangoDB-collection cache (default: `arango_cypher_schema_cache`). The persistent cache survives service restarts and is shared across service instances pointed at the same DB — the containerized Arango Platform deployment path benefits directly.
 
-Pass `cache_collection=None` to `get_mapping` / `describe_schema_change` when running as a read-only user who can't create collections; the in-memory cache still works. `force_refresh=True` rebypasses both tiers. `invalidate_cache(db)` wipes both tiers after a manual migration.
+Pass `cache_collection=None` to `get_mapping` / `describe_schema_change` when running as a read-only user who can't create collections; the in-memory cache still works. `force_refresh=True` bypasses both tiers (also exposed as `GET /schema/introspect?force=true` and as the **Refresh schema** button in the Workbench UI). `invalidate_cache(db)` wipes both tiers after a manual migration.
 
 The same surface is exposed through the HTTP service so UI clients, platform orchestrators, and monitoring probes can act on change detection without embedding Python:
 
@@ -192,6 +213,30 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 ```
 
 `GET /schema/status` runs the same cheap probe (~20 ms for a 50-collection schema) and returns the same four status values. `POST /schema/invalidate-cache` drops both cache tiers by default; pass `?persistent=false` to drop only the process-local tier when you want the persistent cache to survive (e.g. after a replica-local administrative action that doesn't affect shared DB state).
+
+### Multi-tenant scoping (Wave 4r)
+
+When the introspected schema declares a `Tenant` entity, the NL pipeline can be scoped to a single tenant by attaching an ambient `TenantContext` to each request:
+
+```python
+from arango_cypher.nl2cypher import nl_to_cypher, TenantContext
+
+ctx = TenantContext(property="TENANT_HEX_ID", value="abc123", display="Dagster Labs")
+
+result = nl_to_cypher(
+    "list all GSuiteUsers in the Marketing department",
+    mapping=mapping, llm_provider=get_llm_provider(), db=db,
+    tenant_context=ctx,
+)
+```
+
+Three things happen as a result:
+
+1. **Prompt injection** — the tenant clause is rendered into `PromptBuilder.render_system()` *before* the few-shot examples (so it wins on attention priority), instructing the LLM to bind a `:Tenant` node tied to `ctx.property = ctx.value`.
+2. **Postcondition validation** — `check_tenant_scope()` parses the generated Cypher and rejects it if no `:Tenant` label is bound to the configured property/value. Violations feed back into the retry loop with a hint; if the budget is exhausted, the call **fails closed** and returns `NL2CypherResult(cypher="", method="tenant_guardrail_blocked")` rather than silently issuing a cross-tenant query.
+3. **AQL postcondition** — the direct `nl_to_aql()` path applies a simpler `\bTenant\b` literal check on the generated AQL, since labels aren't carried into AQL syntax.
+
+The HTTP service mirrors this on `POST /nl2cypher` and `POST /nl2aql` via an optional `tenant_context: {property, value, display?}` field on the request body, and exposes `GET /tenants[?collection=<name>]` as a catalog probe for UI selectors. The Workbench UI auto-detects multi-tenant schemas (presence of a `Tenant` entity in the mapping), surfaces an amber **Tenant** pill in the header for ambient selection, and persists the choice per-`(url, database)` in `localStorage`.
 
 ### NL → Cypher feedback loop
 
@@ -262,7 +307,29 @@ pip install -e ".[service]"
 
 # Start the service
 uvicorn arango_cypher.service:app --host 0.0.0.0 --port 8000
+
+# For local development, add --reload so Python edits are picked up
+# without manually restarting the process. Without it, a stale uvicorn
+# will silently serve the old API while a fresh UI bundle calls new
+# routes — surfacing as 404s or 405s in the browser console.
+uvicorn arango_cypher.service:app --host 0.0.0.0 --port 8000 --reload
 ```
+
+> **Heads-up — agent/IDE shells inject HTTP proxy env vars.** If you launch
+> uvicorn from a Cursor/Claude/Codex agent shell (or any sandboxed terminal
+> that sets `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` to a loopback proxy),
+> `python-arango` will route every request to your remote ArangoDB through
+> that proxy. The proxy typically blocks unattended traffic, so the connection
+> retries 3× and surfaces in the UI as `Connection failed: Can't connect to
+> host(s) within limit (3)` (HTTP 400). Always start the backend from a plain
+> Terminal, or strip the proxy vars first:
+>
+> ```bash
+> unset HTTP_PROXY HTTPS_PROXY ALL_PROXY \
+>       http_proxy https_proxy all_proxy \
+>       SOCKS_PROXY SOCKS5_PROXY socks_proxy socks5_proxy
+> uvicorn arango_cypher.service:app --host 0.0.0.0 --port 8000 --reload
+> ```
 
 Endpoints:
 
@@ -410,6 +477,46 @@ pytest
 
 ## Architecture
 
+### System overview
+
+```mermaid
+flowchart LR
+    subgraph Clients
+        UI["Cypher Workbench UI<br/>(React · Vite · CodeMirror)"]
+        App["Application code<br/>(library mode)"]
+    end
+
+    subgraph Service["FastAPI service · arango_cypher.service"]
+        API[/HTTP + static UI/]
+        Trans["Cypher → AQL<br/>transpiler"]
+        NL["NL → Cypher pipeline<br/>+ tenant guardrail"]
+        SC["Schema cache<br/>+ change detection"]
+    end
+
+    subgraph Arango["ArangoDB"]
+        Data[("User<br/>collections")]
+        Cache[("arango_cypher_<br/>schema_cache")]
+    end
+
+    LLM["LLM providers<br/>OpenAI · Anthropic · OpenRouter"]
+
+    UI -->|HTTPS| API
+    App -.->|imports| Trans
+    App -.->|imports| NL
+    App -.->|imports| SC
+
+    API --> Trans
+    API --> NL
+    API --> SC
+
+    NL --> LLM
+    Trans --> Data
+    SC --> Cache
+    SC --> Data
+```
+
+Two consumption modes share one engine: the FastAPI service hosts both the JSON HTTP API and the built UI bundle, while the same Python package can be imported directly from application code. The transpiler is pure (no I/O); the NL pipeline reaches out to LLM providers; the schema cache writes its persistent tier into the connected ArangoDB itself (`arango_cypher_schema_cache` by default) so it survives process restarts and is shared across service replicas.
+
 ### Cypher → AQL
 
 The transpiler follows a layered pipeline:
@@ -428,30 +535,35 @@ The mapping layer supports three physical model styles:
 
 ### NL → Cypher → AQL
 
-```
-NL question
-   │
-   ├── FewShotIndex.search()          ← WP-25.1  BM25 over shipped corpora
-   ├── EntityResolver.resolve()       ← WP-25.2  live-DB fuzzy (Levenshtein + contains)
-   │
-   ▼
-PromptBuilder.render_system()        ← cache-friendly section ordering (WP-25.4)
-   │   ┌─ prelude + schema          (static — cache target)
-   │   └─ few-shot + resolved (dynamic)
-   ▼
-LLMProvider.generate()                ← OpenAI / Anthropic / OpenRouter
-   │
-   ▼
-Cypher candidate
-   │
-   ├─ arango_cypher.parse()+translate()  ← reuse the Cypher→AQL stack
-   ├─ explain_aql(db, aql)               ← WP-25.3  AQL EXPLAIN validation
-   │
-   ▼ (on failure)
-retry loop with error-context injection
-   │
-   ▼
-NL2CypherResult { cypher, aql, bind_vars, cached_tokens, retries }
+```mermaid
+flowchart TD
+    Q["NL question"]
+    TC["TenantContext<br/><i>optional, ambient from UI</i>"]
+
+    Q --> FS["FewShotIndex.search<br/><i>WP-25.1 · BM25 over corpora</i>"]
+    Q --> ER["EntityResolver.resolve<br/><i>WP-25.2 · live-DB fuzzy + LEVENSHTEIN</i>"]
+
+    FS --> PB
+    ER --> PB
+    TC --> PB
+
+    PB["PromptBuilder.render_system<br/><i>WP-25.4 cache-friendly ordering</i><br/>prelude · schema · tenant · few-shot · resolved"]
+
+    PB --> LLM[/"LLMProvider.generate<br/>OpenAI · Anthropic · OpenRouter"/]
+    LLM --> Cy[Cypher candidate]
+
+    Cy --> Parse{"translate()<br/>parse + map → AQL"}
+    Parse -->|ok| EX{"explain_aql<br/><i>WP-25.3 semantic check</i>"}
+    EX -->|ok| TG{"check_tenant_scope<br/><i>Wave 4r · :Tenant binding</i>"}
+    TG -->|ok| OK(["NL2CypherResult<br/>cypher · aql · bind_vars · cached_tokens · retries"])
+
+    Parse -->|parse error| Retry
+    EX -->|missing collection / unbound var| Retry
+    TG -->|tenant violation| Retry
+
+    Retry["builder.retry_context += error/hint"]
+    Retry -->|next attempt| LLM
+    Retry -.->|max retries exceeded<br/>+ tenant context active| Fail(["fail-closed:<br/>method = tenant_guardrail_blocked"])
 ```
 
 The LLM only sees the **conceptual** schema — label names, relationship types, properties — never the physical mapping. That invariant (§1.2 of the PRD) is why the NL path and the transpiler path remain cleanly decoupled: the `nl_to_aql()` alternative in `arango_cypher/nl2cypher/_aql.py` is deliberately separate, takes the full physical mapping as input, and is only used where the extra latitude is worth the loss of the invariant.

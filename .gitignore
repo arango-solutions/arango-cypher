@@ -58,6 +58,9 @@ ui/dist/
 corrections.db
 corrections.db-shm
 corrections.db-wal
+nl_corrections.db
+nl_corrections.db-shm
+nl_corrections.db-wal
 
 # NL->Cypher eval harness run artifacts (WP-25.5).
 # Each refresh produces tests/nl2cypher/eval/reports/<date>-<config>.{json,md}.
