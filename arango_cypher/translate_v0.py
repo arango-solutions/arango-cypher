@@ -1173,7 +1173,7 @@ def _translate_match_body(
             for_line = f"FOR {var} IN @@collection"
         else:
             primary = _pick_primary_entity_label(labels, resolver)
-            entity_mapping = resolver.resolve_entity(primary)
+            entity_mapping = resolver.resolve_entity(_strip_label_backticks(primary))
             entity_style = entity_mapping.get("style")
             if entity_style == "COLLECTION":
                 if len(labels) > 1:
@@ -1238,7 +1238,7 @@ def _translate_match_body(
         bind_vars["@uCollection"] = _infer_unlabeled_collection(resolver)
     else:
         u_primary = _pick_primary_entity_label(u_labels, resolver)
-        u_map = resolver.resolve_entity(u_primary)
+        u_map = resolver.resolve_entity(_strip_label_backticks(u_primary))
         bind_vars["@uCollection"] = u_map.get("collectionName")
         if not isinstance(bind_vars["@uCollection"], str) or not bind_vars["@uCollection"]:
             raise CoreError(f"Invalid entity mapping collectionName for: {u_primary}", code="INVALID_MAPPING")
@@ -1300,8 +1300,8 @@ def _translate_match_body(
         v_map: dict[str, Any] | None = None
         if v_labels:
             v_primary = _pick_primary_entity_label(v_labels, resolver)
-            v_map = resolver.resolve_entity(v_primary)
-        r_map = resolver.resolve_relationship(rel_type)
+            v_map = resolver.resolve_entity(_strip_label_backticks(v_primary))
+        r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
         r_style = r_map.get("style")
 
         edge_collection = ""
@@ -1518,7 +1518,7 @@ def _translate_foreach_query(
                         coll_key = _pick_bind_key("@feCollection", bind_vars)
                         all_labels = resolver.all_entity_labels()
                         if all_labels:
-                            e_map = resolver.resolve_entity(all_labels[0])
+                            e_map = resolver.resolve_entity(_strip_label_backticks(all_labels[0]))
                             bind_vars[coll_key] = e_map.get("collectionName")
                         else:
                             bind_vars[coll_key] = "unknown"
@@ -1581,7 +1581,7 @@ def _translate_mutating_query(
         raise CoreError("SET/DELETE requires labeled node in v0", code="UNSUPPORTED")
 
     primary = _pick_primary_entity_label(labels, resolver)
-    entity_mapping = resolver.resolve_entity(primary)
+    entity_mapping = resolver.resolve_entity(_strip_label_backticks(primary))
     coll_key = "@collection"
     bind_vars[coll_key] = entity_mapping["collectionName"]
 
@@ -1610,7 +1610,7 @@ def _translate_mutating_query(
         rel_type, rel_var, rel_range = _extract_relationship_type_and_var(rel_pat, default_var="r")
         direction = _relationship_direction(rel_pat)
 
-        r_map = resolver.resolve_relationship(rel_type)
+        r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
         edge_key = _pick_bind_key("@edgeCollection", bind_vars)
         bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
 
@@ -1620,7 +1620,7 @@ def _translate_mutating_query(
 
         if v_labels:
             v_primary = _pick_primary_entity_label(v_labels, resolver)
-            v_map = resolver.resolve_entity(v_primary)
+            v_map = resolver.resolve_entity(_strip_label_backticks(v_primary))
             v_style = v_map.get("style")
             if v_style == "LABEL":
                 vtf = _pick_bind_key("vTypeField", bind_vars)
@@ -2004,7 +2004,7 @@ def _compile_create_node(
         coll_key = _find_or_create_collection_bind_key("@collection", coll_name, bind_vars)
     else:
         primary = _pick_primary_entity_label(labels, resolver)
-        entity_mapping = resolver.resolve_entity(primary)
+        entity_mapping = resolver.resolve_entity(_strip_label_backticks(primary))
         style = entity_mapping.get("style")
 
         coll_key = _find_or_create_collection_bind_key(
@@ -2052,7 +2052,7 @@ def _compile_create_rel(
         raise CoreError("Exactly one relationship type is required for CREATE", code="UNSUPPORTED")
     rel_type = types[0].getText().strip()
 
-    r_map = resolver.resolve_relationship(rel_type)
+    r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
     r_style = r_map.get("style")
 
     edge_coll_name = r_map.get("edgeCollectionName") or r_map.get("collectionName")
@@ -2202,7 +2202,7 @@ def _translate_merge_query(
         raise CoreError("MERGE requires a labeled node", code="UNSUPPORTED")
 
     primary = _pick_primary_entity_label(labels, resolver)
-    entity_mapping = resolver.resolve_entity(primary)
+    entity_mapping = resolver.resolve_entity(_strip_label_backticks(primary))
     coll_key = _find_or_create_collection_bind_key(
         "@collection", entity_mapping["collectionName"], bind_vars,
     )
@@ -2360,7 +2360,7 @@ def _translate_merge_relationship(
     else:
         from_var, to_var = start_var, end_var
 
-    r_map = resolver.resolve_relationship(rel_type)
+    r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
     r_style = r_map.get("style")
     edge_coll_name = r_map.get("edgeCollectionName") or r_map.get("collectionName")
     if not isinstance(edge_coll_name, str) or not edge_coll_name:
@@ -2587,7 +2587,7 @@ def _compile_optional_node_only(
         )
 
     primary = _pick_primary_entity_label(u_labels, resolver)
-    emap = resolver.resolve_entity(primary)
+    emap = resolver.resolve_entity(_strip_label_backticks(primary))
     coll_key = _pick_bind_key("@optCollection", bind_vars)
     bind_vars[coll_key] = emap.get("collectionName")
 
@@ -2673,7 +2673,7 @@ def _compile_optional_with_chains(
         inner_v = _pick_fresh_var(f"{v_var}_0", forbidden_vars=forbidden_vars)
         inner_r = _pick_fresh_var(f"{rel_var}_0", forbidden_vars=forbidden_vars)
 
-        r_map = resolver.resolve_relationship(rel_type)
+        r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
         edge_key = _pick_bind_key("@edgeCollection", bind_vars)
         bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
         if not isinstance(bind_vars[edge_key], str) or not bind_vars[edge_key]:
@@ -2685,7 +2685,7 @@ def _compile_optional_with_chains(
         hop_filters: list[str] = []
         if v_labels:
             v_primary = _pick_primary_entity_label(v_labels, resolver)
-            v_map = resolver.resolve_entity(v_primary)
+            v_map = resolver.resolve_entity(_strip_label_backticks(v_primary))
             skip_coll_filter = resolver.edge_constrains_target(rel_type, v_primary, direction)
             if not skip_coll_filter:
                 vcoll_key = _pick_bind_key("vCollection", bind_vars)
@@ -2876,7 +2876,7 @@ def _compile_match_multi_parts_from_parts(
         primary = _pick_primary_entity_label(labels, resolver)
         if bound_labels.get(var) == primary and len(labels) == 1:
             return
-        entity_mapping = resolver.resolve_entity(primary)
+        entity_mapping = resolver.resolve_entity(_strip_label_backticks(primary))
         entity_style = entity_mapping.get("style")
 
         skip_coll_filter = (
@@ -2906,7 +2906,7 @@ def _compile_match_multi_parts_from_parts(
         bound_labels[var] = primary
 
     def emit_rel_type_filter(rel_var: str, rel_type: str) -> str | None:
-        r_map = resolver.resolve_relationship(rel_type)
+        r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
         r_style = r_map.get("style")
         if r_style == "GENERIC_WITH_TYPE":
             rtf_key = _pick_bind_key(f"{rel_var}TypeField", bind_vars)
@@ -2964,7 +2964,7 @@ def _compile_match_multi_parts_from_parts(
                 add_for(f"FOR {var} IN {_aql_collection_ref(coll_key)}")
             else:
                 primary = _pick_primary_entity_label(labels, resolver)
-                entity_mapping = resolver.resolve_entity(primary)
+                entity_mapping = resolver.resolve_entity(_strip_label_backticks(primary))
                 entity_style = entity_mapping.get("style")
 
                 bind_vars[coll_key] = entity_mapping.get("collectionName")
@@ -3009,7 +3009,7 @@ def _compile_match_multi_parts_from_parts(
                 bind_vars[ucoll_key] = _infer_unlabeled_collection(resolver)
             else:
                 u_primary = _pick_primary_entity_label(u_labels, resolver)
-                u_map = resolver.resolve_entity(u_primary)
+                u_map = resolver.resolve_entity(_strip_label_backticks(u_primary))
                 u_style = u_map.get("style")
                 bind_vars[ucoll_key] = u_map.get("collectionName")
                 if not isinstance(bind_vars[ucoll_key], str) or not bind_vars[ucoll_key]:
@@ -3063,7 +3063,7 @@ def _compile_match_multi_parts_from_parts(
             direction = _relationship_direction(rel_pat)
 
             # Relationship mapping (edge collection + optional type filter)
-            r_map = resolver.resolve_relationship(rel_type)
+            r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
             edge_key = _pick_bind_key("@edgeCollection", bind_vars)
             bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
             if not isinstance(bind_vars[edge_key], str) or not bind_vars[edge_key]:
@@ -3163,7 +3163,7 @@ def _compile_match_from_bound(
         if label is None:
             bind_vars[coll_key] = _infer_unlabeled_collection(resolver)
         else:
-            entity_mapping = resolver.resolve_entity(label)
+            entity_mapping = resolver.resolve_entity(_strip_label_backticks(label))
             entity_style = entity_mapping.get("style")
             bind_vars[coll_key] = entity_mapping.get("collectionName")
             if not isinstance(bind_vars[coll_key], str) or not bind_vars[coll_key]:
@@ -3222,8 +3222,8 @@ def _compile_match_from_bound(
         v_map: dict[str, Any] | None = None
         if v_labels:
             v_primary = _pick_primary_entity_label(v_labels, resolver)
-            v_map = resolver.resolve_entity(v_primary)
-        r_map = resolver.resolve_relationship(rel_type)
+            v_map = resolver.resolve_entity(_strip_label_backticks(v_primary))
+        r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
 
         edge_key = _pick_bind_key("@edgeCollection", bind_vars)
         bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
@@ -3330,7 +3330,7 @@ def _compile_match_pipeline(
             lines = [f"FOR {var} IN @@collection"]
         else:
             primary = _pick_primary_entity_label(labels, resolver)
-            entity_mapping = resolver.resolve_entity(primary)
+            entity_mapping = resolver.resolve_entity(_strip_label_backticks(primary))
             entity_style = entity_mapping.get("style")
             if entity_style == "COLLECTION":
                 if len(labels) > 1:
@@ -3370,7 +3370,7 @@ def _compile_match_pipeline(
         bind_vars["@uCollection"] = _infer_unlabeled_collection(resolver)
     else:
         u_primary = _pick_primary_entity_label(u_labels, resolver)
-        u_map = resolver.resolve_entity(u_primary)
+        u_map = resolver.resolve_entity(_strip_label_backticks(u_primary))
 
         bind_vars["@uCollection"] = u_map.get("collectionName")
         if not isinstance(bind_vars["@uCollection"], str) or not bind_vars["@uCollection"]:
@@ -3427,8 +3427,8 @@ def _compile_match_pipeline(
         v_map: dict[str, Any] | None = None
         if v_labels:
             v_primary = _pick_primary_entity_label(v_labels, resolver)
-            v_map = resolver.resolve_entity(v_primary)
-        r_map = resolver.resolve_relationship(rel_type)
+            v_map = resolver.resolve_entity(_strip_label_backticks(v_primary))
+        r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
 
         edge_key = _pick_bind_key("@edgeCollection", bind_vars)
         bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
@@ -3971,6 +3971,19 @@ def _extract_node_var_and_labels(
     return var, labels
 
 
+def _strip_label_backticks(name: str) -> str:
+    """Strip a single pair of enclosing backticks from an escaped label.
+
+    The parser preserves backtick-escaped identifiers verbatim (e.g. the AST
+    text for ``MATCH (m:`Foo.Bar`)`` is `` `Foo.Bar` ``), but resolver keys
+    are the raw conceptual names.  This is the canonical normalisation point
+    at the resolution boundary; we deliberately do not rewrite the AST.
+    """
+    if len(name) >= 2 and name.startswith("`") and name.endswith("`"):
+        return name[1:-1]
+    return name
+
+
 def _pick_primary_entity_label(labels: list[str], resolver: MappingResolver) -> str:
     """For multi-label nodes, pick a primary label that exists in the mapping.
 
@@ -3982,7 +3995,7 @@ def _pick_primary_entity_label(labels: list[str], resolver: MappingResolver) -> 
     last_err: CoreError | None = None
     for lab in labels:
         try:
-            resolver.resolve_entity(lab)
+            resolver.resolve_entity(_strip_label_backticks(lab))
             valid.append(lab)
         except CoreError as e:
             last_err = e
@@ -4302,7 +4315,7 @@ def _compile_subquery_body(
     rel_type, _, rel_range = _extract_relationship_type_and_var(rel_pat, default_var="_sq_r")
     direction = _relationship_direction(rel_pat)
 
-    r_map = resolver.resolve_relationship(rel_type)
+    r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
     edge_key = _pick_bind_key("@sqEdge", bind_vars)
     bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
 
@@ -4325,7 +4338,7 @@ def _compile_subquery_body(
     if t_labels:
         t_primary = _pick_primary_entity_label(t_labels, resolver)
         try:
-            t_map = resolver.resolve_entity(t_primary)
+            t_map = resolver.resolve_entity(_strip_label_backticks(t_primary))
             if t_map.get("style") == "LABEL":
                 ttf = _pick_bind_key("sqTTF", bind_vars)
                 ttv = _pick_bind_key("sqTTV", bind_vars)
@@ -4401,7 +4414,7 @@ def _compile_pattern_predicate(
     if resolver is None:
         raise CoreError("Pattern predicates require a mapping resolver", code="UNSUPPORTED")
 
-    r_map = resolver.resolve_relationship(rel_type)
+    r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
     edge_key = _pick_bind_key("@ppEdge", bind_vars)
     bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
 
@@ -4421,7 +4434,7 @@ def _compile_pattern_predicate(
         _, t_labels = _extract_node_var_and_labels(target_node, default_var="_pp_t")
         if t_labels:
             t_primary = _pick_primary_entity_label(t_labels, resolver)
-            t_map = resolver.resolve_entity(t_primary)
+            t_map = resolver.resolve_entity(_strip_label_backticks(t_primary))
             t_style = t_map.get("style")
             if t_style == "LABEL":
                 ttf = _pick_bind_key("ppTTF", bind_vars)
@@ -4499,7 +4512,7 @@ def _compile_pattern_comprehension(
     if resolver is None:
         raise CoreError("Pattern comprehension requires a mapping resolver", code="UNSUPPORTED")
 
-    r_map = resolver.resolve_relationship(rel_type)
+    r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
     edge_key = _pick_bind_key("@pcEdge", bind_vars)
     bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
 
@@ -4519,7 +4532,7 @@ def _compile_pattern_comprehension(
     if t_labels:
         t_primary = _pick_primary_entity_label(t_labels, resolver)
         try:
-            t_map = resolver.resolve_entity(t_primary)
+            t_map = resolver.resolve_entity(_strip_label_backticks(t_primary))
             if t_map.get("style") == "LABEL":
                 ttf = _pick_bind_key("pcTTF", bind_vars)
                 ttv = _pick_bind_key("pcTTV", bind_vars)

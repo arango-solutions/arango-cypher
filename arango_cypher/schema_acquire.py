@@ -561,16 +561,61 @@ def _sample_properties(
     return out
 
 
-_DOC_TYPE_FIELDS = ["type", "_type", "label", "labels", "kind", "entityType"]
+# Type-field candidate tiers.  Tier-1 names are unambiguous class discriminators
+# (accepted on the 80%-coverage rule alone).  Tier-2 names are ambiguous — they
+# are frequently used as scalar data fields too — so they additionally require a
+# low cardinality ratio and class-like values.  See docs/schema_inference_bugfix_prd.md §4.1.
+_TIER1_TYPE_FIELDS = ["type", "_type", "entityType"]
+_TIER2_TYPE_FIELDS = ["label", "labels", "kind"]
+_DOC_TYPE_FIELDS = _TIER1_TYPE_FIELDS + _TIER2_TYPE_FIELDS
 _EDGE_TYPE_FIELDS = ["type", "relation", "relType", "_type", "label"]
+
+_FILE_EXTENSION_SUFFIXES = (
+    ".rst", ".md", ".pdf", ".asciidoc", ".txt", ".rtf",
+    ".docx", ".html", ".json", ".xml", ".yaml", ".yml",
+    ".ttl", ".owl",
+)
+
+# Tier-2 cardinality cap: reject if distinct-value count exceeds this.
+_TIER2_ABSOLUTE_CARDINALITY_CAP = 50
+
+
+def _looks_class_like(value: str) -> bool:
+    """True when a candidate discriminator value plausibly names a class.
+
+    A class-like name is a short alphanumeric token without dots, slashes, or
+    whitespace, and does not end in a common file-extension suffix.
+    """
+    if not value or not value.strip():
+        return False
+    if any(c in value for c in (".", "/", " ", "\t")):
+        return False
+    lv = value.lower()
+    if any(lv.endswith(suf) for suf in _FILE_EXTENSION_SUFFIXES):
+        return False
+    return True
 
 
 def _detect_type_field(
     db: StandardDatabase,
     collection_name: str,
     candidates: list[str] | None = None,
+    *,
+    notes_sink: list[dict[str, Any]] | None = None,
 ) -> str | None:
-    """Detect the type/label discriminator field in a collection, if any."""
+    """Detect the type/label discriminator field in a collection, if any.
+
+    A candidate must pass the existing 80% coverage rule.  Tier-1 candidates
+    (``type``, ``_type``, ``entityType``) are accepted on coverage alone.
+    Tier-2 candidates (``label``, ``labels``, ``kind``) must additionally:
+      - have a distinct-value count ≤ ``max(50, int(0.5 * row_count))``, and
+      - every sampled distinct value must be class-like (no dot, slash,
+        whitespace, or file-extension suffix).
+
+    When ``notes_sink`` is provided, each considered-but-rejected candidate is
+    appended as ``{"field", "tier", "reason"}`` for observability.  Edge-side
+    candidates (``relation``, ``relType``) are treated as tier-1.
+    """
     if candidates is None:
         candidates = _DOC_TYPE_FIELDS
     try:
@@ -585,10 +630,59 @@ def _detect_type_field(
     if not docs:
         return None
 
+    def _tier(field: str) -> int:
+        return 2 if field in _TIER2_TYPE_FIELDS else 1
+
     for tf in candidates:
         count = sum(1 for d in docs if isinstance(d, dict) and tf in d)
-        if count >= len(docs) * 0.8:
+        if count < len(docs) * 0.8:
+            if notes_sink is not None and count > 0:
+                notes_sink.append({
+                    "field": tf,
+                    "tier": _tier(tf),
+                    "reason": f"coverage {count}/{len(docs)} below 80% threshold",
+                })
+            continue
+
+        if _tier(tf) == 1:
             return tf
+
+        try:
+            row_count = int(db.collection(collection_name).count() or 0)
+        except Exception:
+            row_count = len(docs)
+
+        distinct_values = _type_field_values(db, collection_name, tf)
+        distinct_count = len(distinct_values)
+
+        cardinality_cap = max(_TIER2_ABSOLUTE_CARDINALITY_CAP, int(0.5 * row_count))
+        if distinct_count > cardinality_cap:
+            if notes_sink is not None:
+                notes_sink.append({
+                    "field": tf,
+                    "tier": 2,
+                    "reason": (
+                        f"{distinct_count} distinct values over {row_count} rows "
+                        f"exceeds cardinality cap {cardinality_cap}"
+                    ),
+                })
+            continue
+
+        non_class_like = [v for v in distinct_values if not _looks_class_like(v)]
+        if non_class_like:
+            sample = non_class_like[0]
+            if notes_sink is not None:
+                notes_sink.append({
+                    "field": tf,
+                    "tier": 2,
+                    "reason": (
+                        f"value {sample!r} is not class-like "
+                        f"(contains '.', '/', whitespace, or a file extension)"
+                    ),
+                })
+            continue
+
+        return tf
     return None
 
 
@@ -781,6 +875,7 @@ def _build_heuristic_mapping(db: StandardDatabase, schema_type: str) -> MappingB
     entities_pm: dict[str, Any] = {}
     relationships_cs: list[dict[str, Any]] = []
     relationships_pm: dict[str, Any] = {}
+    heuristic_notes: dict[str, dict[str, Any]] = {}
 
     def _props_to_pm(props: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """Convert property list to physical-mapping properties dict.
@@ -834,7 +929,8 @@ def _build_heuristic_mapping(db: StandardDatabase, schema_type: str) -> MappingB
             }
     elif schema_type in ("lpg", "hybrid"):
         for col_name in doc_cols:
-            type_field = _detect_type_field(db, col_name)
+            rejected: list[dict[str, Any]] = []
+            type_field = _detect_type_field(db, col_name, notes_sink=rejected)
             if type_field:
                 values = _type_field_values(db, col_name, type_field)
                 for val in values:
@@ -856,6 +952,12 @@ def _build_heuristic_mapping(db: StandardDatabase, schema_type: str) -> MappingB
                     "style": "COLLECTION",
                     "collectionName": col_name,
                     "properties": _props_to_pm(props),
+                }
+            if rejected or type_field is None:
+                heuristic_notes[col_name] = {
+                    "rejected_candidates": rejected,
+                    "accepted_field": type_field,
+                    "resolved_style": "LABEL" if type_field else "COLLECTION",
                 }
 
         for col_name in edge_cols:
@@ -940,10 +1042,14 @@ def _build_heuristic_mapping(db: StandardDatabase, schema_type: str) -> MappingB
         "relationships": relationships_pm,
     }
 
+    metadata: dict[str, Any] = {"source": "heuristic", "schemaType": schema_type}
+    if heuristic_notes:
+        metadata["heuristic_notes"] = heuristic_notes
+
     return MappingBundle(
         conceptual_schema=conceptual_schema,
         physical_mapping=physical_mapping,
-        metadata={"source": "heuristic", "schemaType": schema_type},
+        metadata=metadata,
         source=MappingSource(kind="heuristic", notes=f"Built from {schema_type} heuristic classification"),
     )
 
