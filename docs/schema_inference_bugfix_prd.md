@@ -385,3 +385,146 @@ The `force-reacquire` endpoint is introduced in R2.5 specifically to make step 2
 - Fold this document's requirements into `python_prd.md` §5.3 (detection strategy) once the fix ships. Keep the document as the historical record of the incident and analysis.
 - Cross-reference this PRD from the implementation plan's new work-package entries (WP-27 through WP-30 proposed — see `implementation_plan.md`).
 - No change required to `multitenant_prd.md`; this bug is orthogonal to tenant isolation.
+
+---
+
+## 11) Closeout runbook — `ic-knowledge-graph-temporal` end-to-end verification
+
+This section is the executable acceptance check for the PRD. It operationalises §2.2 (binary pass/fail), §3 (goals G1-G6), and §7.2 (integration tests). Run it once, record the pass/fail per AC in §11.4, and the PRD is closed.
+
+### 11.1 Preconditions
+
+| # | Item | Command / check |
+|---|------|-----------------|
+| P1 | Backend service running locally | `uvicorn arango_cypher.service:app --host 0.0.0.0 --port 8001` |
+| P2 | UI dev server running | `cd ui && npm run dev` (default: http://localhost:5173) |
+| P3 | `arangodb-schema-analyzer` installed in the backend venv | `python -c "import arangodb_schema_analyzer; print(arangodb_schema_analyzer.__version__)"` — if this raises `ImportError`, AC-2 becomes active; otherwise AC-2 is a no-op and should be recorded as such. |
+| P4 | Connect dialog pointed at the temporal DB | In the UI Connect dialog, enter: endpoint `https://a2lc79ac.rnd.pilot.arango.ai`, user `root`, password `YzW?<N!q:OT(f8*)`, database `ic-knowledge-graph-temporal`. **Do not edit `.env`** — the default points elsewhere; this check is session-scoped. |
+| P5 | Cold cache | After connecting, run `curl -X POST http://localhost:8001/schema/force-reacquire` (or use the UI warning banner's "Force reacquire" action if it is offered). This guarantees the DB is reconciled against the newly-shipped code, not against a pre-fix cached bundle. |
+
+### 11.2 Acceptance checks
+
+Each check has exact inputs, exact expected behavior, and an exact verification command. Record one of `PASS` / `FAIL` / `N/A (reason)` per check in §11.4.
+
+---
+
+**AC-1 — Heuristic does not explode `label` into 36 fake entities (G1 / D1)**
+
+*Input:* After P4+P5, inspect the schema bundle produced for the temporal DB.
+
+*Verification:*
+```bash
+curl -s http://localhost:8001/schema/introspect \
+  | jq '[.entities[] | select(.label | test("\\."))] | length'
+```
+
+*Expected:* `0` — zero conceptual entities have `.` in their label. (Pre-fix: 43.)
+
+*Secondary check:* at least one entity with `physicalMapping.collectionName` matching `*_Documents` exists with a sensible label (e.g. `IBEXDocument`, or the COLLECTION-style name the heuristic falls back to when no valid discriminator is found):
+
+```bash
+curl -s http://localhost:8001/schema/introspect \
+  | jq '[.entities[] | select(.physicalMapping.collectionName | test("_Documents$"))] | length'
+```
+
+*Expected:* a small number (ideally 1 per `*_Documents` collection, not 36 per collection).
+
+*Evidence to capture:* paste the full `metadata.heuristic_notes` block for any `*_Documents` collection into §11.4. Per R1.4, it should carry `rejected_candidates: { label: <reason> }` and `resolved_style: "COLLECTION"` (or `"LABEL"` with a *different* discriminator if one was accepted).
+
+---
+
+**AC-2 — Analyzer-unavailable visibility (G2 / D2)**
+
+*Condition:* Only applies if P3 raised `ImportError`. If the analyzer is installed (expected on local dev), mark `N/A (analyzer installed)`.
+
+*If active:*
+
+```bash
+curl -s http://localhost:8001/schema/status | jq '.warnings'
+```
+
+*Expected:* contains `{"code": "ANALYZER_NOT_INSTALLED", ...}`.
+
+*UI check:* the yellow schema-warning banner renders at the top of the app with a "Force reacquire" action wired to `POST /schema/force-reacquire`.
+
+---
+
+**AC-3 — NL pipeline produces either a valid query or a fail-closed banner (G3 / G4 / D3 / D4)**
+
+*Input:* In the NL input box, type verbatim:
+
+> What are the different versions of the Compliance.rst document?
+
+Click **Ask**.
+
+*Expected — one of two outcomes, both are PASS:*
+
+1. **Success path:** The Cypher editor fills with a parse-valid query (e.g. `` MATCH (d:IBEXDocument {label: 'Compliance.rst'}) RETURN d.doc_version `` or equivalent). The Translate button produces AQL. Execute returns ≥1 row. No red banner.
+2. **Fail-closed path:** The red "NL → Cypher failed:" banner renders under the NL input with an explanatory message that includes the last LLM parse error and the last attempted Cypher. The Cypher editor stays **empty**. No invalid Cypher is written anywhere.
+
+*Anti-expected (FAIL):* the editor is populated with a query containing `MATCH (d:Compliance.rst ...)` (no backticks) or `` MATCH (d:`Compliance.rst` ...) `` that then fails Translate with no recovery affordance. Either of these is a regression of D3/D4.
+
+*Evidence to capture:* screenshot of the final UI state; the `method` field from the response (`"llm"` for success, `"validation_failed"` for fail-closed).
+
+---
+
+**AC-4 — Transpiler resolves backtick-escaped labels (G5 / D5)**
+
+*Input:* Paste directly into the Cypher editor (bypassing NL):
+
+```cypher
+MATCH (d:`Compliance.rst`) RETURN d.doc_version LIMIT 5
+```
+
+Click **Translate**.
+
+*Expected:* Translate succeeds. The resulting AQL targets the same collection as if the user had typed `MATCH (d:IBEXDocument {label: 'Compliance.rst'}) ...` (or whichever sensible entity AC-1 produced). No "unknown entity" / "no mapping" error.
+
+*Anti-expected (FAIL):* translate error mentioning ``` `Compliance.rst` ``` with backticks in the error message (means the backticks weren't stripped at the resolver boundary).
+
+---
+
+**AC-5 — Regenerate-from-NL UX when NL output fails Translate (G6 / D6)**
+
+*Condition:* This is only exercisable if AC-3 landed on success-path AND the produced Cypher then fails Translate for some schema-related reason. If AC-3 was fail-closed, skip and mark `N/A (fail-closed branch)`.
+
+*If AC-3 succeeded and Translate fails:*
+
+*Expected:* the red translate-error banner shows the **"Regenerate from NL with error hint"** button. The button is **enabled**. Clicking it reinvokes the NL pipeline with the translate error as `retry_context` and updates the editor.
+
+*Anti-expected (FAIL):* button is missing, disabled when `lastNlQuestion` is populated, or does not forward `retry_context` (check browser devtools: the `POST /nl2cypher` body should include `"retry_context": "<error message>"`).
+
+---
+
+**AC-6 — Red-team: mixed `label` semantics coexist in one bundle (§7.2, optional)**
+
+*Condition:* Optional per the PRD; run only if you want to close this as well. Requires a synthetic DB. If skipping, mark `N/A (optional, skipped for v1 closeout)`.
+
+*Input:* A DB with two collections:
+- `customers`: 200 rows, each with `label ∈ {"Customer", "Supplier", "Employee"}` (uniform distribution).
+- `docs`: 50 rows, each with `label` holding a unique filename.
+
+*Expected:* After `POST /schema/force-reacquire`, `/schema/introspect` returns one LPG-style entity family for `customers` (three labels) and one COLLECTION-style entity for `docs` (no filename explosion).
+
+### 11.3 Exit criteria
+
+The PRD is closed when:
+- AC-1 PASS
+- AC-2 PASS or `N/A (analyzer installed)`
+- AC-3 PASS on either branch
+- AC-4 PASS
+- AC-5 PASS or `N/A (fail-closed branch)`
+- AC-6 PASS or `N/A (optional)`
+
+### 11.4 Closeout log (fill in during verification)
+
+| AC | Result | Evidence / notes | Verified by | Date |
+|----|--------|------------------|-------------|------|
+| AC-1 | ___ | | | |
+| AC-2 | ___ | | | |
+| AC-3 | ___ | | | |
+| AC-4 | ___ | | | |
+| AC-5 | ___ | | | |
+| AC-6 | ___ | | | |
+
+**Overall PRD status:** `OPEN` — change to `CLOSED` once all rows satisfy §11.3 exit criteria.
