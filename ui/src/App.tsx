@@ -181,6 +181,13 @@ export default function App() {
   const [nlInput, setNlInput] = useState("");
   const [nlLoading, setNlLoading] = useState(false);
   const [nlInfo, setNlInfo] = useState("");
+  // WP-29: structured NL failure banner. Populated when the backend
+  // returns ``method === "validation_failed"`` (retry budget
+  // exhausted) or ``"tenant_guardrail_blocked"``. We render a red
+  // banner with the full ``explanation`` instead of writing the
+  // server's (empty) ``cypher`` into the editor — the pre-WP-29
+  // behaviour silently dropped an invalid query into the editor.
+  const [nlError, setNlError] = useState("");
   const [nlMode, setNlMode] = useState<"cypher" | "aql">("cypher");
   const directAqlRef = useRef(false); // true when AQL came from NL→AQL direct path
   const [aqlModified, setAqlModified] = useState(false);
@@ -633,6 +640,7 @@ export default function App() {
     addNlHistory(nlInput.trim());
     setNlLoading(true);
     setNlInfo("");
+    setNlError("");
     try {
       const tenantCtx = tenantContextRef.current;
       if (nlMode === "aql") {
@@ -660,6 +668,14 @@ export default function App() {
           sessionToken: state.connection.token ?? undefined,
           tenantContext: tenantCtx,
         });
+        // WP-29: structured fail-closed methods produce an empty
+        // ``cypher`` by design. Surface them as a red banner and
+        // never write the server payload into the Cypher editor.
+        // Tenant-guardrail follows the same shape but is emitted by
+        // the tenant-scope postcondition rather than the retry loop.
+        const isFailClosed =
+          resp.method === "validation_failed" ||
+          resp.method === "tenant_guardrail_blocked";
         if (resp.cypher) {
           directAqlRef.current = false;
           dispatch({ type: "SET_CYPHER", cypher: resp.cypher });
@@ -668,6 +684,8 @@ export default function App() {
           const info = `${resp.method} (${Math.round(resp.confidence * 100)}%)${ms}${tokens}`;
           setNlInfo(info);
           if (autoTranslate || autoRun) setPendingAutoTranslate(true);
+        } else if (isFailClosed) {
+          setNlError(resp.explanation || "NL → Cypher failed validation");
         } else {
           setNlInfo(resp.explanation || "Could not generate Cypher");
         }
@@ -965,12 +983,29 @@ export default function App() {
             >
               {nlLoading ? "..." : "Generate"}
             </button>
-            {nlInfo && (
+            {nlInfo && !nlError && (
               <span className="text-[10px] text-emerald-500/70 shrink-0 max-w-[280px] truncate tabular-nums" title={nlInfo}>
                 {nlInfo}
               </span>
             )}
           </div>
+
+          {nlError && (
+            <div
+              role="alert"
+              className="mx-2 mb-2 px-3 py-2 rounded border border-red-700/60 bg-red-950/40 text-red-200 text-xs whitespace-pre-wrap flex items-start gap-2"
+            >
+              <span className="font-semibold shrink-0">NL → Cypher failed:</span>
+              <span className="flex-1 break-words">{nlError}</span>
+              <button
+                onClick={() => setNlError("")}
+                className="text-red-300 hover:text-red-100 text-[10px] uppercase tracking-wide shrink-0"
+                title="Dismiss"
+              >
+                dismiss
+              </button>
+            </div>
+          )}
 
           {/* Editor toolbar */}
           <div className="flex items-center gap-2 px-3 py-2 bg-gray-900/50 border-b border-gray-800">

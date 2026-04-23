@@ -9,6 +9,8 @@ layer on top without regressing the baseline prompt.
 from __future__ import annotations
 
 from arango_cypher.nl2cypher import _SYSTEM_PROMPT, PromptBuilder
+from arango_cypher.nl2cypher._core import _build_schema_summary, _escape_label
+from arango_query_core.mapping import MappingBundle
 
 FROZEN_SYSTEM_PROMPT = (
     "You are a Cypher query expert."
@@ -22,6 +24,10 @@ FROZEN_SYSTEM_PROMPT = (
     "- Use standard Cypher syntax (MATCH, WHERE, RETURN, ORDER BY, LIMIT, etc.)\n"
     "- For counts, use count()\n"
     "- For aggregations, use collect(), sum(), avg(), min(), max()\n"
+    "- Labels and relationship types containing characters other than ASCII"
+    " letters, digits, and underscore must be wrapped in backticks, e.g."
+    " MATCH (d:`Compliance.rst`) RETURN d.doc_version. The schema below has"
+    " already pre-escaped such names; copy them verbatim.\n"
     "- Wrap the query in ```cypher``` code block\n"
     "\n"
     "{schema}"
@@ -128,3 +134,152 @@ class TestExtensionsDoNotBreakSystemPrefix:
             few_shot_examples=[("q", "MATCH (n) RETURN n")],
         ).render_system()
         assert with_examples.startswith(bare)
+
+
+# ---------------------------------------------------------------------------
+# WP-29: label-escaping in the schema card and system prompt
+# ---------------------------------------------------------------------------
+
+
+def _bundle(
+    entities: list[dict] | None = None,
+    relationships: list[dict] | None = None,
+) -> MappingBundle:
+    """Build a minimal MappingBundle shaped like the conceptual schema.
+
+    Kept inline here (rather than in conftest) because these tests are the
+    only ones that need a post-WP-27 bundle with exotic label names.
+    """
+    return MappingBundle(
+        conceptual_schema={
+            "entities": entities or [],
+            "relationships": relationships or [],
+        },
+        physical_mapping={},
+        metadata={},
+    )
+
+
+class TestEscapeLabelHelper:
+    def test_escape_label_bare_identifier_unchanged(self) -> None:
+        assert _escape_label("Person") == "Person"
+
+    def test_escape_label_leading_underscore_allowed(self) -> None:
+        assert _escape_label("_Internal") == "_Internal"
+
+    def test_escape_label_digits_after_first_char_allowed(self) -> None:
+        assert _escape_label("Entity42") == "Entity42"
+
+    def test_escape_label_wraps_dotted_name(self) -> None:
+        assert _escape_label("Compliance.rst") == "`Compliance.rst`"
+
+    def test_escape_label_wraps_hyphenated_relationship(self) -> None:
+        assert _escape_label("HAS-CONTROL") == "`HAS-CONTROL`"
+
+    def test_escape_label_wraps_leading_digit(self) -> None:
+        assert _escape_label("1stParty") == "`1stParty`"
+
+    def test_escape_label_wraps_space(self) -> None:
+        assert _escape_label("Tax Form") == "`Tax Form`"
+
+    def test_escape_label_empty_returns_empty(self) -> None:
+        assert _escape_label("") == ""
+
+
+class TestSchemaSummaryLabelEscaping:
+    def test_schema_summary_escapes_dotted_entity(self) -> None:
+        bundle = _bundle(entities=[{"name": "Compliance.rst", "properties": []}])
+        summary = _build_schema_summary(bundle)
+        assert "Node :`Compliance.rst`" in summary
+        assert "Node :Compliance.rst" not in summary
+
+    def test_schema_summary_escapes_hyphenated_relationship_type(self) -> None:
+        bundle = _bundle(
+            entities=[
+                {"name": "Document", "properties": []},
+                {"name": "Control", "properties": []},
+            ],
+            relationships=[
+                {
+                    "type": "HAS-CONTROL",
+                    "fromEntity": "Document",
+                    "toEntity": "Control",
+                    "properties": [],
+                },
+            ],
+        )
+        summary = _build_schema_summary(bundle)
+        assert "`HAS-CONTROL`" in summary
+        # Bare-identifier endpoints must not be escaped.
+        assert "(:Document)" in summary
+        assert "(:Control)" in summary
+
+    def test_schema_summary_escapes_both_endpoints_when_dotted(self) -> None:
+        bundle = _bundle(
+            entities=[
+                {"name": "Compliance.rst", "properties": []},
+                {"name": "Regulation.v2", "properties": []},
+            ],
+            relationships=[
+                {
+                    "type": "REFERENCES",
+                    "fromEntity": "Compliance.rst",
+                    "toEntity": "Regulation.v2",
+                    "properties": [],
+                },
+            ],
+        )
+        summary = _build_schema_summary(bundle)
+        assert "(:`Compliance.rst`)" in summary
+        assert "(:`Regulation.v2`)" in summary
+        assert "-[:REFERENCES]->" in summary
+
+
+class TestZeroShotByteIdenticalForBareNames:
+    """Critical regression test: bundles with only bare identifiers must
+    render byte-for-byte identically to the frozen pre-WP-29-rule layout,
+    modulo the new system-prompt rule. A schema card containing only
+    ``[A-Za-z_][A-Za-z0-9_]*`` names MUST never trigger backtick output."""
+
+    def test_bare_name_schema_card_has_no_backticks(self) -> None:
+        bundle = _bundle(
+            entities=[
+                {"name": "Person", "properties": [{"name": "name"}]},
+                {"name": "Movie", "properties": [{"name": "title"}]},
+            ],
+            relationships=[
+                {
+                    "type": "ACTED_IN",
+                    "fromEntity": "Person",
+                    "toEntity": "Movie",
+                    "properties": [],
+                },
+            ],
+        )
+        summary = _build_schema_summary(bundle)
+        assert "`" not in summary, (
+            "Bare-identifier schema card must be byte-identical to pre-WP-29 "
+            f"rendering (no backticks anywhere); got: {summary!r}"
+        )
+        assert "Node :Person" in summary
+        assert "Node :Movie" in summary
+        assert "(:Person)-[:ACTED_IN]->(:Movie)" in summary
+
+    def test_zero_shot_system_prompt_for_bare_names_matches_frozen(self) -> None:
+        bundle = _bundle(
+            entities=[{"name": "Person", "properties": [{"name": "name"}]}],
+        )
+        summary = _build_schema_summary(bundle)
+        builder = PromptBuilder(schema_summary=summary)
+        assert builder.render_system() == FROZEN_SYSTEM_PROMPT.format(
+            schema=summary,
+        )
+
+
+class TestSystemPromptBacktickRule:
+    def test_system_prompt_contains_backtick_rule(self) -> None:
+        assert "wrapped in backticks" in _SYSTEM_PROMPT
+        assert "pre-escaped" in _SYSTEM_PROMPT
+
+    def test_system_prompt_backtick_rule_cites_example(self) -> None:
+        assert "`Compliance.rst`" in _SYSTEM_PROMPT

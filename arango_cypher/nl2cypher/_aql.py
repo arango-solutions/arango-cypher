@@ -14,7 +14,7 @@ from typing import Any
 
 from arango_query_core.mapping import MappingBundle
 
-from ._core import _property_quality_hint
+from ._core import _escape_label, _property_quality_hint
 from .providers import LLMProvider, _get_default_provider
 from .tenant_guardrail import TenantContext
 from .tenant_guardrail import prompt_section as _tenant_prompt_section
@@ -203,7 +203,10 @@ def _build_physical_schema_summary(bundle: MappingBundle) -> str:
             if isinstance(est, dict) and "estimated_count" in est:
                 count_info = f" — ~{est['estimated_count']:,} documents"
 
-            lines.append(f"  Collection '{col}' (entity: {label}){type_info}{count_info}")
+            lines.append(
+                f"  Collection '{col}' (entity: {_escape_label(label)})"
+                f"{type_info}{count_info}"
+            )
             lines.append(f"    Fields: {prop_str}")
 
     if isinstance(pm.get("relationships"), dict):
@@ -239,9 +242,13 @@ def _build_physical_schema_summary(bundle: MappingBundle) -> str:
                 cardinality_info = "\n    Cardinality: " + ", ".join(parts)
 
             lines.append(
-                f"  Edge collection '{edge_col}' (relationship: {rtype}){type_info}"
+                f"  Edge collection '{edge_col}' (relationship: "
+                f"{_escape_label(rtype)}){type_info}"
             )
-            lines.append(f"    Connects: {domain}('{domain_col}') -> {range_}('{range_col}')")
+            lines.append(
+                f"    Connects: {_escape_label(domain)}('{domain_col}') -> "
+                f"{_escape_label(range_)}('{range_col}')"
+            )
             if prop_str != "no properties":
                 lines.append(f"    Fields: {prop_str}")
             if cardinality_info:

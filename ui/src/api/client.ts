@@ -244,6 +244,11 @@ export interface NL2CypherOptions {
   useEntityResolution?: boolean;
   sessionToken?: string;
   tenantContext?: TenantContext | null;
+  // WP-29 Part 4 / WP-30: optional retry hint forwarded to the LLM
+  // prompt builder (seeds ``retry_context`` on the first attempt).
+  // WP-30 will drive this from the "Regenerate from NL with error
+  // hint" action on translate failure.
+  retryContext?: string;
 }
 
 export async function nl2Cypher(
@@ -262,6 +267,7 @@ export async function nl2Cypher(
   }
   if (options.sessionToken) body.session_token = options.sessionToken;
   if (options.tenantContext) body.tenant_context = options.tenantContext;
+  if (options.retryContext) body.retry_context = options.retryContext;
   return request("/nl2cypher", {
     method: "POST",
     body: JSON.stringify(body),

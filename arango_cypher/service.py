@@ -1155,6 +1155,15 @@ class NL2CypherRequest(BaseModel):
     use_entity_resolution: bool = True
     session_token: str | None = None
     tenant_context: TenantContextPayload | None = None
+    # WP-29 Part 4: WP-30 hand-off contract. When supplied, the NL
+    # retry loop seeds ``PromptBuilder.retry_context`` on the very
+    # first attempt with the caller-provided hint (typically the
+    # parse / EXPLAIN error from a prior translate). WP-30 wires
+    # this from the UI's "Regenerate from NL with error hint"
+    # button; without a caller it stays ``None`` and the prompt is
+    # byte-identical to the pre-WP-29 shape for zero-shot bare-name
+    # schemas.
+    retry_context: str | None = None
 
 
 @app.post("/nl2cypher")
@@ -1195,6 +1204,7 @@ def nl2cypher_endpoint(req: NL2CypherRequest, _: None = Depends(_check_nl_rate_l
         use_entity_resolution=req.use_entity_resolution,
         db=db,
         tenant_context=tenant_ctx,
+        retry_context=req.retry_context,
     )
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
     return {

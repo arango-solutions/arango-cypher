@@ -184,7 +184,16 @@ class TestExecutionGroundedRetry:
         assert "Zqqwx" in res.cypher, "no EXPLAIN → accepts hallucinated label as-is"
 
     def test_retry_budget_respected(self, movies_mapping) -> None:
-        """Three EXPLAIN failures with ``max_retries=2`` → best-of with retries=2."""
+        """Three EXPLAIN failures with ``max_retries=2`` → fail-closed (WP-29 D4).
+
+        Pre-WP-29 this path returned the last invalid attempt with a
+        WARNING-prefixed ``explanation`` and ``confidence=0.3``; the UI
+        then wrote that invalid Cypher into the editor. WP-29 mirrors
+        the tenant-guardrail pattern and returns an empty ``cypher``
+        with ``method="validation_failed"`` so the UI surfaces a red
+        banner and leaves the editor untouched. The last attempted
+        Cypher is preserved inside ``explanation`` for inspection.
+        """
         provider = _Provider([
             "```cypher\nMATCH (n:A) RETURN n\n```",
             "```cypher\nMATCH (n:B) RETURN n\n```",
@@ -201,8 +210,13 @@ class TestExecutionGroundedRetry:
             max_retries=2,
         )
         assert res.retries == 2
-        assert res.cypher, "should still return the last attempt as a best-of"
-        assert res.confidence < 0.8, "best-of confidence is lower than clean-path"
+        assert res.cypher == "", "WP-29 D4: must NOT write invalid Cypher into the editor"
+        assert res.method == "validation_failed"
+        assert res.confidence == 0.0
+        assert "Last attempted Cypher was:" in res.explanation
+        # The last scripted attempt must still be inspectable inside the
+        # explanation body (WP-30 can consume this for error hinting).
+        assert "MATCH (n:C) RETURN n" in res.explanation
 
     def test_transpile_error_also_triggers_retry(self, movies_mapping) -> None:
         """Cypher that parses but doesn't transpile also feeds back."""
@@ -281,6 +295,13 @@ class TestCallLlmWithRetryDirect:
     """Direct unit tests on ``_call_llm_with_retry`` with scripted providers."""
 
     def test_empty_max_retries_zero_with_explain_fail(self, movies_mapping) -> None:
+        """``max_retries=0`` with a single EXPLAIN-failing response → fail-closed.
+
+        WP-29 D4: the retry loop no longer returns the invalid Cypher
+        on exhaustion; it emits ``method="validation_failed"`` with
+        ``cypher=""`` so the UI cannot accidentally load invalid
+        Cypher into the editor.
+        """
         provider = _Provider(["```cypher\nMATCH (n:A) RETURN n\n```"])
         db = _FakeDb(lambda a, b: {"error": True, "errorMessage": "bad"})
         schema_summary = _build_schema_summary(movies_mapping)
@@ -290,7 +311,9 @@ class TestCallLlmWithRetryDirect:
         )
         assert res is not None
         assert res.retries == 0
-        assert res.confidence < 0.8
+        assert res.method == "validation_failed"
+        assert res.cypher == ""
+        assert res.confidence == 0.0
 
     def test_explain_exception_does_not_crash(self, movies_mapping) -> None:
         """If EXPLAIN itself raises unexpectedly, the query is accepted anyway.
@@ -319,3 +342,160 @@ class TestCallLlmWithRetryDirect:
             )
         assert res.retries == 0
         assert "Person" in res.cypher
+
+
+# ---------------------------------------------------------------------------
+# WP-29: fail-closed retry exhaustion + retry_context seeding
+# ---------------------------------------------------------------------------
+
+
+class TestValidationFailedFailClosed:
+    """WP-29 D4: retry-budget exhaustion returns empty-cypher + structured method."""
+
+    def test_call_llm_with_retry_fails_closed_on_exhaustion(
+        self, movies_mapping,
+    ) -> None:
+        """Provider returns unparseable text every time; after retries we
+        must not leak ``best_cypher`` into the result — ``cypher`` must be
+        ``""`` and ``method`` must be ``"validation_failed"``."""
+        provider = _Provider([
+            "this is not cypher at all",
+            "still not cypher",
+            "nope",
+        ])
+        schema_summary = _build_schema_summary(movies_mapping)
+        res = _call_llm_with_retry(
+            "q", schema_summary, provider, max_retries=2,
+            mapping=movies_mapping, db=None,
+        )
+        assert res is not None
+        assert res.cypher == ""
+        assert res.method == "validation_failed"
+        assert res.confidence == 0.0
+        assert res.retries == 2
+        assert "validation failed after 3 attempts" in res.explanation
+        assert "Last attempted Cypher was:" in res.explanation
+
+    def test_call_llm_with_retry_does_not_write_invalid_cypher(
+        self, movies_mapping,
+    ) -> None:
+        """A caller that forgets to branch on ``method`` still cannot
+        accidentally populate the editor — ``result.cypher`` is empty
+        even though an invalid query was attempted."""
+        provider = _Provider(["garbage garbage garbage"])
+        schema_summary = _build_schema_summary(movies_mapping)
+        res = _call_llm_with_retry(
+            "q", schema_summary, provider, max_retries=0,
+            mapping=movies_mapping, db=None,
+        )
+        assert res is not None
+        assert not res.cypher, (
+            "validation_failed contract: UI must be unable to write "
+            "invalid Cypher into the editor via the cypher field"
+        )
+
+    def test_validation_failed_logs_warning(
+        self, movies_mapping, caplog,
+    ) -> None:
+        """Exhaustion emits a WARN log so operators can audit the rate."""
+        import logging
+
+        provider = _Provider(["not cypher"])
+        schema_summary = _build_schema_summary(movies_mapping)
+        with caplog.at_level(logging.WARNING, logger="arango_cypher.nl2cypher._core"):
+            res = _call_llm_with_retry(
+                "q", schema_summary, provider, max_retries=0,
+                mapping=movies_mapping, db=None,
+            )
+        assert res is not None and res.method == "validation_failed"
+        matching = [
+            r for r in caplog.records
+            if "validation_failed" in r.getMessage()
+            and r.levelno == logging.WARNING
+        ]
+        assert matching, (
+            "expected at least one WARN record citing validation_failed; "
+            f"got: {[r.getMessage() for r in caplog.records]}"
+        )
+
+    def test_nl_to_cypher_returns_validation_failed_without_falling_back(
+        self, movies_mapping,
+    ) -> None:
+        """``nl_to_cypher`` must surface ``validation_failed`` directly
+        rather than falling through to the rule-based translator (which
+        could emit a stale or partial query)."""
+        provider = _Provider(["not cypher", "also not cypher"])
+        res = nl_to_cypher(
+            "who are the people?",
+            mapping=movies_mapping,
+            use_fewshot=False,
+            use_entity_resolution=False,
+            llm_provider=provider,
+            db=None,
+            max_retries=1,
+        )
+        assert res.method == "validation_failed"
+        assert res.cypher == ""
+
+
+class TestRetryContextSeeding:
+    """WP-29 Part 4: caller-supplied ``retry_context`` seeds the first
+    attempt's user message, enabling WP-30's 'regenerate with hint' UX."""
+
+    def test_retry_context_seeded_on_first_attempt_when_provided(
+        self, movies_mapping,
+    ) -> None:
+        provider = _Provider(["```cypher\nMATCH (p:Person) RETURN p\n```"])
+        schema_summary = _build_schema_summary(movies_mapping)
+        _call_llm_with_retry(
+            "who are the people?",
+            schema_summary,
+            provider,
+            max_retries=0,
+            mapping=movies_mapping,
+            db=None,
+            retry_context="parser: expected ')' at position 17",
+        )
+        first_user = provider.seen_users[0]
+        assert first_user.endswith(
+            "Your previous Cypher was invalid: "
+            "parser: expected ')' at position 17. Please fix it."
+        )
+
+    def test_no_retry_context_keeps_first_user_message_byte_identical(
+        self, movies_mapping,
+    ) -> None:
+        """Without ``retry_context`` the first user message is the
+        question verbatim — byte-identical to the pre-WP-29 shape."""
+        provider = _Provider(["```cypher\nMATCH (p:Person) RETURN p\n```"])
+        schema_summary = _build_schema_summary(movies_mapping)
+        _call_llm_with_retry(
+            "who are the people?",
+            schema_summary,
+            provider,
+            max_retries=0,
+            mapping=movies_mapping,
+            db=None,
+        )
+        assert provider.seen_users[0] == "who are the people?"
+
+    def test_retry_context_plumbed_through_nl_to_cypher(
+        self, movies_mapping,
+    ) -> None:
+        """End-to-end: the public ``nl_to_cypher`` accepts
+        ``retry_context`` and forwards it into the builder."""
+        provider = _Provider(["```cypher\nMATCH (p:Person) RETURN p\n```"])
+        nl_to_cypher(
+            "find people",
+            mapping=movies_mapping,
+            use_fewshot=False,
+            use_entity_resolution=False,
+            llm_provider=provider,
+            db=None,
+            retry_context="translate error: unknown property x",
+        )
+        assert provider.seen_users, "provider must have been called"
+        assert (
+            "Your previous Cypher was invalid: translate error: "
+            "unknown property x. Please fix it."
+        ) in provider.seen_users[0]

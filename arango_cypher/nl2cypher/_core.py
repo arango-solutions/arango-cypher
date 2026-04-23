@@ -124,6 +124,25 @@ _DATA_QUALITY_BLOCK_CYPHER = (
 )
 
 
+# Pre-WP-29 the schema card emitted raw labels like ``Node :Compliance.rst``
+# and the LLM faithfully copied them back — producing Cypher that fails
+# ANTLR parse at ``:Compliance.`` because ``oC_SymbolicName`` requires
+# backtick-escaping for any character outside ``[A-Za-z_][A-Za-z0-9_]*``.
+# ``_escape_label`` wraps a label in backticks only when its name actually
+# contains non-identifier characters. Bare identifiers (``Person``,
+# ``Movie``, ``BELONGS_TO``) are returned unchanged, which preserves the
+# byte-stable zero-shot prompt that provider-side prefix caching depends
+# on.
+_SYMBOLIC_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _escape_label(name: str) -> str:
+    """Backtick-escape a Cypher label / relationship type iff it is not a bare identifier."""
+    if not name:
+        return name
+    return name if _SYMBOLIC_NAME_RE.match(name) else f"`{name}`"
+
+
 def _build_schema_summary(bundle: MappingBundle) -> str:
     """Build a conceptual-only schema description for LLM context.
 
@@ -137,6 +156,12 @@ def _build_schema_summary(bundle: MappingBundle) -> str:
     Data-quality hints (string sentinels, numeric-like string columns) are
     included in the property listing so the LLM can emit the right filters
     and casts.
+
+    Labels and relationship types containing characters outside
+    ``[A-Za-z_][A-Za-z0-9_]*`` are pre-escaped with backticks here (via
+    :func:`_escape_label`) so the LLM sees syntactically-valid Cypher in
+    the schema card and can copy it verbatim. Bare identifiers are
+    unchanged, preserving byte-identity with the pre-WP-29 prompt.
     """
     cs = bundle.conceptual_schema
     pm = bundle.physical_mapping
@@ -151,7 +176,7 @@ def _build_schema_summary(bundle: MappingBundle) -> str:
             hint = _property_quality_hint(pm_props.get(name))
             parts.append(f"{name}{hint}")
         prop_str = ", ".join(parts) if parts else "no properties"
-        return f"  Node :{label} ({prop_str})"
+        return f"  Node :{_escape_label(label)} ({prop_str})"
 
     cs_entities = cs.get("entities", [])
     cs_entity_types = cs.get("entityTypes", [])
@@ -191,15 +216,24 @@ def _build_schema_summary(bundle: MappingBundle) -> str:
                 f"{n}{_property_quality_hint(pm_rprops.get(n))}" for n in rprops
             ]
             prop_str = f" [{', '.join(formatted)}]" if formatted else ""
-            lines.append(f"  (:{from_e})-[:{rtype}{prop_str}]->(:{to_e})")
+            lines.append(
+                f"  (:{_escape_label(from_e)})-[:{_escape_label(rtype)}{prop_str}]"
+                f"->(:{_escape_label(to_e)})"
+            )
     elif isinstance(cs_rel_types, list) and cs_rel_types:
         for rtype in cs_rel_types:
             from_e, to_e = _conceptual_domain_range(rtype, cs, pm)
-            lines.append(f"  (:{from_e})-[:{rtype}]->(:{to_e})")
+            lines.append(
+                f"  (:{_escape_label(from_e)})-[:{_escape_label(rtype)}]"
+                f"->(:{_escape_label(to_e)})"
+            )
     elif isinstance(pm.get("relationships"), dict):
         for rtype in pm["relationships"]:
             from_e, to_e = _conceptual_domain_range(rtype, cs, pm)
-            lines.append(f"  (:{from_e})-[:{rtype}]->(:{to_e})")
+            lines.append(
+                f"  (:{_escape_label(from_e)})-[:{_escape_label(rtype)}]"
+                f"->(:{_escape_label(to_e)})"
+            )
 
     labeled_ent_props = {
         label: _pm_entity_props(label, pm) for label in entities_emitted
@@ -254,6 +288,7 @@ Rules:
 - Use standard Cypher syntax (MATCH, WHERE, RETURN, ORDER BY, LIMIT, etc.)
 - For counts, use count()
 - For aggregations, use collect(), sum(), avg(), min(), max()
+- Labels and relationship types containing characters other than ASCII letters, digits, and underscore must be wrapped in backticks, e.g. MATCH (d:`Compliance.rst`) RETURN d.doc_version. The schema below has already pre-escaped such names; copy them verbatim.
 - Wrap the query in ```cypher``` code block
 
 {schema}"""
@@ -445,6 +480,7 @@ def _call_llm_with_retry(
     db: Any | None = None,
     tenant_context: TenantContext | None = None,
     tenant_manifest: TenantScopeManifest | None = None,
+    retry_context: str | None = None,
 ) -> NL2CypherResult | None:
     """Call the LLM provider with parse + execution-grounded validation and retry.
 
@@ -471,9 +507,13 @@ def _call_llm_with_retry(
         resolved_entities=list(resolved_entities) if resolved_entities else [],
         tenant_context=tenant_context,
         tenant_manifest=tenant_manifest,
+        retry_context=retry_context or "",
     )
     best_cypher = ""
-    best_content = ""
+    # WP-29 D4: pre-WP-29 we tracked ``best_content`` to leak the
+    # raw LLM response into the fail-through explanation. The
+    # fail-closed branch only echoes ``best_cypher`` back, so
+    # ``best_content`` has no consumer and is removed.
     total_usage: dict[str, int] = {
         "prompt_tokens": 0,
         "completion_tokens": 0,
@@ -500,7 +540,6 @@ def _call_llm_with_retry(
 
             if not best_cypher:
                 best_cypher = cypher
-                best_content = content
 
             ok, err_msg = _validate_cypher(cypher)
             if ok:
@@ -533,7 +572,6 @@ def _call_llm_with_retry(
                             cached_tokens=total_usage["cached_tokens"],
                         )
                     best_cypher = cypher
-                    best_content = content
                     builder.retry_context = (
                         f"{violation.reason} {violation.suggested_hint}"
                     )
@@ -543,7 +581,6 @@ def _call_llm_with_retry(
                     )
                     continue
                 best_cypher = cypher
-                best_content = content
                 builder.retry_context = (
                     f"Translated AQL failed EXPLAIN: {explain_err}. "
                     f"The Cypher was: {cypher}. Please revise your Cypher."
@@ -555,7 +592,6 @@ def _call_llm_with_retry(
                 continue
 
             best_cypher = cypher
-            best_content = content
             builder.retry_context = err_msg or "generated text did not parse as Cypher"
             logger.info(
                 "LLM attempt %d/%d: validation failed for: %s",
@@ -601,13 +637,28 @@ def _call_llm_with_retry(
             cached_tokens=total_usage["cached_tokens"],
         )
 
+    # WP-29 D4: fail closed on retry-budget exhaustion. The pre-WP-29
+    # branch returned ``cypher=best_cypher`` with a WARNING prefix in
+    # ``explanation`` — the UI then wrote that invalid Cypher straight
+    # into the editor. Mirror the tenant-guardrail pattern: empty
+    # ``cypher`` + structured ``method="validation_failed"`` so the UI
+    # renders a red banner and leaves the editor untouched. The last
+    # attempted Cypher is preserved inside ``explanation`` for user
+    # inspection and potential WP-30 retry-with-hint.
     if best_cypher:
+        logger.warning(
+            "NL2Cypher validation_failed after %d attempts; last error: %s",
+            1 + max_retries, builder.retry_context,
+        )
         return NL2CypherResult(
-            cypher=best_cypher,
-            explanation=f"WARNING: Cypher failed validation after {1 + max_retries} attempts. "
-                        f"Last error: {builder.retry_context}\n\n{best_content}",
-            confidence=0.3,
-            method="llm",
+            cypher="",
+            explanation=(
+                f"NL → Cypher validation failed after {1 + max_retries} "
+                f"attempts. Last error: {builder.retry_context}.\n\n"
+                f"Last attempted Cypher was:\n\n{best_cypher}"
+            ),
+            confidence=0.0,
+            method="validation_failed",
             schema_context=schema_summary,
             prompt_tokens=total_usage["prompt_tokens"],
             completion_tokens=total_usage["completion_tokens"],
@@ -1094,6 +1145,7 @@ def nl_to_cypher(
     entity_resolver: EntityResolver | None = None,
     db: Any | None = None,
     tenant_context: TenantContext | None = None,
+    retry_context: str | None = None,
 ) -> NL2CypherResult:
     """Translate a natural language question to Cypher.
 
@@ -1189,12 +1241,18 @@ def nl_to_cypher(
                 mapping=bundle, db=db,
                 tenant_context=tenant_context,
                 tenant_manifest=tenant_manifest,
+                retry_context=retry_context,
             )
-            # A `tenant_guardrail_blocked` result has empty `cypher` by
-            # design; return it instead of falling through to the
-            # rule-based fallback (which cannot enforce tenant
-            # scoping) so the UI surfaces the violation.
-            if result is not None and result.method == "tenant_guardrail_blocked":
+            # Fail-closed methods (`tenant_guardrail_blocked` for tenant
+            # scope violations, `validation_failed` for retry-budget
+            # exhaustion) have empty `cypher` by design; return them
+            # instead of falling through to the rule-based fallback so
+            # the UI surfaces the failure with a structured banner and
+            # never silently writes invalid Cypher into the editor.
+            if result is not None and result.method in (
+                "tenant_guardrail_blocked",
+                "validation_failed",
+            ):
                 return result
             if result and result.cypher:
                 return result
