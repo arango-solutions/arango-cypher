@@ -148,9 +148,9 @@ export default function SchemaWarningBanner({
           </div>
         </div>
       )}
-      {others.map((w) => (
+      {others.map((w, i) => (
         <div
-          key={w.code}
+          key={`${w.code}-${i}`}
           className="px-4 py-1.5 flex items-start gap-2.5 border-t border-amber-800/20 first:border-t-0"
         >
           <span className="text-amber-500 text-xs mt-0.5 shrink-0">
