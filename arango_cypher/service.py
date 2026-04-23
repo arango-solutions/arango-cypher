@@ -303,6 +303,65 @@ def _sanitize_error(msg: str) -> str:
     return msg
 
 
+_PROXY_ENV_VARS = (
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "https_proxy",
+    "http_proxy",
+    "ALL_PROXY",
+    "all_proxy",
+)
+
+
+def _walk_cause_chain(exc: BaseException) -> list[BaseException]:
+    """Return the chain of exceptions from outer to root via __cause__/__context__."""
+    seen: list[BaseException] = []
+    cur: BaseException | None = exc
+    while cur is not None and cur not in seen:
+        seen.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    return seen
+
+
+def _describe_connect_error(exc: BaseException) -> str:
+    """Build a diagnostic message for a /connect failure.
+
+    The python-arango client wraps low-level transport failures (proxy
+    rejections, DNS, TLS, credential rejection) in a generic
+    ``ClientConnectionError`` ("Can't connect to host(s) within limit (N)"),
+    which is not actionable. Walk the ``__cause__`` / ``__context__`` chain
+    to surface the most specific root cause. When a proxy-tunnel failure
+    is detected, also report which proxy env vars are set so the operator
+    can correlate with a misconfigured sandbox / corporate proxy.
+    """
+    chain = _walk_cause_chain(exc)
+    root_msg = str(chain[-1]) if chain else str(exc)
+    top_msg = str(chain[0]) if chain else str(exc)
+
+    parts: list[str] = [top_msg]
+    if len(chain) > 1 and root_msg and root_msg != top_msg:
+        parts.append(f"root cause: {root_msg}")
+
+    joined = " | ".join(parts)
+    lowered = joined.lower()
+
+    if "tunnel connection failed" in lowered or "proxy" in lowered:
+        proxies_set = [v for v in _PROXY_ENV_VARS if os.environ.get(v)]
+        if proxies_set:
+            parts.append(
+                "hint: this process has proxy env vars set ("
+                + ", ".join(proxies_set)
+                + "). Unset them or add the ArangoDB host to NO_PROXY and restart."
+            )
+        else:
+            parts.append(
+                "hint: proxy tunnel rejected the connection but no proxy env vars "
+                "are set in this process; check system / IDE sandbox proxy config."
+            )
+
+    return _sanitize_error(" | ".join(parts))
+
+
 def _mapping_from_dict(d: dict[str, Any] | None) -> MappingBundle | None:
     if d is None:
         return None
@@ -342,9 +401,16 @@ def connect(req: ConnectRequest):
         db = client.db(req.database, username=req.username, password=req.password)
         db.version()
     except Exception as e:
+        detail = _describe_connect_error(e)
+        _svc_logger.warning(
+            "connect failed for db=%r user=%r: %s",
+            req.database,
+            req.username,
+            detail,
+        )
         raise HTTPException(
             status_code=400,
-            detail=f"Connection failed: {_sanitize_error(str(e))}",
+            detail=f"Connection failed: {detail}",
         ) from e
 
     _evict_lru()
