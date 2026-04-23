@@ -1,4 +1,5 @@
 import { useCallback, useReducer } from "react";
+import type { SchemaWarning } from "./client";
 
 export interface ConnectionState {
   status: "disconnected" | "connecting" | "connected";
@@ -41,6 +42,11 @@ export interface AppState {
   translateMs: number | null;
   execMs: number | null;
   activeStatement: number;
+  // Backend-supplied schema warnings (ANALYZER_NOT_INSTALLED etc.). The
+  // banner reads from this; the dismissal-suppression list lives in
+  // localStorage keyed by (url, database, code) so the same warning can
+  // re-appear on a different connection without leaking dismissals.
+  schemaWarnings: SchemaWarning[];
 }
 
 const STORAGE_KEY = "cypher-workbench";
@@ -110,6 +116,7 @@ export const initialState: AppState = {
   translateMs: null,
   execMs: null,
   activeStatement: 0,
+  schemaWarnings: [],
   ...loadSavedState(),
 };
 
@@ -135,8 +142,14 @@ export type Action =
   | { type: "CONNECT_ERROR"; error: string }
   | { type: "DISCONNECT" }
   | { type: "INTROSPECT_START" }
-  | { type: "INTROSPECT_SUCCESS"; mapping: Record<string, unknown> }
+  | {
+      type: "INTROSPECT_SUCCESS";
+      mapping: Record<string, unknown>;
+      warnings?: SchemaWarning[];
+    }
   | { type: "INTROSPECT_ERROR"; error: string }
+  | { type: "SCHEMA_WARNINGS_REPLACE"; warnings: SchemaWarning[] }
+  | { type: "SCHEMA_WARNINGS_CLEAR" }
   | { type: "TRANSLATE_START" }
   | {
       type: "TRANSLATE_SUCCESS";
@@ -235,13 +248,23 @@ function reducer(state: AppState, action: Action): AppState {
         results: null,
         explainPlan: null,
         profileData: null,
+        schemaWarnings: [],
       };
     case "INTROSPECT_START":
       return { ...state, introspecting: true };
     case "INTROSPECT_SUCCESS":
-      return { ...state, introspecting: false, mapping: action.mapping };
+      return {
+        ...state,
+        introspecting: false,
+        mapping: action.mapping,
+        schemaWarnings: action.warnings ?? [],
+      };
     case "INTROSPECT_ERROR":
       return { ...state, introspecting: false, error: action.error };
+    case "SCHEMA_WARNINGS_REPLACE":
+      return { ...state, schemaWarnings: action.warnings };
+    case "SCHEMA_WARNINGS_CLEAR":
+      return { ...state, schemaWarnings: [] };
     case "TRANSLATE_START":
       return { ...state, translating: true, error: null, translateMs: null };
     case "TRANSLATE_SUCCESS":

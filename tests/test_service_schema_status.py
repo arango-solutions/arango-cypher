@@ -323,3 +323,216 @@ class TestInvalidateCache:
         resp = client.post("/schema/invalidate-cache")
         assert resp.status_code == 200
         assert resp.json() == {"invalidated": True, "persistent": True}
+
+
+# ---------------------------------------------------------------------------
+# GET /schema/introspect — warnings passthrough
+# ---------------------------------------------------------------------------
+
+
+class TestIntrospectWarnings:
+    def test_introspect_surfaces_warnings(self, fake_session_factory, monkeypatch):
+        """When the bundle carries metadata.warnings, /schema/introspect echoes them."""
+        from arango_cypher import schema_acquire
+
+        fake_session_factory(
+            collections=[{"name": "users", "type": 2}],
+            counts={"users": 3},
+            indexes={"users": []},
+        )
+
+        warned_bundle = MappingBundle(
+            conceptual_schema={
+                "entities": [{"name": "User", "labels": ["User"], "properties": []}],
+                "relationships": [],
+            },
+            physical_mapping={
+                "entities": {
+                    "User": {"style": "COLLECTION", "collectionName": "users"}
+                },
+                "relationships": {},
+            },
+            metadata={
+                "warnings": [
+                    {
+                        "code": "ANALYZER_NOT_INSTALLED",
+                        "message": "analyzer not installed",
+                        "install_hint": "pip install arangodb-schema-analyzer",
+                    },
+                ],
+            },
+            owl_turtle=None,
+            source=MappingSource(kind="heuristic"),
+        )
+
+        monkeypatch.setattr(
+            schema_acquire,
+            "get_mapping",
+            lambda db, **kwargs: warned_bundle,
+        )
+
+        resp = client.get("/schema/introspect")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "warnings" in body
+        assert body["warnings"] == [
+            {
+                "code": "ANALYZER_NOT_INSTALLED",
+                "message": "analyzer not installed",
+                "install_hint": "pip install arangodb-schema-analyzer",
+            }
+        ]
+
+    def test_introspect_warnings_empty_list_when_none(
+        self, fake_session_factory, monkeypatch
+    ):
+        from arango_cypher import schema_acquire
+
+        fake_session_factory(
+            collections=[{"name": "users", "type": 2}],
+            counts={"users": 3},
+            indexes={"users": []},
+        )
+
+        clean_bundle = MappingBundle(
+            conceptual_schema={
+                "entities": [{"name": "User", "labels": ["User"], "properties": []}],
+                "relationships": [],
+            },
+            physical_mapping={
+                "entities": {
+                    "User": {"style": "COLLECTION", "collectionName": "users"}
+                },
+                "relationships": {},
+            },
+            metadata={},
+            owl_turtle=None,
+            source=MappingSource(kind="schema_analyzer_export"),
+        )
+
+        monkeypatch.setattr(
+            schema_acquire,
+            "get_mapping",
+            lambda db, **kwargs: clean_bundle,
+        )
+
+        resp = client.get("/schema/introspect")
+        assert resp.status_code == 200
+        assert resp.json()["warnings"] == []
+
+
+# ---------------------------------------------------------------------------
+# POST /schema/force-reacquire
+# ---------------------------------------------------------------------------
+
+
+class TestForceReacquire:
+    def test_requires_session(self):
+        resp = client.post("/schema/force-reacquire")
+        assert resp.status_code == 401
+
+    def test_force_reacquire_invokes_analyzer_strategy(
+        self, fake_session_factory, monkeypatch
+    ):
+        """The endpoint must call get_mapping with strategy="analyzer" and force_refresh=True."""
+        from arango_cypher import schema_acquire
+
+        fake_session_factory(
+            collections=[{"name": "users", "type": 2}],
+            counts={"users": 3},
+            indexes={"users": []},
+        )
+
+        captured_kwargs: dict[str, Any] = {}
+        fresh_bundle = MappingBundle(
+            conceptual_schema={
+                "entities": [
+                    {"name": "User", "labels": ["User"], "properties": []}
+                ],
+                "relationships": [],
+            },
+            physical_mapping={
+                "entities": {
+                    "User": {"style": "COLLECTION", "collectionName": "users"}
+                },
+                "relationships": {},
+            },
+            metadata={},
+            owl_turtle=None,
+            source=MappingSource(
+                kind="schema_analyzer_export",
+                notes="rebuilt by force-reacquire",
+            ),
+        )
+
+        def _mock_get_mapping(db, **kwargs):
+            captured_kwargs.update(kwargs)
+            return fresh_bundle
+
+        monkeypatch.setattr(schema_acquire, "get_mapping", _mock_get_mapping)
+
+        resp = client.post("/schema/force-reacquire")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert captured_kwargs.get("strategy") == "analyzer"
+        assert captured_kwargs.get("force_refresh") is True
+        assert body["source"] == {
+            "kind": "schema_analyzer_export",
+            "notes": "rebuilt by force-reacquire",
+        }
+        assert body["warnings"] == []
+        assert body["entity_count"] == 1
+        assert body["relationship_count"] == 0
+
+    def test_force_reacquire_503_when_analyzer_missing(
+        self, fake_session_factory, monkeypatch
+    ):
+        from arango_cypher import schema_acquire
+
+        fake_session_factory(
+            collections=[{"name": "users", "type": 2}],
+            counts={"users": 3},
+            indexes={"users": []},
+        )
+
+        def _boom(db, **kwargs):
+            raise ImportError("arangodb-schema-analyzer is not installed")
+
+        monkeypatch.setattr(schema_acquire, "get_mapping", _boom)
+
+        resp = client.post("/schema/force-reacquire")
+        assert resp.status_code == 503
+        detail = resp.json()["detail"]
+        assert "arangodb-schema-analyzer" in detail
+
+    def test_force_reacquire_passes_through_warnings(
+        self, fake_session_factory, monkeypatch
+    ):
+        from arango_cypher import schema_acquire
+
+        fake_session_factory(
+            collections=[{"name": "users", "type": 2}],
+            counts={"users": 3},
+            indexes={"users": []},
+        )
+
+        warned = MappingBundle(
+            conceptual_schema={"entities": [], "relationships": []},
+            physical_mapping={"entities": {}, "relationships": {}},
+            metadata={
+                "warnings": [
+                    {"code": "SOMETHING", "message": "a downstream warning"},
+                ],
+            },
+            owl_turtle=None,
+            source=MappingSource(kind="schema_analyzer_export"),
+        )
+        monkeypatch.setattr(
+            schema_acquire, "get_mapping", lambda db, **kw: warned
+        )
+
+        resp = client.post("/schema/force-reacquire")
+        assert resp.status_code == 200
+        assert resp.json()["warnings"] == [
+            {"code": "SOMETHING", "message": "a downstream warning"}
+        ]

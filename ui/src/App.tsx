@@ -10,6 +10,7 @@ import QueryHistory from "./components/QueryHistory";
 import SampleQueries from "./components/SampleQueries";
 import ClauseOutline from "./components/ClauseOutline";
 import TenantSelector from "./components/TenantSelector";
+import SchemaWarningBanner from "./components/SchemaWarningBanner";
 import { useAppState } from "./api/store";
 import { buildCorrespondenceMap, buildReverseMap } from "./utils/correspondenceMap";
 import {
@@ -764,6 +765,13 @@ export default function App() {
 
   return (
     <div className="h-screen flex flex-col bg-gray-950 text-gray-100">
+      <SchemaWarningBanner
+        warnings={state.schemaWarnings}
+        url={state.connection.url}
+        database={state.connection.database}
+        token={state.connection.token}
+        dispatch={dispatch}
+      />
       {/* Connection bar */}
       <header className="flex items-center justify-between px-4 py-2 bg-gray-900 border-b border-gray-800">
         <div className="flex items-center gap-3">

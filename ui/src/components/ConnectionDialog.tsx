@@ -91,7 +91,11 @@ export default function ConnectionDialog({ connection, introspecting, dispatch }
       try {
         const schema = await introspectSchema(resp.token, 50, true);
         const mapping = introspectToMapping(schema);
-        dispatch({ type: "INTROSPECT_SUCCESS", mapping });
+        dispatch({
+          type: "INTROSPECT_SUCCESS",
+          mapping,
+          warnings: schema.warnings ?? [],
+        });
       } catch (introspectErr) {
         console.warn("Schema introspection failed:", introspectErr);
         dispatch({ type: "INTROSPECT_ERROR", error: introspectErr instanceof Error ? introspectErr.message : "Introspection failed" });
@@ -138,7 +142,11 @@ export default function ConnectionDialog({ connection, introspecting, dispatch }
     try {
       const schema = await introspectSchema(connection.token, 50, true);
       const mapping = introspectToMapping(schema);
-      dispatch({ type: "INTROSPECT_SUCCESS", mapping });
+      dispatch({
+        type: "INTROSPECT_SUCCESS",
+        mapping,
+        warnings: schema.warnings ?? [],
+      });
     } catch (err) {
       dispatch({
         type: "INTROSPECT_ERROR",

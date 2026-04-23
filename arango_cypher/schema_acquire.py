@@ -42,6 +42,67 @@ CACHE_TTL_SECONDS = 300
 # In-memory fast path: (bundle, ts, shape_fp, full_fp) keyed by db name + cache key.
 _mapping_cache: dict[str, tuple[MappingBundle, float, str, str]] = {}
 
+# Operational counter — incremented every time `_build_fresh_bundle` falls
+# through to the heuristic path because `schema_analyzer` could not be
+# imported. Read-only for the outside world; the current release does not
+# yet expose a /metrics endpoint, but operators can inspect it from a Python
+# shell or a future metrics surface will aggregate it.
+_heuristic_fallback_counter: int = 0
+
+
+def _attach_warning(
+    bundle: MappingBundle,
+    *,
+    code: str,
+    message: str,
+    install_hint: str | None = None,
+) -> MappingBundle:
+    """Return a copy of ``bundle`` with an additional structured warning.
+
+    Warnings live at ``bundle.metadata["warnings"]`` as a list of dicts with
+    keys ``code``, ``message`` and (optionally) ``install_hint``. Each call
+    appends; existing warnings are preserved. Deliberately copies the
+    metadata dict so the original bundle (and any cached reference to it)
+    is not mutated under the caller's feet.
+    """
+    meta = dict(bundle.metadata or {})
+    warnings = list(meta.get("warnings") or [])
+    warning: dict[str, Any] = {"code": code, "message": message}
+    if install_hint:
+        warning["install_hint"] = install_hint
+    warnings.append(warning)
+    meta["warnings"] = warnings
+    return MappingBundle(
+        conceptual_schema=bundle.conceptual_schema,
+        physical_mapping=bundle.physical_mapping,
+        metadata=meta,
+        owl_turtle=bundle.owl_turtle,
+        source=bundle.source,
+    )
+
+
+def _bundle_needs_reacquire(bundle: MappingBundle) -> bool:
+    """True when a cached heuristic-fallback bundle should be rebuilt.
+
+    Returns True iff (a) the bundle carries an ``ANALYZER_NOT_INSTALLED``
+    warning from an earlier heuristic fallback, AND (b) ``schema_analyzer``
+    is now importable in this process. The second check makes the retry
+    loop self-healing: when an operator installs the analyzer and the
+    next request lands on this worker, the cached degraded bundle is
+    treated as a miss and the analyzer path runs.
+    """
+    warnings = (bundle.metadata or {}).get("warnings") or []
+    if not any(
+        isinstance(w, dict) and w.get("code") == "ANALYZER_NOT_INSTALLED"
+        for w in warnings
+    ):
+        return False
+    try:
+        import schema_analyzer  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
 
 def _cache_key(db: StandardDatabase) -> str:
     """Stable cache key: database name only. Used as the dict key.
@@ -1362,21 +1423,35 @@ def get_mapping(
         if cached is not None:
             bundle, cached_shape, cached_full = cached
             if cached_shape == shape_fp:
-                if cached_full == full_fp:
+                if _bundle_needs_reacquire(bundle):
+                    # The cached bundle was built by the heuristic fallback
+                    # because the analyzer was unavailable. Now that the
+                    # analyzer is importable again, the cached entry is
+                    # degraded — drop it and rebuild so the next operator
+                    # does not inherit a known-bad mapping.
+                    logger.info(
+                        "Cached mapping for %s carries ANALYZER_NOT_INSTALLED "
+                        "and analyzer is now available; rebuilding",
+                        key,
+                    )
+                    _mapping_cache.pop(key, None)
+                elif cached_full == full_fp:
                     logger.debug(
                         "Schema unchanged for %s; using cached mapping", key
                     )
                     return bundle
+                else:
+                    logger.info(
+                        "Schema shape stable for %s; refreshing cardinality statistics only",
+                        key,
+                    )
+                    bundle = _safe_refresh_statistics(db, bundle)
+                    _save_cache(db, key, bundle, shape_fp, full_fp, persistent)
+                    return bundle
+            else:
                 logger.info(
-                    "Schema shape stable for %s; refreshing cardinality statistics only",
-                    key,
+                    "Schema shape changed for %s; full re-introspection", key
                 )
-                bundle = _safe_refresh_statistics(db, bundle)
-                _save_cache(db, key, bundle, shape_fp, full_fp, persistent)
-                return bundle
-            logger.info(
-                "Schema shape changed for %s; full re-introspection", key
-            )
 
     bundle = _build_fresh_bundle(db, strategy=strategy, include_owl=include_owl)
     bundle = _safe_refresh_statistics(db, bundle)
@@ -1404,13 +1479,26 @@ def _build_fresh_bundle(
         try:
             bundle = acquire_mapping_bundle(db, include_owl=include_owl)
         except ImportError:
-            logger.info(
-                "arangodb-schema-analyzer not installed; using heuristic fallback"
+            global _heuristic_fallback_counter
+            _heuristic_fallback_counter += 1
+            logger.warning(
+                "Heuristic schema path used — install arangodb-schema-analyzer "
+                "for accurate mappings on hybrid schemas.",
             )
             schema_type = classify_schema(db)
             bundle = _build_heuristic_mapping(
                 db,
                 schema_type if schema_type in ("pg", "lpg", "hybrid") else "lpg",
+            )
+            bundle = _attach_warning(
+                bundle,
+                code="ANALYZER_NOT_INSTALLED",
+                message=(
+                    "arangodb-schema-analyzer is not installed; the mapping "
+                    "was built by the heuristic fallback and may misclassify "
+                    "hybrid schemas."
+                ),
+                install_hint="pip install arangodb-schema-analyzer",
             )
 
     if include_owl and not bundle.owl_turtle:

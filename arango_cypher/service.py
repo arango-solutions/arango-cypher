@@ -45,6 +45,36 @@ from arango_query_core import (
 from .api import get_cypher_profile, translate, validate_cypher_profile
 from .extensions import register_all_extensions
 
+
+def _require_analyzer_unless_opted_out() -> None:
+    """Refuse to start the service when the schema analyzer is unavailable.
+
+    The service depends on ``arangodb-schema-analyzer`` for accurate mapping
+    of hybrid / LPG schemas. A silent heuristic fallback at deploy time
+    produces incorrect labels (file-extension false positives, missing
+    relationship kinds) whose downstream effect — unrecoverable Translate
+    parse errors — is indistinguishable from an outright service outage.
+    See ``docs/schema_inference_bugfix_prd.md`` §4.2 for the full analysis.
+
+    Operators who deliberately accept a degraded heuristic mapping (e.g. in
+    local dev against a toy schema) can set ``ARANGO_CYPHER_ALLOW_HEURISTIC=1``
+    to bypass this guard. The library and CLI surfaces are unaffected —
+    the check runs only at service-import time.
+    """
+    if os.environ.get("ARANGO_CYPHER_ALLOW_HEURISTIC") == "1":
+        return
+    try:
+        import schema_analyzer  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "arango-cypher-py service requires arangodb-schema-analyzer. "
+            "Install it (`pip install arangodb-schema-analyzer`) or set "
+            "ARANGO_CYPHER_ALLOW_HEURISTIC=1 to accept degraded mappings."
+        ) from exc
+
+
+_require_analyzer_unless_opted_out()
+
 app = FastAPI(
     title="Arango Cypher Transpiler",
     description="Cypher → AQL translation service for ArangoDB",
@@ -748,6 +778,7 @@ def schema_introspect(
         if to_col and not rel.get("range"):
             rel["range"] = col_to_label.get(to_col, to_col)
 
+    result["warnings"] = (bundle.metadata or {}).get("warnings") or []
     return result
 
 
@@ -887,6 +918,48 @@ def schema_invalidate_cache(
         cache_key=cache_key or DEFAULT_CACHE_KEY,
     )
     return {"invalidated": True, "persistent": persistent}
+
+
+@app.post("/schema/force-reacquire")
+def schema_force_reacquire(session: _Session = Depends(_get_session)):
+    """Drop any cached mapping and rebuild from scratch via the analyzer.
+
+    Operational tool for recovering from a poisoned cache: the previous
+    ``get_mapping`` call fell back to the heuristic because the analyzer
+    was not installed at that moment, the degraded bundle got persisted,
+    and subsequent ``force=true`` introspects re-served the same cached
+    bundle because the shape fingerprint did not change. This endpoint
+    calls ``get_mapping(..., strategy="analyzer", force_refresh=True)`` —
+    the hard form — which raises ``ImportError`` (surfaced as HTTP 503) if
+    the analyzer is still unavailable instead of silently falling back.
+    """
+    from .schema_acquire import get_mapping as _get_mapping
+
+    try:
+        bundle = _get_mapping(session.db, force_refresh=True, strategy="analyzer")
+    except ImportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "arangodb-schema-analyzer is not installed; cannot force a "
+                "fresh analyzer mapping. Install it and retry, or call "
+                "/schema/invalidate-cache to drop the cached entry and let "
+                "the heuristic fallback run again. Underlying error: "
+                f"{exc}"
+            ),
+        ) from exc
+
+    source_kind = bundle.source.kind if bundle.source is not None else None
+    source_notes = bundle.source.notes if bundle.source is not None else None
+    warnings = (bundle.metadata or {}).get("warnings") or []
+    return {
+        "source": {"kind": source_kind, "notes": source_notes},
+        "warnings": warnings,
+        "entity_count": len(bundle.conceptual_schema.get("entities") or []),
+        "relationship_count": len(
+            bundle.conceptual_schema.get("relationships") or []
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------

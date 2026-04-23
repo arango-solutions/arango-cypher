@@ -425,9 +425,16 @@ export interface IntrospectRelationship {
   statistics?: RelationshipStatistics;
 }
 
+export interface SchemaWarning {
+  code: string;
+  message: string;
+  install_hint?: string;
+}
+
 export interface IntrospectResult {
   entities: IntrospectEntity[];
   relationships: IntrospectRelationship[];
+  warnings?: SchemaWarning[];
 }
 
 export async function introspectSchema(
@@ -438,6 +445,28 @@ export async function introspectSchema(
   const params = new URLSearchParams({ sample: String(sample) });
   if (force) params.set("force", "true");
   return request(`/schema/introspect?${params}`, {
+    headers: authHeaders(token),
+  });
+}
+
+export interface ForceReacquireResult {
+  source: { kind: string | null; notes: string | null };
+  warnings: SchemaWarning[];
+  entity_count: number;
+  relationship_count: number;
+}
+
+// Hard reacquire path. Calls get_mapping(strategy="analyzer", force_refresh=True)
+// on the backend, which raises ImportError (HTTP 503) when the analyzer is
+// missing instead of silently returning a heuristic-built bundle. Use this
+// when /schema/invalidate-cache + /schema/introspect would just re-serve a
+// poisoned heuristic mapping (e.g. analyzer was installed after the cache
+// was first populated).
+export async function forceReacquireSchema(
+  token: string,
+): Promise<ForceReacquireResult> {
+  return request(`/schema/force-reacquire`, {
+    method: "POST",
     headers: authHeaders(token),
   });
 }
