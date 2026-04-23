@@ -155,26 +155,35 @@ For the AST passes and the EXPLAIN validator to operate, the mapping bundle prod
 }
 ```
 
-**What the mapper already provides** (as of 2026-04-20):
+**What the mapper already provides** (as of 2026-04-23, `arangodb-schema-analyzer>=0.5.0`):
 
 - `tenantScope.role` — `TENANT_ROOT` / `TENANT_SCOPED` / `GLOBAL`, classified by `analyze_tenant_scope` with `analyzer>=0.4` annotations or local heuristic fallback.
 - `tenantScope.denormField` — name of the denormalised tenant-reference field when present.
 - `collectionName`, `properties`, `style`, `typeField`, `typeValue`, statistics.
+- **`metadata.shardingProfile`** (analyzer v0.5 / upstream PRD §6.2 bullet 3) — one-shot database-level classification into exactly one of `OneShard`, `DisjointSmartGraph`, `SmartGraph`, `SatelliteGraph`, `Sharded`, with per-graph evidence (`smartGraphAttribute`, `isDisjoint`, `graphName`, `shardKeys`, `numberOfShards`, `replicationFactor`) and per-collection `kind` buckets (`smartgraph` / `satellite` / `regular` / `system` / `tenant-root`). See [`arango-schema-mapper` PRD §6.2][upstream-prd-62] and the downstream tracking doc [`docs/schema_analyzer_issues/08-emit-physical-layout-and-shard-topology.md`][08-issue].
 
-**What is missing and must be added (Work-Package MT-0: schema-mapper uplift):**
+**Work-Package MT-0: schema-mapper uplift — SUPERSEDED (2026-04-23).**
 
-- `physicalLayout.kind` — from `db._collection(c).properties()`, reading `isSmart`, `replicationFactor == "satellite"`, and `isSystem`.
-- `physicalLayout.smartGraphAttribute` — from the same source when `isSmart`.
-- `physicalLayout.isDisjoint` — from the collection's smartGraph properties when present.
-- `physicalLayout.graphName` — derived by iterating `db._graphs()` and matching the collection against each graph's `edgeDefinitions` + `orphanCollections`.
-- `tenantScope.scopingPathFromTenant` — the existing BFS in `_core.py:_mark_reachable_from_tenant` already computes reachability; extend it to record the shortest ordered list of edge-collection names from `Tenant` to the scoped entity.
+Originally MT-0 was going to compute `physicalLayout.kind`, `smartGraphAttribute`, `isDisjoint`, `graphName`, and `scopingPathFromTenant` locally in `schema_acquire.py` against live DB properties. This is now fully covered upstream by `metadata.shardingProfile` emitted by `arangodb-schema-analyzer>=0.5.0`:
 
-The mapper change is the single upstream precondition for everything that follows. Estimated size: ~60 LOC in `arango_cypher/schema_acquire.py` + a matching emission path in `arangodb-schema-analyzer` if that library is expected to compute it. Two execution-order alternatives:
+| Originally-planned local field | Now sourced from |
+|---|---|
+| `physicalLayout.kind` (per collection) | `metadata.shardingProfile.members[collection].kind` |
+| `physicalLayout.smartGraphAttribute` | `metadata.shardingProfile.graphs[*].smartGraphAttribute` |
+| `physicalLayout.isDisjoint` | `metadata.shardingProfile.graphs[*].isDisjoint` |
+| `physicalLayout.graphName` | `metadata.shardingProfile.graphs[*].name` |
+| Database-level deployment style (new) | `metadata.shardingProfile.style` ∈ {OneShard, DisjointSmartGraph, SmartGraph, SatelliteGraph, Sharded} |
 
-- **A. Compute in `schema_acquire.py`** (this repo owns it). Faster to land; keeps `arangodb-schema-analyzer` stable.
-- **B. Push upstream into `arangodb-schema-analyzer`** (analyzer owns it). Slower to land but puts the knowledge in the canonical place; other consumers of the analyzer benefit.
+Adoption in this repo:
 
-Recommendation: **(A)** first, with the existing analyzer-annotation-takes-priority pattern from `tenant_scope.py`. Upstream in a follow-up.
+- `arango_cypher/schema_acquire.py::acquire_mapping_bundle` logs `shardingProfile.style` at INFO on every acquisition, and escalates to WARNING when `status == "degraded"` (analyzer signalled incomplete evidence).
+- `arango_cypher/nl2cypher/_core.py::_build_schema_summary` renders a conceptual, one-line deployment hint derived from `shardingProfile.style` into the LLM prompt (see `_deployment_style_hint`), without leaking physical details.
+- The Layer-5 EXPLAIN-plan validator (§7) will read `shardingProfile.style` once at session start: `OneShard` / `SatelliteGraph` ⇒ no shard-key enforcement; `DisjointSmartGraph` ⇒ hard-enforce; `SmartGraph` / `Sharded` ⇒ soft-enforce with warnings.
+
+The remaining `tenantScope.scopingPathFromTenant` item (BFS-derived edge path from `Tenant` to a scoped entity) is **not** yet covered upstream. It stays in this PRD as a separate work item (to be tracked when MT-1/5 lands) and remains a local computation on top of the upstream `tenantScope` annotation.
+
+[upstream-prd-62]: https://github.com/ArthurKeen/arango-schema-mapper/blob/main/docs/PRD.md
+[08-issue]: schema_analyzer_issues/08-emit-physical-layout-and-shard-topology.md
 
 ---
 
@@ -533,7 +542,7 @@ Admin users never issue ad-hoc NL queries against the cross-tenant dataset throu
 
 | Work package | Description | Status | Estimate |
 |---|---|---|---|
-| **MT-0** | Schema-mapper uplift: `physicalLayout` block + `scopingPathFromTenant` on manifest | Not started | ~60 LOC + tests |
+| **MT-0** | Schema-mapper uplift: `physicalLayout` block + `scopingPathFromTenant` on manifest | **Superseded** for the `physicalLayout` half (replaced by `analyzer>=0.5.0` `metadata.shardingProfile`, PRD §6.2 bullet 3). `scopingPathFromTenant` still pending, tracked with MT-1/5. | n/a (`physicalLayout`); ~20 LOC (`scopingPathFromTenant`) |
 | **MT-1** | Session-bound `@tenantId`; strip body-supplied tenant in tenant-user mode | Not started | ~80 LOC + tests |
 | **MT-2** | Guardrail hardening: reject literal tenant predicates in LLM output | Not started | ~30 LOC + 4 tests |
 | **MT-3** | Cypher AST tenant injection pass | Not started | ~400 LOC + 20 tests |

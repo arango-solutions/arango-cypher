@@ -1173,6 +1173,32 @@ def acquire_mapping_bundle(db: StandardDatabase, *, include_owl: bool = False) -
                 sorted(backfilled) if isinstance(backfilled, list | tuple | set) else backfilled,
             )
 
+    # Surface upstream sharding profile (arangodb-schema-analyzer v0.5 /
+    # upstream PRD §6.2 bullet 3): the analyzer classifies every database
+    # into exactly one deployment style and emits the evidence as
+    # metadata.shardingProfile. Layer-5 (EXPLAIN-plan validator, see
+    # docs/multitenant_prd.md §7) reads `style` once at session start.
+    # We log it at INFO for deployment observability and escalate to
+    # WARNING when the classifier reports `status == "degraded"` (i.e. it
+    # fell back to a default because required evidence was missing).
+    sharding = bundle.metadata.get("shardingProfile") if bundle.metadata else None
+    if isinstance(sharding, dict):
+        style = sharding.get("style")
+        status = (
+            sharding.get("status")
+            or sharding.get("shardingProfileStatus")
+            or bundle.metadata.get("shardingProfileStatus")
+        )
+        if status == "degraded":
+            logger.warning(
+                "schema_analyzer shardingProfile is degraded (style=%s): "
+                "evidence was incomplete, downstream layers will assume "
+                "the default and may enforce stricter guardrails.",
+                style,
+            )
+        else:
+            logger.info("schema_analyzer shardingProfile: style=%s", style)
+
     return bundle
 
 

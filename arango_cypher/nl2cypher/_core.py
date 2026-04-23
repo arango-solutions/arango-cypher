@@ -143,6 +143,72 @@ def _escape_label(name: str) -> str:
     return name if _SYMBOLIC_NAME_RE.match(name) else f"`{name}`"
 
 
+# Human-readable, conceptual descriptions of each sharding style emitted by
+# arangodb-schema-analyzer>=0.5 as `metadata.shardingProfile.style` (see the
+# upstream PRD §6.2 bullet 3, also tracked in
+# docs/schema_analyzer_issues/08-emit-physical-layout-and-shard-topology.md).
+# We deliberately keep these descriptions at the *semantic* level — no
+# physical collection names, shard attributes, or graph names leak into the
+# LLM prompt (§1.2 no-physical-mapping contract).
+_DEPLOYMENT_STYLE_HINTS: dict[str, str] = {
+    "OneShard": (
+        "Deployment: single-shard database. "
+        "All data lives together; no cross-shard fanout concerns for query plans."
+    ),
+    "SmartGraph": (
+        "Deployment: sharded graph with a shared partitioning attribute. "
+        "Traversals that hold that attribute constant stay shard-local."
+    ),
+    "DisjointSmartGraph": (
+        "Deployment: multi-tenant graph with hard isolation between tenants. "
+        "Queries must be scoped to a single tenant — a traversal cannot cross "
+        "tenant boundaries."
+    ),
+    "SatelliteGraph": (
+        "Deployment: satellite graph, fully replicated on every DB-Server. "
+        "Traversals run locally without shard fanout."
+    ),
+    "Sharded": (
+        "Deployment: sharded database. "
+        "Queries that filter by the shard key early are preferred."
+    ),
+}
+
+
+def _deployment_style_hint(bundle: MappingBundle) -> str | None:
+    """Render a one-line conceptual hint describing the deployment style.
+
+    Consumes ``metadata.shardingProfile.style`` emitted by
+    ``arangodb-schema-analyzer>=0.5`` (upstream PRD §6.2 bullet 3). Returns
+    ``None`` when:
+
+    * the analyzer version predates ``shardingProfile`` emission, or
+    * the profile is degraded (``status == "degraded"``) — we prefer to
+      say nothing over giving the LLM a hint based on incomplete evidence, or
+    * the style is unknown to this module (forward-compat: a future
+      analyzer release may add a new style we don't yet recognise).
+
+    The returned string is intentionally **semantic**, not physical: it
+    describes the *consequence* of the deployment for query planning
+    (shard-local traversal, tenant isolation, etc.), not the underlying
+    shard keys or collection names.
+    """
+    meta = bundle.metadata if isinstance(bundle.metadata, dict) else {}
+    profile = meta.get("shardingProfile")
+    if not isinstance(profile, dict):
+        return None
+    status = profile.get("status") or meta.get("shardingProfileStatus")
+    if status == "degraded":
+        return None
+    style = profile.get("style")
+    if not isinstance(style, str):
+        return None
+    hint = _DEPLOYMENT_STYLE_HINTS.get(style)
+    if hint is None:
+        return None
+    return f"  {hint}"
+
+
 def _build_schema_summary(bundle: MappingBundle) -> str:
     """Build a conceptual-only schema description for LLM context.
 
@@ -166,6 +232,10 @@ def _build_schema_summary(bundle: MappingBundle) -> str:
     cs = bundle.conceptual_schema
     pm = bundle.physical_mapping
     lines: list[str] = ["Graph schema (Cypher labels and relationship types):"]
+
+    deployment_hint = _deployment_style_hint(bundle)
+    if deployment_hint:
+        lines.append(deployment_hint)
 
     entities_emitted: list[str] = []
 
