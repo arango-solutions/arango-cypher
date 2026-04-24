@@ -20,6 +20,7 @@ The test counterpart ``tests/test_translate_perf.py`` runs a shorter version of
 the same corpus under ``RUN_PERF=1`` and asserts the PRD §2.1 single-hop target
 of P95 < 50 ms.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -57,13 +58,12 @@ _CORPUS: dict[str, tuple[str, str]] = {
     ),
     "two_hop": (
         "movies_pg",
-        'MATCH (p:Person)-[:DIRECTED]->(m:Movie)<-[:ACTED_IN]-(a:Person) '
+        "MATCH (p:Person)-[:DIRECTED]->(m:Movie)<-[:ACTED_IN]-(a:Person) "
         'WHERE p.name = "Clint Eastwood" RETURN a.name',
     ),
     "variable_length": (
         "movies_pg",
-        'MATCH (p:Person {name: "Tom Hanks"})-[:ACTED_IN*1..3]-(m:Movie) '
-        "RETURN m.title LIMIT 20",
+        'MATCH (p:Person {name: "Tom Hanks"})-[:ACTED_IN*1..3]-(m:Movie) RETURN m.title LIMIT 20',
     ),
     "aggregation": (
         "movies_pg",
@@ -163,14 +163,10 @@ def run(iterations: int) -> dict[str, Any]:
 def _format_text(report: dict[str, Any]) -> str:
     lines: list[str] = []
     lines.append(
-        f"arango_cypher.translate() micro-benchmark  "
-        f"({report['iterations_per_case']} iterations per case)"
+        f"arango_cypher.translate() micro-benchmark  ({report['iterations_per_case']} iterations per case)"
     )
     lines.append("")
-    header = (
-        f"{'case':<32} {'mean':>8} {'p50':>8} {'p95':>8} {'p99':>8} "
-        f"{'min':>8} {'max':>8}  (ms)"
-    )
+    header = f"{'case':<32} {'mean':>8} {'p50':>8} {'p95':>8} {'p99':>8} {'min':>8} {'max':>8}  (ms)"
 
     def _fmt_block(title: str, rows: list[dict[str, Any]]) -> None:
         lines.append(title)

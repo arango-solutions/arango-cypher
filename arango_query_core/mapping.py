@@ -44,6 +44,7 @@ def is_valid_collection_name(name: str) -> bool:
 @dataclass(frozen=True)
 class RelationshipStats:
     """Cardinality statistics for a single relationship type."""
+
     edge_count: int = 0
     source_count: int = 0
     target_count: int = 0
@@ -56,6 +57,7 @@ class RelationshipStats:
 @dataclass(frozen=True)
 class IndexInfo:
     """Metadata for a single index on a collection."""
+
     type: str
     fields: tuple[str, ...]
     unique: bool = False
@@ -76,6 +78,7 @@ class PropertyInfo:
     ``sample_values`` holds a few representative non-sentinel values for
     prompt / UI context.
     """
+
     field: str
     type: str = "string"
     indexed: bool = False
@@ -190,7 +193,11 @@ class MappingResolver:
         mapping = entities.get(label_or_entity)
         if not isinstance(mapping, dict):
             available = sorted(entities.keys()) if entities else []
-            hint = f". Available entities: {', '.join(available)}" if available else " (mapping has no entities — did schema introspection succeed?)"
+            hint = (
+                f". Available entities: {', '.join(available)}"
+                if available
+                else " (mapping has no entities — did schema introspection succeed?)"
+            )
             raise CoreError(f"No entity mapping for: {label_or_entity}{hint}", code="MAPPING_NOT_FOUND")
         return mapping
 
@@ -202,7 +209,11 @@ class MappingResolver:
         mapping = rels.get(rel_type)
         if not isinstance(mapping, dict):
             available = sorted(rels.keys()) if rels else []
-            hint = f". Available relationships: {', '.join(available)}" if available else " (mapping has no relationships — did schema introspection succeed?)"
+            hint = (
+                f". Available relationships: {', '.join(available)}"
+                if available
+                else " (mapping has no relationships — did schema introspection succeed?)"
+            )
             raise CoreError(f"No relationship mapping for: {rel_type}{hint}", code="MAPPING_NOT_FOUND")
         return mapping
 
@@ -293,9 +304,8 @@ class MappingResolver:
         elif direction == "INBOUND":
             return self._endpoint_constrains(domain, target_label)
         else:
-            return (
-                self._endpoint_constrains(domain, target_label)
-                and self._endpoint_constrains(range_, target_label)
+            return self._endpoint_constrains(domain, target_label) and self._endpoint_constrains(
+                range_, target_label
             )
 
     def _endpoint_constrains(self, endpoint: str | list[str], target_label: str) -> bool:
@@ -329,7 +339,9 @@ class MappingResolver:
         return len(collections) == 1
 
     def _resolve_domain_range(
-        self, rel_type: str, rmap: JsonObj,
+        self,
+        rel_type: str,
+        rmap: JsonObj,
     ) -> tuple[str | list[str] | None, str | list[str] | None]:
         """Resolve domain/range for a relationship from physical mapping or conceptual schema.
 
@@ -403,15 +415,17 @@ class MappingResolver:
                 fields = tuple(str(f) for f in fields)
             else:
                 continue
-            result.append(IndexInfo(
-                type=str(idx.get("type", "persistent")),
-                fields=fields,
-                unique=bool(idx.get("unique", False)),
-                sparse=bool(idx.get("sparse", False)),
-                name=str(idx.get("name", "")),
-                vci=bool(idx.get("vci", False)),
-                deduplicate=bool(idx.get("deduplicate", False)),
-            ))
+            result.append(
+                IndexInfo(
+                    type=str(idx.get("type", "persistent")),
+                    fields=fields,
+                    unique=bool(idx.get("unique", False)),
+                    sparse=bool(idx.get("sparse", False)),
+                    name=str(idx.get("name", "")),
+                    vci=bool(idx.get("vci", False)),
+                    deduplicate=bool(idx.get("deduplicate", False)),
+                )
+            )
         return result
 
     def has_vci(self, rel_type: str) -> bool:
@@ -466,15 +480,9 @@ class MappingResolver:
                         "indexed": p.indexed,
                         "required": p.required,
                         "description": p.description,
-                        **(
-                            {"sentinelValues": list(p.sentinel_values)}
-                            if p.sentinel_values else {}
-                        ),
+                        **({"sentinelValues": list(p.sentinel_values)} if p.sentinel_values else {}),
                         **({"numericLike": True} if p.numeric_like else {}),
-                        **(
-                            {"sampleValues": list(p.sample_values)}
-                            if p.sample_values else {}
-                        ),
+                        **({"sampleValues": list(p.sample_values)} if p.sample_values else {}),
                     }
                     for name, p in props.items()
                 },
@@ -505,15 +513,9 @@ class MappingResolver:
                         "field": p.field,
                         "type": p.type,
                         "indexed": p.indexed,
-                        **(
-                            {"sentinelValues": list(p.sentinel_values)}
-                            if p.sentinel_values else {}
-                        ),
+                        **({"sentinelValues": list(p.sentinel_values)} if p.sentinel_values else {}),
                         **({"numericLike": True} if p.numeric_like else {}),
-                        **(
-                            {"sampleValues": list(p.sample_values)}
-                            if p.sample_values else {}
-                        ),
+                        **({"sampleValues": list(p.sample_values)} if p.sample_values else {}),
                     }
                     for name, p in props.items()
                 },
@@ -594,4 +596,3 @@ class MappingResolver:
         if ratio < 0.2:
             return "OUTBOUND"
         return None
-

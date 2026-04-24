@@ -13,6 +13,7 @@ Covers:
 
 All DB handles are mocks — no network access required.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -63,11 +64,13 @@ class TestExplainAql:
         assert msg == ""
 
     def test_error_payload_is_summarized(self) -> None:
-        db = _FakeDb(lambda a, b: {
-            "error": True,
-            "errorMessage": "collection not found: persons_typo",
-            "code": 404,
-        })
+        db = _FakeDb(
+            lambda a, b: {
+                "error": True,
+                "errorMessage": "collection not found: persons_typo",
+                "code": 404,
+            }
+        )
         ok, msg = explain_aql(db, "FOR d IN persons_typo RETURN d", {})
         assert ok is False
         assert "persons_typo" in msg
@@ -75,9 +78,9 @@ class TestExplainAql:
     def test_raised_exception_is_summarized(self) -> None:
         def boom(a: str, b: dict[str, Any]) -> Any:
             raise RuntimeError(
-                "AQLQueryExplainError: AQL: collection or view not found\n"
-                "  traceback line\n  more traceback"
+                "AQLQueryExplainError: AQL: collection or view not found\n  traceback line\n  more traceback"
             )
+
         db = _FakeDb(boom)
         ok, msg = explain_aql(db, "FOR d IN x RETURN d", {})
         assert ok is False
@@ -87,6 +90,7 @@ class TestExplainAql:
     def test_very_long_error_is_truncated(self) -> None:
         def boom(a: str, b: dict[str, Any]) -> Any:
             raise RuntimeError("x" * 1000)
+
         db = _FakeDb(boom)
         ok, msg = explain_aql(db, "FOR d IN x RETURN d", {})
         assert ok is False
@@ -135,10 +139,12 @@ class TestExecutionGroundedRetry:
         assert "Person" in res.cypher
 
     def test_explain_failure_triggers_retry(self, movies_mapping) -> None:
-        provider = _Provider([
-            "```cypher\nMATCH (n:Persons) RETURN n\n```",
-            "```cypher\nMATCH (p:Person) RETURN p\n```",
-        ])
+        provider = _Provider(
+            [
+                "```cypher\nMATCH (n:Persons) RETURN n\n```",
+                "```cypher\nMATCH (p:Person) RETURN p\n```",
+            ]
+        )
         calls = {"n": 0}
 
         def explain(aql: str, bind_vars: dict[str, Any]) -> dict[str, Any]:
@@ -194,11 +200,13 @@ class TestExecutionGroundedRetry:
         banner and leaves the editor untouched. The last attempted
         Cypher is preserved inside ``explanation`` for inspection.
         """
-        provider = _Provider([
-            "```cypher\nMATCH (n:A) RETURN n\n```",
-            "```cypher\nMATCH (n:B) RETURN n\n```",
-            "```cypher\nMATCH (n:C) RETURN n\n```",
-        ])
+        provider = _Provider(
+            [
+                "```cypher\nMATCH (n:A) RETURN n\n```",
+                "```cypher\nMATCH (n:B) RETURN n\n```",
+                "```cypher\nMATCH (n:C) RETURN n\n```",
+            ]
+        )
         db = _FakeDb(lambda a, b: {"error": True, "errorMessage": "bad"})
         res = nl_to_cypher(
             "find stuff",
@@ -220,10 +228,12 @@ class TestExecutionGroundedRetry:
 
     def test_transpile_error_also_triggers_retry(self, movies_mapping) -> None:
         """Cypher that parses but doesn't transpile also feeds back."""
-        provider = _Provider([
-            "```cypher\nMATCH (n:NotInSchema) RETURN n\n```",
-            "```cypher\nMATCH (p:Person) RETURN p\n```",
-        ])
+        provider = _Provider(
+            [
+                "```cypher\nMATCH (n:NotInSchema) RETURN n\n```",
+                "```cypher\nMATCH (p:Person) RETURN p\n```",
+            ]
+        )
         db = _FakeDb(lambda a, b: {"plan": {}})
         res = nl_to_cypher(
             "find stuff",
@@ -239,10 +249,12 @@ class TestExecutionGroundedRetry:
 
     def test_ok_on_retry_reports_retries_attempted(self, movies_mapping) -> None:
         """The ``retries`` counter should reflect the attempt index on success."""
-        provider = _Provider([
-            "```cypher\nMATCH (n:Persons) RETURN n\n```",
-            "```cypher\nMATCH (p:Person) RETURN p\n```",
-        ])
+        provider = _Provider(
+            [
+                "```cypher\nMATCH (n:Persons) RETURN n\n```",
+                "```cypher\nMATCH (p:Person) RETURN p\n```",
+            ]
+        )
         first = {"done": False}
 
         def explain(aql: str, bind_vars: dict[str, Any]) -> dict[str, Any]:
@@ -286,7 +298,8 @@ class TestOfflineBitIdentity:
             db=None,
         )
         expected = _SYSTEM_PROMPT.replace(
-            "{schema}", _build_schema_summary(movies_mapping),
+            "{schema}",
+            _build_schema_summary(movies_mapping),
         )
         assert captured["system"] == expected
 
@@ -306,8 +319,12 @@ class TestCallLlmWithRetryDirect:
         db = _FakeDb(lambda a, b: {"error": True, "errorMessage": "bad"})
         schema_summary = _build_schema_summary(movies_mapping)
         res = _call_llm_with_retry(
-            "q", schema_summary, provider, max_retries=0,
-            mapping=movies_mapping, db=db,
+            "q",
+            schema_summary,
+            provider,
+            max_retries=0,
+            mapping=movies_mapping,
+            db=db,
         )
         assert res is not None
         assert res.retries == 0
@@ -336,8 +353,11 @@ class TestCallLlmWithRetryDirect:
             return_value=(True, ""),
         ):
             res = nl_to_cypher(
-                "q", mapping=movies_mapping, use_fewshot=False,
-                use_entity_resolution=False, llm_provider=provider,
+                "q",
+                mapping=movies_mapping,
+                use_fewshot=False,
+                use_entity_resolution=False,
+                llm_provider=provider,
                 db=_BrokenDb(),
             )
         assert res.retries == 0
@@ -353,20 +373,27 @@ class TestValidationFailedFailClosed:
     """WP-29 D4: retry-budget exhaustion returns empty-cypher + structured method."""
 
     def test_call_llm_with_retry_fails_closed_on_exhaustion(
-        self, movies_mapping,
+        self,
+        movies_mapping,
     ) -> None:
         """Provider returns unparseable text every time; after retries we
         must not leak ``best_cypher`` into the result — ``cypher`` must be
         ``""`` and ``method`` must be ``"validation_failed"``."""
-        provider = _Provider([
-            "this is not cypher at all",
-            "still not cypher",
-            "nope",
-        ])
+        provider = _Provider(
+            [
+                "this is not cypher at all",
+                "still not cypher",
+                "nope",
+            ]
+        )
         schema_summary = _build_schema_summary(movies_mapping)
         res = _call_llm_with_retry(
-            "q", schema_summary, provider, max_retries=2,
-            mapping=movies_mapping, db=None,
+            "q",
+            schema_summary,
+            provider,
+            max_retries=2,
+            mapping=movies_mapping,
+            db=None,
         )
         assert res is not None
         assert res.cypher == ""
@@ -377,7 +404,8 @@ class TestValidationFailedFailClosed:
         assert "Last attempted Cypher was:" in res.explanation
 
     def test_call_llm_with_retry_does_not_write_invalid_cypher(
-        self, movies_mapping,
+        self,
+        movies_mapping,
     ) -> None:
         """A caller that forgets to branch on ``method`` still cannot
         accidentally populate the editor — ``result.cypher`` is empty
@@ -385,8 +413,12 @@ class TestValidationFailedFailClosed:
         provider = _Provider(["garbage garbage garbage"])
         schema_summary = _build_schema_summary(movies_mapping)
         res = _call_llm_with_retry(
-            "q", schema_summary, provider, max_retries=0,
-            mapping=movies_mapping, db=None,
+            "q",
+            schema_summary,
+            provider,
+            max_retries=0,
+            mapping=movies_mapping,
+            db=None,
         )
         assert res is not None
         assert not res.cypher, (
@@ -395,7 +427,9 @@ class TestValidationFailedFailClosed:
         )
 
     def test_validation_failed_logs_warning(
-        self, movies_mapping, caplog,
+        self,
+        movies_mapping,
+        caplog,
     ) -> None:
         """Exhaustion emits a WARN log so operators can audit the rate."""
         import logging
@@ -404,14 +438,18 @@ class TestValidationFailedFailClosed:
         schema_summary = _build_schema_summary(movies_mapping)
         with caplog.at_level(logging.WARNING, logger="arango_cypher.nl2cypher._core"):
             res = _call_llm_with_retry(
-                "q", schema_summary, provider, max_retries=0,
-                mapping=movies_mapping, db=None,
+                "q",
+                schema_summary,
+                provider,
+                max_retries=0,
+                mapping=movies_mapping,
+                db=None,
             )
         assert res is not None and res.method == "validation_failed"
         matching = [
-            r for r in caplog.records
-            if "validation_failed" in r.getMessage()
-            and r.levelno == logging.WARNING
+            r
+            for r in caplog.records
+            if "validation_failed" in r.getMessage() and r.levelno == logging.WARNING
         ]
         assert matching, (
             "expected at least one WARN record citing validation_failed; "
@@ -419,7 +457,8 @@ class TestValidationFailedFailClosed:
         )
 
     def test_nl_to_cypher_returns_validation_failed_without_falling_back(
-        self, movies_mapping,
+        self,
+        movies_mapping,
     ) -> None:
         """``nl_to_cypher`` must surface ``validation_failed`` directly
         rather than falling through to the rule-based translator (which
@@ -443,7 +482,8 @@ class TestRetryContextSeeding:
     attempt's user message, enabling WP-30's 'regenerate with hint' UX."""
 
     def test_retry_context_seeded_on_first_attempt_when_provided(
-        self, movies_mapping,
+        self,
+        movies_mapping,
     ) -> None:
         provider = _Provider(["```cypher\nMATCH (p:Person) RETURN p\n```"])
         schema_summary = _build_schema_summary(movies_mapping)
@@ -458,12 +498,12 @@ class TestRetryContextSeeding:
         )
         first_user = provider.seen_users[0]
         assert first_user.endswith(
-            "Your previous Cypher was invalid: "
-            "parser: expected ')' at position 17. Please fix it."
+            "Your previous Cypher was invalid: parser: expected ')' at position 17. Please fix it."
         )
 
     def test_no_retry_context_keeps_first_user_message_byte_identical(
-        self, movies_mapping,
+        self,
+        movies_mapping,
     ) -> None:
         """Without ``retry_context`` the first user message is the
         question verbatim — byte-identical to the pre-WP-29 shape."""
@@ -480,7 +520,8 @@ class TestRetryContextSeeding:
         assert provider.seen_users[0] == "who are the people?"
 
     def test_retry_context_plumbed_through_nl_to_cypher(
-        self, movies_mapping,
+        self,
+        movies_mapping,
     ) -> None:
         """End-to-end: the public ``nl_to_cypher`` accepts
         ``retry_context`` and forwards it into the builder."""
@@ -496,6 +537,5 @@ class TestRetryContextSeeding:
         )
         assert provider.seen_users, "provider must have been called"
         assert (
-            "Your previous Cypher was invalid: translate error: "
-            "unknown property x. Please fix it."
+            "Your previous Cypher was invalid: translate error: unknown property x. Please fix it."
         ) in provider.seen_users[0]

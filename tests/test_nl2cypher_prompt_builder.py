@@ -6,6 +6,7 @@ the pre-refactor ``_SYSTEM_PROMPT.format(schema=...)`` output so that
 provider-side prefix caching keeps working and Wave 4a sub-agents can
 layer on top without regressing the baseline prompt.
 """
+
 from __future__ import annotations
 
 from arango_cypher.nl2cypher import _SYSTEM_PROMPT, PromptBuilder
@@ -42,7 +43,8 @@ class TestZeroShotByteIdentity:
     def test_matches_current_system_prompt_constant(self) -> None:
         builder = PromptBuilder(schema_summary="Graph:\n  Node :Person (name)")
         expected = _SYSTEM_PROMPT.replace(
-            "{schema}", "Graph:\n  Node :Person (name)",
+            "{schema}",
+            "Graph:\n  Node :Person (name)",
         )
         assert builder.render_system() == expected
 
@@ -61,10 +63,7 @@ class TestRenderUser:
 
     def test_retry_context_appends_same_wording_as_legacy_loop(self) -> None:
         builder = PromptBuilder(schema_summary="X", retry_context="ERR")
-        expected = (
-            "q\n\n"
-            "Your previous Cypher was invalid: ERR. Please fix it."
-        )
+        expected = "q\n\nYour previous Cypher was invalid: ERR. Please fix it."
         assert builder.render_user("q") == expected
 
     def test_retry_context_cleared_between_uses(self) -> None:

@@ -440,9 +440,7 @@ class TestStatsOnlyRefresh:
             counts={"users": 10},
         )
         bundle1 = get_mapping(db, strategy="heuristic", cache_collection=None)
-        bundle2 = get_mapping(
-            db, strategy="heuristic", cache_collection=None, force_refresh=True
-        )
+        bundle2 = get_mapping(db, strategy="heuristic", cache_collection=None, force_refresh=True)
         assert bundle1 is not bundle2  # new object; cache was bypassed
 
     def test_cache_collection_none_disables_persistence(self):
@@ -473,9 +471,7 @@ class TestInvalidateCache:
         _mapping_cache.clear()
 
     def test_clears_in_memory_cache(self):
-        db, _ = _make_db_with_cache_support(
-            collections=[{"name": "users", "type": 2}]
-        )
+        db, _ = _make_db_with_cache_support(collections=[{"name": "users", "type": 2}])
         get_mapping(db, strategy="heuristic", cache_collection=None)
         assert db.name in _mapping_cache
 
@@ -483,9 +479,7 @@ class TestInvalidateCache:
         assert db.name not in _mapping_cache
 
     def test_clears_persistent_cache(self):
-        db, store = _make_db_with_cache_support(
-            collections=[{"name": "users", "type": 2}]
-        )
+        db, store = _make_db_with_cache_support(collections=[{"name": "users", "type": 2}])
         get_mapping(db, strategy="heuristic")
         assert "mapping" in store[DEFAULT_CACHE_COLLECTION].docs
 

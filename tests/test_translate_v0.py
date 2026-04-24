@@ -88,6 +88,7 @@ class TestBacktickedLabelResolution:
         mapping = _mapping_with_dotted_entity()
         out = translate("MATCH (d:`Compliance.rst`) RETURN d.doc_version", mapping=mapping)
 
-        assert "ibex_documents" in (out.bind_vars.get("@collection") or "") or \
-               any(v == "ibex_documents" for v in out.bind_vars.values())
+        assert "ibex_documents" in (out.bind_vars.get("@collection") or "") or any(
+            v == "ibex_documents" for v in out.bind_vars.values()
+        )
         assert "doc_version" in out.aql

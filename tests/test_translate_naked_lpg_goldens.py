@@ -30,14 +30,10 @@ def test_naked_lpg_emits_vci_warning(corpus_cases, case_id: str):
 
     out = translate(case.cypher, mapping=mapping, params=case.params)
 
-    warning_messages = [
-        w["message"] if isinstance(w, dict) else str(w)
-        for w in out.warnings
-    ]
-    assert any(
-        "VCI" in msg or "vertex-centric" in msg.lower()
-        for msg in warning_messages
-    ), f"Expected VCI warning but got: {warning_messages}"
+    warning_messages = [w["message"] if isinstance(w, dict) else str(w) for w in out.warnings]
+    assert any("VCI" in msg or "vertex-centric" in msg.lower() for msg in warning_messages), (
+        f"Expected VCI warning but got: {warning_messages}"
+    )
 
 
 def test_naked_lpg_no_options_index_hint(corpus_cases):
@@ -46,12 +42,8 @@ def test_naked_lpg_no_options_index_hint(corpus_cases):
         case = next(c for c in corpus_cases if c.id == case_id)
         mapping = mapping_bundle_for(case.mapping_fixture)
         out = translate(case.cypher, mapping=mapping, params=case.params)
-        assert "OPTIONS" not in out.aql, (
-            f"Case {case_id}: naked LPG should not emit OPTIONS indexHint"
-        )
-        assert "indexHint" not in out.aql, (
-            f"Case {case_id}: naked LPG should not emit indexHint"
-        )
+        assert "OPTIONS" not in out.aql, f"Case {case_id}: naked LPG should not emit OPTIONS indexHint"
+        assert "indexHint" not in out.aql, f"Case {case_id}: naked LPG should not emit indexHint"
 
 
 def test_naked_lpg_node_only_no_vci_warning(corpus_cases):
@@ -60,11 +52,7 @@ def test_naked_lpg_node_only_no_vci_warning(corpus_cases):
         case = next(c for c in corpus_cases if c.id == case_id)
         mapping = mapping_bundle_for(case.mapping_fixture)
         out = translate(case.cypher, mapping=mapping, params=case.params)
-        warning_messages = [
-            w["message"] if isinstance(w, dict) else str(w)
-            for w in out.warnings
-        ]
-        assert not any(
-            "VCI" in msg or "vertex-centric" in msg.lower()
-            for msg in warning_messages
-        ), f"Case {case_id}: node-only query should not warn about VCI"
+        warning_messages = [w["message"] if isinstance(w, dict) else str(w) for w in out.warnings]
+        assert not any("VCI" in msg or "vertex-centric" in msg.lower() for msg in warning_messages), (
+            f"Case {case_id}: node-only query should not warn about VCI"
+        )

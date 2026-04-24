@@ -69,10 +69,7 @@ def _compile_shortest_path(args: list[str], bind_vars: dict[str, Any]) -> str:
             "(startVertex, targetVertex, edgeCollection, direction)",
             code="UNSUPPORTED",
         )
-    return (
-        f"(FOR v IN {args[3]} SHORTEST_PATH "
-        f"{args[0]} TO {args[1]} {args[2]} RETURN v)"
-    )
+    return f"(FOR v IN {args[3]} SHORTEST_PATH {args[0]} TO {args[1]} {args[2]} RETURN v)"
 
 
 def _compile_k_shortest_paths(args: list[str], bind_vars: dict[str, Any]) -> str:
@@ -83,10 +80,7 @@ def _compile_k_shortest_paths(args: list[str], bind_vars: dict[str, Any]) -> str
             "(startVertex, targetVertex, edgeCollection, direction)",
             code="UNSUPPORTED",
         )
-    return (
-        f"(FOR p IN {args[3]} K_SHORTEST_PATHS "
-        f"{args[0]} TO {args[1]} {args[2]} RETURN p)"
-    )
+    return f"(FOR p IN {args[3]} K_SHORTEST_PATHS {args[0]} TO {args[1]} {args[2]} RETURN p)"
 
 
 def register_procedure_extensions(registry: ExtensionRegistry) -> None:

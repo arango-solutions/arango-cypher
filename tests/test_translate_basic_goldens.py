@@ -35,4 +35,3 @@ def test_translate_basic_cases_match_goldens(corpus_cases, case_id: str):
     assert case.expected_aql is not None, "Golden AQL must be filled for basic cases"
     assert out.aql.strip() == case.expected_aql.strip()
     assert out.bind_vars == case.expected_bind_vars
-

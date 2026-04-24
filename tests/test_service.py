@@ -16,15 +16,11 @@ client = TestClient(app)
 
 PG_MAPPING = {
     "conceptualSchema": {
-        "entities": [
-            {"labels": ["User"], "name": "User", "properties": []}
-        ],
+        "entities": [{"labels": ["User"], "name": "User", "properties": []}],
         "relationships": [],
     },
     "physicalMapping": {
-        "entities": {
-            "User": {"collectionName": "users", "style": "COLLECTION"}
-        },
+        "entities": {"User": {"collectionName": "users", "style": "COLLECTION"}},
         "relationships": {},
     },
     "metadata": {"timestamp": "2026-01-01T00:00:00Z"},
@@ -75,10 +71,13 @@ class TestConnectDefaults:
 
 class TestTranslate:
     def test_basic_translate(self):
-        resp = client.post("/translate", json={
-            "cypher": "MATCH (n:User) RETURN n.name AS name",
-            "mapping": PG_MAPPING,
-        })
+        resp = client.post(
+            "/translate",
+            json={
+                "cypher": "MATCH (n:User) RETURN n.name AS name",
+                "mapping": PG_MAPPING,
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert "FOR n IN" in data["aql"]
@@ -86,92 +85,126 @@ class TestTranslate:
         assert "@collection" in data["bind_vars"]
 
     def test_translate_with_where(self):
-        resp = client.post("/translate", json={
-            "cypher": "MATCH (n:User) WHERE n.age > 21 RETURN n.name AS name",
-            "mapping": PG_MAPPING,
-        })
+        resp = client.post(
+            "/translate",
+            json={
+                "cypher": "MATCH (n:User) WHERE n.age > 21 RETURN n.name AS name",
+                "mapping": PG_MAPPING,
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert "FILTER" in data["aql"]
 
     def test_translate_with_params(self):
-        resp = client.post("/translate", json={
-            "cypher": "MATCH (n:User) WHERE n.name = $name RETURN n",
-            "mapping": PG_MAPPING,
-            "params": {"name": "Alice"},
-        })
+        resp = client.post(
+            "/translate",
+            json={
+                "cypher": "MATCH (n:User) WHERE n.name = $name RETURN n",
+                "mapping": PG_MAPPING,
+                "params": {"name": "Alice"},
+            },
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["bind_vars"]["name"] == "Alice"
 
     def test_translate_with_extensions(self):
-        resp = client.post("/translate", json={
-            "cypher": "MATCH (n:User) RETURN arango.bm25(n) AS score",
-            "mapping": PG_MAPPING,
-            "extensions_enabled": True,
-        })
+        resp = client.post(
+            "/translate",
+            json={
+                "cypher": "MATCH (n:User) RETURN arango.bm25(n) AS score",
+                "mapping": PG_MAPPING,
+                "extensions_enabled": True,
+            },
+        )
         assert resp.status_code == 200
         assert "BM25(n)" in resp.json()["aql"]
 
     def test_translate_missing_mapping_rejected(self):
-        resp = client.post("/translate", json={
-            "cypher": "MATCH (n:User) RETURN n",
-        })
+        resp = client.post(
+            "/translate",
+            json={
+                "cypher": "MATCH (n:User) RETURN n",
+            },
+        )
         assert resp.status_code == 400
 
     def test_translate_invalid_cypher_rejected(self):
-        resp = client.post("/translate", json={
-            "cypher": "NOT VALID CYPHER !!!",
-            "mapping": PG_MAPPING,
-        })
+        resp = client.post(
+            "/translate",
+            json={
+                "cypher": "NOT VALID CYPHER !!!",
+                "mapping": PG_MAPPING,
+            },
+        )
         assert resp.status_code == 422
 
     def test_translate_empty_cypher_rejected(self):
-        resp = client.post("/translate", json={
-            "cypher": "",
-            "mapping": PG_MAPPING,
-        })
+        resp = client.post(
+            "/translate",
+            json={
+                "cypher": "",
+                "mapping": PG_MAPPING,
+            },
+        )
         assert resp.status_code == 422
 
 
 class TestValidate:
     def test_syntax_only(self):
-        resp = client.post("/validate", json={
-            "cypher": "MATCH (n:User) RETURN n",
-        })
+        resp = client.post(
+            "/validate",
+            json={
+                "cypher": "MATCH (n:User) RETURN n",
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
 
     def test_invalid_syntax(self):
-        resp = client.post("/validate", json={
-            "cypher": "NOT VALID CYPHER !!!",
-        })
+        resp = client.post(
+            "/validate",
+            json={
+                "cypher": "NOT VALID CYPHER !!!",
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["ok"] is False
         assert len(resp.json()["errors"]) > 0
 
     def test_with_mapping(self):
-        resp = client.post("/validate", json={
-            "cypher": "MATCH (n:User) RETURN n.name AS name",
-            "mapping": PG_MAPPING,
-        })
+        resp = client.post(
+            "/validate",
+            json={
+                "cypher": "MATCH (n:User) RETURN n.name AS name",
+                "mapping": PG_MAPPING,
+            },
+        )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
 
 
 class TestExecuteWithoutSession:
     def test_no_auth_header(self):
-        resp = client.post("/execute", json={
-            "cypher": "MATCH (n:User) RETURN n",
-            "mapping": PG_MAPPING,
-        })
+        resp = client.post(
+            "/execute",
+            json={
+                "cypher": "MATCH (n:User) RETURN n",
+                "mapping": PG_MAPPING,
+            },
+        )
         assert resp.status_code == 401
 
     def test_invalid_token(self):
-        resp = client.post("/execute", json={
-            "cypher": "MATCH (n:User) RETURN n",
-            "mapping": PG_MAPPING,
-        }, headers={"Authorization": "Bearer invalid_token"})
+        resp = client.post(
+            "/execute",
+            json={
+                "cypher": "MATCH (n:User) RETURN n",
+                "mapping": PG_MAPPING,
+            },
+            headers={"Authorization": "Bearer invalid_token"},
+        )
         assert resp.status_code == 401
 
 
@@ -183,33 +216,47 @@ class TestDisconnectWithoutSession:
 
 class TestExplainWithoutSession:
     def test_no_auth_header(self):
-        resp = client.post("/explain", json={
-            "cypher": "MATCH (n:User) RETURN n",
-            "mapping": PG_MAPPING,
-        })
+        resp = client.post(
+            "/explain",
+            json={
+                "cypher": "MATCH (n:User) RETURN n",
+                "mapping": PG_MAPPING,
+            },
+        )
         assert resp.status_code == 401
 
     def test_invalid_token(self):
-        resp = client.post("/explain", json={
-            "cypher": "MATCH (n:User) RETURN n",
-            "mapping": PG_MAPPING,
-        }, headers={"Authorization": "Bearer bad_token"})
+        resp = client.post(
+            "/explain",
+            json={
+                "cypher": "MATCH (n:User) RETURN n",
+                "mapping": PG_MAPPING,
+            },
+            headers={"Authorization": "Bearer bad_token"},
+        )
         assert resp.status_code == 401
 
 
 class TestAqlProfileWithoutSession:
     def test_no_auth_header(self):
-        resp = client.post("/aql-profile", json={
-            "cypher": "MATCH (n:User) RETURN n",
-            "mapping": PG_MAPPING,
-        })
+        resp = client.post(
+            "/aql-profile",
+            json={
+                "cypher": "MATCH (n:User) RETURN n",
+                "mapping": PG_MAPPING,
+            },
+        )
         assert resp.status_code == 401
 
     def test_invalid_token(self):
-        resp = client.post("/aql-profile", json={
-            "cypher": "MATCH (n:User) RETURN n",
-            "mapping": PG_MAPPING,
-        }, headers={"Authorization": "Bearer bad_token"})
+        resp = client.post(
+            "/aql-profile",
+            json={
+                "cypher": "MATCH (n:User) RETURN n",
+                "mapping": PG_MAPPING,
+            },
+            headers={"Authorization": "Bearer bad_token"},
+        )
         assert resp.status_code == 401
 
 
@@ -241,6 +288,7 @@ class TestUiCacheHeaders:
 
     def _ui_dist_present(self) -> bool:
         from arango_cypher.service import _UI_DIR  # type: ignore[attr-defined]
+
         return _UI_DIR.is_dir() and (_UI_DIR / "index.html").is_file()
 
     @pytest.mark.parametrize("prefix", ["/ui", "/frontend"])
@@ -267,6 +315,7 @@ class TestUiCacheHeaders:
 
     def test_ui_assets_immutable(self):
         from arango_cypher.service import _UI_DIR  # type: ignore[attr-defined]
+
         assets_dir = _UI_DIR / "assets"
         if not assets_dir.is_dir():
             pytest.skip("ui/dist/assets not present")

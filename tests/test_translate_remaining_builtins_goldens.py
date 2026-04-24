@@ -1,4 +1,5 @@
 """Golden tests for WP-12: remaining built-in functions."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -20,6 +21,4 @@ def test_remaining_builtins(case: dict) -> None:
 
     aql = out.aql
     for fragment in case.get("expect_aql_contains", []):
-        assert fragment in aql, (
-            f"[{case['id']}] expected AQL to contain {fragment!r}, got:\n{aql}"
-        )
+        assert fragment in aql, f"[{case['id']}] expected AQL to contain {fragment!r}, got:\n{aql}"

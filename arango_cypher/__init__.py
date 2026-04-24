@@ -66,4 +66,3 @@ __all__ = [
     "translate",
     "validate_cypher_profile",
 ]
-

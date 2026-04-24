@@ -1366,16 +1366,10 @@ def compute_statistics(
         style = emap.get("style", "COLLECTION")
         type_field = emap.get("typeField")
         type_value = emap.get("typeValue")
-        if (
-            col_name_safe
-            and style in ("LABEL", "GENERIC_WITH_TYPE")
-            and type_field
-            and type_value
-        ):
+        if col_name_safe and style in ("LABEL", "GENERIC_WITH_TYPE") and type_field and type_value:
             try:
                 aql = (
-                    f"FOR d IN `{col_name}` FILTER d.`{type_field}` == @tv "
-                    "COLLECT WITH COUNT INTO c RETURN c"
+                    f"FOR d IN `{col_name}` FILTER d.`{type_field}` == @tv COLLECT WITH COUNT INTO c RETURN c"
                 )
                 cursor = db.aql.execute(aql, bind_vars={"tv": type_value})
                 entity_count = next(cursor, 0)
@@ -1410,16 +1404,10 @@ def compute_statistics(
         type_field = rmap.get("typeField")
         type_value = rmap.get("typeValue")
 
-        if (
-            edge_col_safe
-            and style == "GENERIC_WITH_TYPE"
-            and type_field
-            and type_value
-        ):
+        if edge_col_safe and style == "GENERIC_WITH_TYPE" and type_field and type_value:
             try:
                 aql = (
-                    f"FOR e IN `{edge_col}` FILTER e.`{type_field}` == @tv "
-                    "COLLECT WITH COUNT INTO c RETURN c"
+                    f"FOR e IN `{edge_col}` FILTER e.`{type_field}` == @tv COLLECT WITH COUNT INTO c RETURN c"
                 )
                 cursor = db.aql.execute(aql, bind_vars={"tv": type_value})
                 edge_count = next(cursor, 0)

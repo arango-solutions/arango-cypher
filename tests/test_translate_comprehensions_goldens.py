@@ -1,4 +1,5 @@
 """Golden tests for list comprehensions and pattern comprehensions."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -19,6 +20,4 @@ def test_comprehension(case: dict) -> None:
     out = translate(case["cypher"], mapping=mapping)
 
     for fragment in case.get("expect_aql_contains", []):
-        assert fragment in out.aql, (
-            f"[{case['id']}] expected {fragment!r} in AQL:\n{out.aql}"
-        )
+        assert fragment in out.aql, f"[{case['id']}] expected {fragment!r} in AQL:\n{out.aql}"

@@ -1,4 +1,5 @@
 """Tests for the NL-to-Cypher rule-based pipeline."""
+
 from __future__ import annotations
 
 import pytest
@@ -92,11 +93,13 @@ class TestExtractCypher:
 class TestSchemaContext:
     def test_schema_summary_contains_entities(self, movies_mapping) -> None:
         from arango_cypher.nl2cypher import _build_schema_summary
+
         summary = _build_schema_summary(movies_mapping)
         assert "Person" in summary
         assert "Movie" in summary
 
     def test_schema_summary_contains_relationships(self, movies_mapping) -> None:
         from arango_cypher.nl2cypher import _build_schema_summary
+
         summary = _build_schema_summary(movies_mapping)
         assert "ACTED_IN" in summary

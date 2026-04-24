@@ -201,10 +201,8 @@ class TestUiDistFreshness:
         """
         verdict = _check_ui_dist_freshness()
         assert verdict != "stale", (
-            f"ui/dist is older than ui/src; verdict={verdict!r}. "
-            "Run `cd ui && npm run build` and recommit."
+            f"ui/dist is older than ui/src; verdict={verdict!r}. Run `cd ui && npm run build` and recommit."
         )
         assert verdict in ("ok", "missing", "no_src"), (
-            f"Unexpected freshness verdict {verdict!r}; expected one of "
-            "ok / missing / no_src."
+            f"Unexpected freshness verdict {verdict!r}; expected one of ok / missing / no_src."
         )

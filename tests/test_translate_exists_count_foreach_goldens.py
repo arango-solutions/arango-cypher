@@ -1,4 +1,5 @@
 """Golden tests for WS-7: EXISTS {}, COUNT {}, and FOREACH."""
+
 from __future__ import annotations
 
 import pytest

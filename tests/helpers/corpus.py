@@ -48,7 +48,9 @@ def load_cases_from_file(path: Path) -> list[CorpusCase]:
             cypher=str(c.get("cypher") or ""),
             params=dict(params),
             expected_aql=(expected.get("aql") if isinstance(expected.get("aql"), str) else None),
-            expected_bind_vars=(expected.get("bind_vars") if isinstance(expected.get("bind_vars"), dict) else {}),
+            expected_bind_vars=(
+                expected.get("bind_vars") if isinstance(expected.get("bind_vars"), dict) else {}
+            ),
         )
         if not case.id:
             raise ValueError(f"Case missing id at index {idx}: {path}")
@@ -74,4 +76,3 @@ def load_all_cases(cases_dir: Path) -> list[CorpusCase]:
 
 def iter_cases(cases_dir: Path) -> Iterable[CorpusCase]:
     return load_all_cases(cases_dir)
-

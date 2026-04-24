@@ -9,6 +9,7 @@ The runner is deliberately small and framework-free: it accepts any
 ``LLMProvider`` so unit tests can drive it with a scripted mock, and
 production sweeps can pass a real :class:`~arango_cypher.nl2cypher.OpenAIProvider`.
 """
+
 from __future__ import annotations
 
 import json
@@ -103,7 +104,9 @@ def open_eval_db_handles(
         except Exception as exc:
             logger.info(
                 "Eval runner: skipping %s (cannot open DB %r): %s",
-                fx, db_name, exc,
+                fx,
+                db_name,
+                exc,
             )
             continue
         handles[fx] = db
@@ -173,13 +176,15 @@ def load_corpus(path: Path = CORPUS_PATH) -> list[EvalCase]:
     for c in cases:
         if not isinstance(c, dict):
             continue
-        out.append(EvalCase(
-            id=str(c.get("id", "")),
-            mapping_fixture=str(c.get("mapping_fixture", "")),
-            question=str(c.get("question", "")),
-            expected_patterns=[str(p) for p in (c.get("expected_patterns") or [])],
-            category=str(c.get("category", "baseline")),
-        ))
+        out.append(
+            EvalCase(
+                id=str(c.get("id", "")),
+                mapping_fixture=str(c.get("mapping_fixture", "")),
+                question=str(c.get("question", "")),
+                expected_patterns=[str(p) for p in (c.get("expected_patterns") or [])],
+                category=str(c.get("category", "baseline")),
+            )
+        )
     return out
 
 
@@ -213,6 +218,7 @@ def _parse_ok(cypher: str) -> bool:
         return False
     try:
         from arango_cypher.parser import parse_cypher
+
         parse_cypher(cypher)
         return True
     except Exception:
@@ -250,8 +256,7 @@ def run_case(
         case_db = db
 
     needs_db = bool(
-        config.get("use_execution_grounded")
-        or config.get("use_entity_resolution", True),
+        config.get("use_execution_grounded") or config.get("use_entity_resolution", True),
     )
     db_for_call = case_db if needs_db else None
 
@@ -332,10 +337,7 @@ def run_eval(
     ]
 
     def _rate(key: str) -> float:
-        return (
-            sum(1 for r in results if getattr(r, key)) / len(results)
-            if results else 0.0
-        )
+        return sum(1 for r in results if getattr(r, key)) / len(results) if results else 0.0
 
     by_cat: dict[str, dict[str, float]] = {}
     cats = sorted({r.category for r in results})
@@ -490,8 +492,7 @@ def _main(argv: list[str] | None = None) -> int:
         db_for_fixture = open_eval_db_handles()
         if db_for_fixture:
             print(
-                "Live DB enabled for fixtures: "
-                + ", ".join(sorted(db_for_fixture)),
+                "Live DB enabled for fixtures: " + ", ".join(sorted(db_for_fixture)),
             )
         else:
             print(
@@ -513,7 +514,8 @@ def _main(argv: list[str] | None = None) -> int:
             "`python -m tests.nl2cypher.eval.runner --config full --baseline`."
         )
         baseline_path.write_text(
-            json.dumps(summary, indent=2, default=str), encoding="utf-8",
+            json.dumps(summary, indent=2, default=str),
+            encoding="utf-8",
         )
         print(f"Refreshed baseline: {baseline_path}")
     return 0

@@ -3,6 +3,7 @@
 TCK expected results use Neo4j/Cypher conventions (node/relationship literals,
 unquoted map keys, etc.). This module bridges the gap to ArangoDB result values.
 """
+
 from __future__ import annotations
 
 import json
@@ -77,11 +78,7 @@ def normalize_actual_value(value: Any, *, as_node: bool = False, as_rel: bool = 
     """
     if isinstance(value, dict):
         strip_keys = _ARANGO_EDGE_META_KEYS if as_rel else _ARANGO_META_KEYS
-        cleaned = {
-            k: normalize_actual_value(v)
-            for k, v in value.items()
-            if k not in strip_keys
-        }
+        cleaned = {k: normalize_actual_value(v) for k, v in value.items() if k not in strip_keys}
         if as_node:
             if "type" in cleaned:
                 type_val = cleaned.pop("type")
@@ -114,9 +111,7 @@ def results_match(
     rows are compared as multisets (sorted by canonical repr).
     """
     if len(actual_rows) != len(expected_table):
-        return False, (
-            f"row count mismatch: got {len(actual_rows)}, expected {len(expected_table)}"
-        )
+        return False, (f"row count mismatch: got {len(actual_rows)}, expected {len(expected_table)}")
 
     norm_actual = _normalize_actual_rows(actual_rows, expected_table)
     norm_expected = _normalize_expected_rows(expected_table)
@@ -139,6 +134,7 @@ def results_match(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _try_int(s: str) -> int | None:
     try:
@@ -209,7 +205,7 @@ def _parse_map(s: str) -> dict[str, Any]:
         if colon_idx < 0:
             continue
         key = entry[:colon_idx].strip().strip("'\"")
-        val = entry[colon_idx + 1:].strip()
+        val = entry[colon_idx + 1 :].strip()
         result[key] = normalize_expected_value(val)
     return result
 
@@ -314,10 +310,7 @@ def _normalize_actual_rows(
 
 
 def _normalize_expected_rows(table: list[dict[str, str]]) -> list[dict[str, Any]]:
-    return [
-        {k: normalize_expected_value(v) for k, v in row.items()}
-        for row in table
-    ]
+    return [{k: normalize_expected_value(v) for k, v in row.items()} for row in table]
 
 
 def _row_sort_key(row: dict[str, Any]) -> str:
@@ -338,9 +331,7 @@ def results_contain(
     Unlike results_match, extra actual rows are allowed.
     """
     if len(actual_rows) < len(expected_table):
-        return False, (
-            f"too few rows: got {len(actual_rows)}, need at least {len(expected_table)}"
-        )
+        return False, (f"too few rows: got {len(actual_rows)}, need at least {len(expected_table)}")
 
     norm_actual = _normalize_actual_rows(actual_rows, expected_table)
     norm_expected = _normalize_expected_rows(expected_table)

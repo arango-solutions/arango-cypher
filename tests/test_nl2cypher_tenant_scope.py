@@ -30,10 +30,7 @@ def _mapping(
     """Build a minimal mapping dict shaped like the schema analyzer
     output, with optional per-entity physical-mapping overrides for
     testing the explicit-annotation path."""
-    pm_entities = {
-        e["name"]: {"style": "COLLECTION", "collectionName": e["name"]}
-        for e in entities
-    }
+    pm_entities = {e["name"]: {"style": "COLLECTION", "collectionName": e["name"]} for e in entities}
     for name, extra in (physical_overrides or {}).items():
         pm_entities.setdefault(name, {})
         pm_entities[name].update(extra)
@@ -53,37 +50,61 @@ def _mapping(
 
 class TestDiscoveryDefaults:
     def test_no_tenant_entity_classifies_everything_as_global(self) -> None:
-        m = analyze_tenant_scope(_mapping([
-            {"name": "User", "properties": [{"name": "email"}]},
-            {"name": "Movie", "properties": [{"name": "title"}]},
-        ]))
+        m = analyze_tenant_scope(
+            _mapping(
+                [
+                    {"name": "User", "properties": [{"name": "email"}]},
+                    {"name": "Movie", "properties": [{"name": "title"}]},
+                ]
+            )
+        )
         assert m.tenant_entity is None
         assert m.role_of("User") is EntityTenantRole.GLOBAL
         assert m.role_of("Movie") is EntityTenantRole.GLOBAL
         assert m.scoped_entities() == []
 
     def test_tenant_entity_is_root(self) -> None:
-        m = analyze_tenant_scope(_mapping([
-            {"name": "Tenant", "properties": [{"name": "NAME"}]},
-        ]))
+        m = analyze_tenant_scope(
+            _mapping(
+                [
+                    {"name": "Tenant", "properties": [{"name": "NAME"}]},
+                ]
+            )
+        )
         assert m.tenant_entity == "Tenant"
         assert m.role_of("Tenant") is EntityTenantRole.TENANT_ROOT
         assert m.denorm_field_of("Tenant") is None
 
     def test_denorm_field_marks_entity_scoped_with_field_name(self) -> None:
         # Default regex picks up TENANT_ID, tenant_id, tenantId, tenant_key.
-        m = analyze_tenant_scope(_mapping([
-            {"name": "Tenant", "properties": [{"name": "NAME"}]},
-            {"name": "Device", "properties": [
-                {"name": "TENANT_ID"}, {"name": "MAC"},
-            ]},
-            {"name": "GSuiteUser", "properties": [
-                {"name": "tenant_id"}, {"name": "EMAIL"},
-            ]},
-            {"name": "Library", "properties": [
-                {"name": "tenantKey"}, {"name": "NAME"},
-            ]},
-        ]))
+        m = analyze_tenant_scope(
+            _mapping(
+                [
+                    {"name": "Tenant", "properties": [{"name": "NAME"}]},
+                    {
+                        "name": "Device",
+                        "properties": [
+                            {"name": "TENANT_ID"},
+                            {"name": "MAC"},
+                        ],
+                    },
+                    {
+                        "name": "GSuiteUser",
+                        "properties": [
+                            {"name": "tenant_id"},
+                            {"name": "EMAIL"},
+                        ],
+                    },
+                    {
+                        "name": "Library",
+                        "properties": [
+                            {"name": "tenantKey"},
+                            {"name": "NAME"},
+                        ],
+                    },
+                ]
+            )
+        )
         assert m.role_of("Device") is EntityTenantRole.TENANT_SCOPED
         assert m.denorm_field_of("Device") == "TENANT_ID"
         assert m.role_of("GSuiteUser") is EntityTenantRole.TENANT_SCOPED
@@ -95,36 +116,44 @@ class TestDiscoveryDefaults:
         # Critical for emitting the right AQL: filter must match the
         # *exact* field name as stored on the document. We must not
         # normalise to upper- or lowercase.
-        m = analyze_tenant_scope(_mapping([
-            {"name": "Tenant", "properties": []},
-            {"name": "X", "properties": [{"name": "Tenant_Id"}]},
-        ]))
+        m = analyze_tenant_scope(
+            _mapping(
+                [
+                    {"name": "Tenant", "properties": []},
+                    {"name": "X", "properties": [{"name": "Tenant_Id"}]},
+                ]
+            )
+        )
         assert m.denorm_field_of("X") == "Tenant_Id"
 
     def test_traversal_only_scoping_when_no_denorm(self) -> None:
         # Library has no tenant column but is reachable from Tenant
         # within the BFS budget → tenant-scoped via traversal only.
-        m = analyze_tenant_scope(_mapping(
-            entities=[
-                {"name": "Tenant", "properties": []},
-                {"name": "Library", "properties": [{"name": "NAME"}]},
-            ],
-            relationships=[
-                {"type": "TENANTLIBRARY", "from": "Tenant", "to": "Library"},
-            ],
-        ))
+        m = analyze_tenant_scope(
+            _mapping(
+                entities=[
+                    {"name": "Tenant", "properties": []},
+                    {"name": "Library", "properties": [{"name": "NAME"}]},
+                ],
+                relationships=[
+                    {"type": "TENANTLIBRARY", "from": "Tenant", "to": "Library"},
+                ],
+            )
+        )
         assert m.role_of("Library") is EntityTenantRole.TENANT_SCOPED
         assert m.denorm_field_of("Library") is None
 
     def test_unreachable_no_field_is_global(self) -> None:
         # Cve has no tenant field and no edge to Tenant → global metadata.
-        m = analyze_tenant_scope(_mapping(
-            entities=[
-                {"name": "Tenant", "properties": []},
-                {"name": "Cve", "properties": [{"name": "ID"}]},
-            ],
-            relationships=[],
-        ))
+        m = analyze_tenant_scope(
+            _mapping(
+                entities=[
+                    {"name": "Tenant", "properties": []},
+                    {"name": "Cve", "properties": [{"name": "ID"}]},
+                ],
+                relationships=[],
+            )
+        )
         assert m.role_of("Cve") is EntityTenantRole.GLOBAL
         assert "Cve" in m.global_entities()
 
@@ -152,19 +181,21 @@ class TestDiscoveryDefaults:
 
     def test_relationship_dict_endpoint_shape_supported(self) -> None:
         # The schema analyzer sometimes emits {label: ..., ...} dicts.
-        m = analyze_tenant_scope(_mapping(
-            entities=[
-                {"name": "Tenant", "properties": []},
-                {"name": "Device", "properties": []},
-            ],
-            relationships=[
-                {
-                    "type": "TENANTDEVICE",
-                    "from": {"label": "Tenant"},
-                    "to": {"label": "Device"},
-                },
-            ],
-        ))
+        m = analyze_tenant_scope(
+            _mapping(
+                entities=[
+                    {"name": "Tenant", "properties": []},
+                    {"name": "Device", "properties": []},
+                ],
+                relationships=[
+                    {
+                        "type": "TENANTDEVICE",
+                        "from": {"label": "Tenant"},
+                        "to": {"label": "Device"},
+                    },
+                ],
+            )
+        )
         assert m.role_of("Device") is EntityTenantRole.TENANT_SCOPED
 
     def test_fromEntity_toEntity_endpoint_shape_supported(self) -> None:
@@ -176,25 +207,27 @@ class TestDiscoveryDefaults:
         # ``Device`` and ``GSuiteUser``, misclassifying ``GSuiteUser``
         # as ``GLOBAL`` (because it has no TENANT_ID column either)
         # and exempting it from the tenant guardrail.
-        m = analyze_tenant_scope(_mapping(
-            entities=[
-                {"name": "Tenant", "properties": []},
-                {"name": "Device", "properties": [{"name": "TENANT_ID"}]},
-                {"name": "GSuiteUser", "properties": [{"name": "EMAIL"}]},
-            ],
-            relationships=[
-                {
-                    "type": "TENANTDEVICE",
-                    "fromEntity": "Tenant",
-                    "toEntity": "Device",
-                },
-                {
-                    "type": "DEVICEGSUITEUSER",
-                    "fromEntity": "Device",
-                    "toEntity": "GSuiteUser",
-                },
-            ],
-        ))
+        m = analyze_tenant_scope(
+            _mapping(
+                entities=[
+                    {"name": "Tenant", "properties": []},
+                    {"name": "Device", "properties": [{"name": "TENANT_ID"}]},
+                    {"name": "GSuiteUser", "properties": [{"name": "EMAIL"}]},
+                ],
+                relationships=[
+                    {
+                        "type": "TENANTDEVICE",
+                        "fromEntity": "Tenant",
+                        "toEntity": "Device",
+                    },
+                    {
+                        "type": "DEVICEGSUITEUSER",
+                        "fromEntity": "Device",
+                        "toEntity": "GSuiteUser",
+                    },
+                ],
+            )
+        )
         # Device is reachable AND has denorm → TENANT_SCOPED with field.
         assert m.role_of("Device") is EntityTenantRole.TENANT_SCOPED
         assert m.entities["Device"].reachable_from_tenant is True
@@ -210,28 +243,34 @@ class TestDiscoveryDefaults:
         # Reachability is undirected, so TenantUser --> Tenant should
         # make TenantUser reachable from Tenant too. This mirrors the
         # TENANTUSERTENANT edge we see in the context-model-poc DB.
-        m = analyze_tenant_scope(_mapping(
-            entities=[
-                {"name": "Tenant", "properties": []},
-                {"name": "TenantUser", "properties": []},
-            ],
-            relationships=[
-                {
-                    "type": "TENANTUSERTENANT",
-                    "fromEntity": "TenantUser",
-                    "toEntity": "Tenant",
-                },
-            ],
-        ))
+        m = analyze_tenant_scope(
+            _mapping(
+                entities=[
+                    {"name": "Tenant", "properties": []},
+                    {"name": "TenantUser", "properties": []},
+                ],
+                relationships=[
+                    {
+                        "type": "TENANTUSERTENANT",
+                        "fromEntity": "TenantUser",
+                        "toEntity": "Tenant",
+                    },
+                ],
+            )
+        )
         assert m.role_of("TenantUser") is EntityTenantRole.TENANT_SCOPED
         assert m.entities["TenantUser"].reachable_from_tenant is True
 
     def test_string_property_form_supported(self) -> None:
         # Some schemas emit properties as bare strings, not dicts.
-        m = analyze_tenant_scope(_mapping([
-            {"name": "Tenant", "properties": []},
-            {"name": "Device", "properties": ["TENANT_ID", "MAC"]},
-        ]))
+        m = analyze_tenant_scope(
+            _mapping(
+                [
+                    {"name": "Tenant", "properties": []},
+                    {"name": "Device", "properties": ["TENANT_ID", "MAC"]},
+                ]
+            )
+        )
         assert m.denorm_field_of("Device") == "TENANT_ID"
 
 
@@ -247,34 +286,39 @@ class TestExplicitAnnotationOverride:
         # `tenantScope.role = "global"` annotation must win — used for
         # cases where the column exists but is, say, a vestigial
         # cross-tenant aggregator that intentionally spans tenants.
-        m = analyze_tenant_scope(_mapping(
-            entities=[
-                {"name": "Tenant", "properties": []},
-                {"name": "X", "properties": [{"name": "TENANT_ID"}]},
-            ],
-            physical_overrides={
-                "X": {"tenantScope": {"role": "global"}},
-            },
-        ))
+        m = analyze_tenant_scope(
+            _mapping(
+                entities=[
+                    {"name": "Tenant", "properties": []},
+                    {"name": "X", "properties": [{"name": "TENANT_ID"}]},
+                ],
+                physical_overrides={
+                    "X": {"tenantScope": {"role": "global"}},
+                },
+            )
+        )
         assert m.role_of("X") is EntityTenantRole.GLOBAL
         # Explicit GLOBAL must clear any denorm field — surfacing one
         # would mislead the prompt builder.
         assert m.denorm_field_of("X") is None
 
     def test_explicit_scoped_with_field_overrides_discovery(self) -> None:
-        m = analyze_tenant_scope(_mapping(
-            entities=[
-                {"name": "Tenant", "properties": []},
-                {"name": "Device", "properties": [{"name": "owner_id"}]},
-            ],
-            physical_overrides={
-                "Device": {
-                    "tenantScope": {
-                        "role": "tenant_scoped", "tenantField": "owner_id",
+        m = analyze_tenant_scope(
+            _mapping(
+                entities=[
+                    {"name": "Tenant", "properties": []},
+                    {"name": "Device", "properties": [{"name": "owner_id"}]},
+                ],
+                physical_overrides={
+                    "Device": {
+                        "tenantScope": {
+                            "role": "tenant_scoped",
+                            "tenantField": "owner_id",
+                        },
                     },
                 },
-            },
-        ))
+            )
+        )
         assert m.role_of("Device") is EntityTenantRole.TENANT_SCOPED
         assert m.denorm_field_of("Device") == "owner_id"
 
@@ -282,15 +326,17 @@ class TestExplicitAnnotationOverride:
         # Garbage role string from a misconfigured deployment must not
         # break translation; we ignore the bad annotation and fall
         # back to heuristic discovery.
-        m = analyze_tenant_scope(_mapping(
-            entities=[
-                {"name": "Tenant", "properties": []},
-                {"name": "Cve", "properties": []},
-            ],
-            physical_overrides={
-                "Cve": {"tenantScope": {"role": "totally_made_up"}},
-            },
-        ))
+        m = analyze_tenant_scope(
+            _mapping(
+                entities=[
+                    {"name": "Tenant", "properties": []},
+                    {"name": "Cve", "properties": []},
+                ],
+                physical_overrides={
+                    "Cve": {"tenantScope": {"role": "totally_made_up"}},
+                },
+            )
+        )
         assert m.role_of("Cve") is EntityTenantRole.GLOBAL
 
 
@@ -331,21 +377,26 @@ class TestUpstreamAnalyzerFullyAnnotated:
             "physical_mapping": {
                 "entities": {
                     "Tenant": {
-                        "style": "COLLECTION", "collectionName": "Tenant",
+                        "style": "COLLECTION",
+                        "collectionName": "Tenant",
                         "tenantScope": {"role": "tenant_root"},
                     },
                     "Device": {
-                        "style": "COLLECTION", "collectionName": "Device",
+                        "style": "COLLECTION",
+                        "collectionName": "Device",
                         "tenantScope": {"role": "global"},
                     },
                     "Library": {
-                        "style": "COLLECTION", "collectionName": "Library",
+                        "style": "COLLECTION",
+                        "collectionName": "Library",
                         "tenantScope": {
-                            "role": "tenant_scoped", "tenantEntity": "Tenant",
+                            "role": "tenant_scoped",
+                            "tenantEntity": "Tenant",
                         },
                     },
                     "Cve": {
-                        "style": "COLLECTION", "collectionName": "Cve",
+                        "style": "COLLECTION",
+                        "collectionName": "Cve",
                         "tenantScope": {"role": "global"},
                     },
                 },
@@ -372,13 +423,15 @@ class TestUpstreamAnalyzerFullyAnnotated:
         assert m.role_of("Cve") is EntityTenantRole.GLOBAL
 
     def test_fully_annotated_mapping_logs_upstream_short_circuit(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Observability: a fully-annotated mapping should emit the
         DEBUG line confirming the local heuristic was bypassed. This
         is what we'll grep for in production logs to track migration
         completeness across deployments."""
         import logging
+
         caplog.set_level(logging.DEBUG, logger="arango_cypher.nl2cypher.tenant_scope")
 
         analyze_tenant_scope(self._fully_annotated_mapping())
@@ -401,10 +454,14 @@ class TestRegexConfig:
             os.environ,
             {"NL2CYPHER_TENANT_FIELD_REGEX": r"^customer[_-]?id$"},
         ):
-            m = analyze_tenant_scope(_mapping([
-                {"name": "Tenant", "properties": []},
-                {"name": "Device", "properties": [{"name": "customer_id"}]},
-            ]))
+            m = analyze_tenant_scope(
+                _mapping(
+                    [
+                        {"name": "Tenant", "properties": []},
+                        {"name": "Device", "properties": [{"name": "customer_id"}]},
+                    ]
+                )
+            )
             assert m.role_of("Device") is EntityTenantRole.TENANT_SCOPED
             assert m.denorm_field_of("Device") == "customer_id"
 
@@ -412,12 +469,17 @@ class TestRegexConfig:
         # Bad pattern in env must not crash translation. We drop back
         # to the default regex and continue.
         with patch.dict(
-            os.environ, {"NL2CYPHER_TENANT_FIELD_REGEX": r"["},  # invalid
+            os.environ,
+            {"NL2CYPHER_TENANT_FIELD_REGEX": r"["},  # invalid
         ):
-            m = analyze_tenant_scope(_mapping([
-                {"name": "Tenant", "properties": []},
-                {"name": "Device", "properties": [{"name": "TENANT_ID"}]},
-            ]))
+            m = analyze_tenant_scope(
+                _mapping(
+                    [
+                        {"name": "Tenant", "properties": []},
+                        {"name": "Device", "properties": [{"name": "TENANT_ID"}]},
+                    ]
+                )
+            )
             assert m.denorm_field_of("Device") == "TENANT_ID"
 
     def test_explicit_regex_argument_overrides_env(self) -> None:
@@ -426,10 +488,12 @@ class TestRegexConfig:
             {"NL2CYPHER_TENANT_FIELD_REGEX": r"^never_matches$"},
         ):
             m = analyze_tenant_scope(
-                _mapping([
-                    {"name": "Tenant", "properties": []},
-                    {"name": "Device", "properties": [{"name": "TENANT_ID"}]},
-                ]),
+                _mapping(
+                    [
+                        {"name": "Tenant", "properties": []},
+                        {"name": "Device", "properties": [{"name": "TENANT_ID"}]},
+                    ]
+                ),
                 tenant_field_regex=re.compile(r"^TENANT_ID$"),
             )
             assert m.denorm_field_of("Device") == "TENANT_ID"
@@ -442,16 +506,18 @@ class TestRegexConfig:
 
 class TestMappingShapeCompat:
     def test_camelcase_keys_supported(self) -> None:
-        m = analyze_tenant_scope({
-            "conceptualSchema": {
-                "entities": [
-                    {"name": "Tenant", "properties": []},
-                    {"name": "Device", "properties": [{"name": "TENANT_ID"}]},
-                ],
-                "relationships": [],
-            },
-            "physicalMapping": {"entities": {}, "relationships": {}},
-        })
+        m = analyze_tenant_scope(
+            {
+                "conceptualSchema": {
+                    "entities": [
+                        {"name": "Tenant", "properties": []},
+                        {"name": "Device", "properties": [{"name": "TENANT_ID"}]},
+                    ],
+                    "relationships": [],
+                },
+                "physicalMapping": {"entities": {}, "relationships": {}},
+            }
+        )
         assert m.tenant_entity == "Tenant"
         assert m.denorm_field_of("Device") == "TENANT_ID"
 
@@ -478,9 +544,13 @@ class TestMappingShapeCompat:
         assert m.entities == {}
 
     def test_default_role_for_unknown_entity_is_global(self) -> None:
-        m = analyze_tenant_scope(_mapping([
-            {"name": "Tenant", "properties": []},
-        ]))
+        m = analyze_tenant_scope(
+            _mapping(
+                [
+                    {"name": "Tenant", "properties": []},
+                ]
+            )
+        )
         # Asking about an entity not in the manifest must return
         # GLOBAL, not raise — the guardrail relies on this so a typo
         # in a Cypher label doesn't crash the translator.

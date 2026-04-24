@@ -30,6 +30,7 @@ def _connect_db(db_name: str):
         sys_db.create_database(db_name)
     return client.db(db_name, username=user, password=pw)
 
+
 MODES: list[tuple[str, str, str]] = [
     ("pg", "cypher_pg_fixture", "pg"),
     ("lpg", "cypher_lpg_fixture", "lpg"),
@@ -144,12 +145,20 @@ QUERY_CASES: list[tuple[str, dict[str, Any] | None, ScenarioCheck]] = [
         check_exact_rows(["u1", "u2"]),
     ),
     (
-        "MATCH (u:User) RETURN DISTINCT coalesce(u.city, \"X\") AS c ORDER BY c",
+        'MATCH (u:User) RETURN DISTINCT coalesce(u.city, "X") AS c ORDER BY c',
         None,
         check_exact_rows(["Boston", "NYC", "SF"]),
     ),
-    ("MATCH (u:User)-[:FOLLOWS]->(v:User) WHERE u.id = $id RETURN v.id", {"id": "u1"}, check_scalar_set({"u2", "u3"})),
-    ("MATCH (u:User)-[:FOLLOWS]->(v:User) WHERE v.city = \"SF\" RETURN u.id, v.id", None, check_pairs([("u1", "u2")])),
+    (
+        "MATCH (u:User)-[:FOLLOWS]->(v:User) WHERE u.id = $id RETURN v.id",
+        {"id": "u1"},
+        check_scalar_set({"u2", "u3"}),
+    ),
+    (
+        'MATCH (u:User)-[:FOLLOWS]->(v:User) WHERE v.city = "SF" RETURN u.id, v.id',
+        None,
+        check_pairs([("u1", "u2")]),
+    ),
     ("MATCH (u:User)-[:FOLLOWS]->(v:User) RETURN DISTINCT v.city", None, check_scalar_set({"SF", "Boston"})),
     (
         "MATCH (u:User)-[:FOLLOWS]->(v:User) WHERE u.active = true AND v.active = true RETURN u.id, v.id",
@@ -157,16 +166,15 @@ QUERY_CASES: list[tuple[str, dict[str, Any] | None, ScenarioCheck]] = [
         check_pairs([("u1", "u2")]),
     ),
     ("MATCH (u:User)-[r:FOLLOWS]->(v:User) RETURN type(r), u.id, v.id", None, check_type_and_pairs(OUTBOUND)),
-
     # WITH + aggregation coverage (C019-C026 equivalents)
     (
         "MATCH (u:User)\nWITH u.city AS city, count(*) AS c\nRETURN city, c\nORDER BY c DESC\nLIMIT 10",
         None,
         check_exact_rows(
             [
-            {"city": "Boston", "c": 3},
-            {"city": "NYC", "c": 2},
-            {"city": "SF", "c": 1},
+                {"city": "Boston", "c": 3},
+                {"city": "NYC", "c": 2},
+                {"city": "SF", "c": 1},
             ]
         ),
     ),
@@ -205,7 +213,6 @@ QUERY_CASES: list[tuple[str, dict[str, Any] | None, ScenarioCheck]] = [
         None,
         check_set_of_tuples("city", "c", {("Boston", 2), ("SF", 1)}),
     ),
-
     # Multi-stage WITH + SKIP + broader aggregates (C033-C036 equivalents)
     (
         "MATCH (u:User)\nWITH u.city AS city, count(*) AS c\nWITH city, c WHERE c > 1\nRETURN city, c\nORDER BY c DESC\nSKIP 1\nLIMIT 1",
@@ -227,12 +234,13 @@ QUERY_CASES: list[tuple[str, dict[str, Any] | None, ScenarioCheck]] = [
         None,
         check_exact_rows([{"mn": 20, "mx": 40}]),
     ),
-
     # WITH then MATCH tail (C037-C039 equivalents)
     (
         "MATCH (u:User)\nWITH u\nMATCH (u)-[:FOLLOWS]->(v:User)\nRETURN u.id, v.id\nORDER BY u.id, v.id",
         None,
-        check_exact_rows([{"id": "u1", "v_id": "u2"}, {"id": "u1", "v_id": "u3"}, {"id": "u2", "v_id": "u3"}]),
+        check_exact_rows(
+            [{"id": "u1", "v_id": "u2"}, {"id": "u1", "v_id": "u3"}, {"id": "u2", "v_id": "u3"}]
+        ),
     ),
     (
         "MATCH (u:User)\nWITH u WHERE u.active = true\nMATCH (u)-[:FOLLOWS]->(v:User)\nRETURN DISTINCT v.city\nORDER BY v.city\nSKIP 1\nLIMIT 1",
@@ -242,7 +250,13 @@ QUERY_CASES: list[tuple[str, dict[str, Any] | None, ScenarioCheck]] = [
     (
         "MATCH (u:User)\nWITH u.name AS name, u\nMATCH (u)-[:FOLLOWS]->(v:User)\nRETURN name, v.name\nORDER BY name, v.name\nLIMIT 5",
         None,
-        check_exact_rows([{"name": "Alice", "v_name": "Bob"}, {"name": "Alice", "v_name": "Cara"}, {"name": "Bob", "v_name": "Cara"}]),
+        check_exact_rows(
+            [
+                {"name": "Alice", "v_name": "Bob"},
+                {"name": "Alice", "v_name": "Cara"},
+                {"name": "Bob", "v_name": "Cara"},
+            ]
+        ),
     ),
     (
         "MATCH (u:User)-[:FOLLOWS]->(v:User)\nWITH u, count(v) AS degree\nMATCH (u)-[:FOLLOWS]->(w:User)\nRETURN u.id, degree, w.id\nORDER BY u.id, w.id",
@@ -310,7 +324,9 @@ QUERY_CASES: list[tuple[str, dict[str, Any] | None, ScenarioCheck]] = [
     (
         "MATCH (u:User), (u)-[:FOLLOWS]->(v:User)\nRETURN u.id, v.id\nORDER BY u.id, v.id\nLIMIT 5",
         None,
-        check_exact_rows([{"id": "u1", "v_id": "u2"}, {"id": "u1", "v_id": "u3"}, {"id": "u2", "v_id": "u3"}]),
+        check_exact_rows(
+            [{"id": "u1", "v_id": "u2"}, {"id": "u1", "v_id": "u3"}, {"id": "u2", "v_id": "u3"}]
+        ),
     ),
     (
         "MATCH (u:User)-[:FOLLOWS]->(v:User), (v)-[:FOLLOWS]->(w:User)\nRETURN u.id, w.id\nORDER BY u.id, w.id",

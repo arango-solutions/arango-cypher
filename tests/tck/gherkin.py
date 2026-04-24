@@ -30,9 +30,11 @@ _PLACEHOLDER_RE = re.compile(r"<([^>]+)>")
 
 def _substitute(template: str, row: dict[str, str]) -> str:
     """Replace <placeholder> tokens with values from a row dict."""
+
     def _repl(m: re.Match[str]) -> str:
         key = m.group(1)
         return row.get(key, m.group(0))
+
     return _PLACEHOLDER_RE.sub(_repl, template)
 
 
@@ -57,16 +59,15 @@ def _expand_outline(
                 new_doc = _substitute(step.doc_string, row_dict) if step.doc_string is not None else None
                 new_table: list[list[str]] | None = None
                 if step.data_table is not None:
-                    new_table = [
-                        [_substitute(cell, row_dict) for cell in row]
-                        for row in step.data_table
-                    ]
-                concrete_steps.append(Step(
-                    keyword=step.keyword,
-                    text=new_text,
-                    doc_string=new_doc,
-                    data_table=new_table,
-                ))
+                    new_table = [[_substitute(cell, row_dict) for cell in row] for row in step.data_table]
+                concrete_steps.append(
+                    Step(
+                        keyword=step.keyword,
+                        text=new_text,
+                        doc_string=new_doc,
+                        data_table=new_table,
+                    )
+                )
             scenarios.append(Scenario(name=concrete_name, steps=concrete_steps))
     return scenarios
 
@@ -111,14 +112,14 @@ def parse_feature(path: Path) -> Feature:
             continue
 
         if line.startswith("Feature:"):
-            feature_name = line[len("Feature:"):].strip() or "Unnamed Feature"
+            feature_name = line[len("Feature:") :].strip() or "Unnamed Feature"
             i += 1
             continue
 
         if line.startswith("Scenario Outline:") or line.startswith("Scenario Template:"):
             _flush_scenario()
             prefix = "Scenario Outline:" if line.startswith("Scenario Outline:") else "Scenario Template:"
-            cur_scenario_name = line[len(prefix):].strip() or "Unnamed Outline"
+            cur_scenario_name = line[len(prefix) :].strip() or "Unnamed Outline"
             cur_steps = []
             cur_is_outline = True
             cur_examples = []
@@ -127,7 +128,7 @@ def parse_feature(path: Path) -> Feature:
 
         if line.startswith("Scenario:"):
             _flush_scenario()
-            cur_scenario_name = line[len("Scenario:"):].strip() or "Unnamed Scenario"
+            cur_scenario_name = line[len("Scenario:") :].strip() or "Unnamed Scenario"
             cur_steps = []
             cur_is_outline = False
             cur_examples = []
@@ -150,7 +151,7 @@ def parse_feature(path: Path) -> Feature:
         for kw in ("Given", "When", "Then", "And", "But"):
             if line.startswith(kw + " ") or line == kw:
                 step_kw = kw
-                step_txt = line[len(kw):].strip()
+                step_txt = line[len(kw) :].strip()
                 break
         if step_kw is None:
             i += 1

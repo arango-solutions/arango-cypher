@@ -127,17 +127,13 @@ class TestDescribeConnectError:
         ):
             monkeypatch.delenv(var, raising=False)
 
-        exc = RuntimeError(
-            "Can't connect to host(s): OSError('Tunnel connection failed: 403')"
-        )
+        exc = RuntimeError("Can't connect to host(s): OSError('Tunnel connection failed: 403')")
         msg = _describe_connect_error(exc)
         assert "hint:" in msg
         assert "no proxy env vars are set" in msg
 
     def test_credentials_never_leak_through_diagnostic(self):
-        exc = RuntimeError(
-            "auth failed (password=hunter2; token=abcdef12345)"
-        )
+        exc = RuntimeError("auth failed (password=hunter2; token=abcdef12345)")
         msg = _describe_connect_error(exc)
         assert "hunter2" not in msg
         assert "abcdef12345" not in msg
@@ -147,9 +143,7 @@ class TestDescribeConnectError:
 class TestConnectEndpointSurfaces:
     """End-to-end: POST /connect must include the root cause + proxy hint."""
 
-    def test_proxy_failure_returns_actionable_detail(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_proxy_failure_returns_actionable_detail(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("HTTPS_PROXY", "http://corp-proxy.example.invalid:3128")
 
         class _FakeDb:

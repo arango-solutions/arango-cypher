@@ -114,11 +114,24 @@ half a day for the bind-var form with goldens.
 
 ## 2. Rate limiter covers only 2 of ~35 endpoints — **M**
 
-> **Status: PARTIAL — 2026-04-29 (audit-v2 batch 1).** Quick-fix half done:
-> `_check_nl_rate_limit` `Depends(...)` added to `/nl-samples` (the most
-> concerning gap per the audit, since it's LLM-gated). The broader
-> half-day expansion to the rest of the LLM-/CPU-heavy endpoints
-> (~6 more sites) stays open as a separate item.
+> **Status: CLOSED — 2026-04-30 (audit-v2 batch 2).** Second-bucket
+> half done. Added `_check_compute_rate_limit` (a separate
+> `_TokenBucket` keyed off the new `COMPUTE_RATE_LIMIT_PER_MINUTE`
+> env, default 100/min — an order of magnitude above the LLM bucket per
+> the recommendation below) and wired it onto 14 endpoints:
+> `/translate`, `/validate`, `/execute`, `/execute-aql`, `/explain`,
+> `/aql-profile`, `/schema/introspect`, `/schema/summary`,
+> `/schema/statistics`, `/schema/force-reacquire`, `/suggest-indexes`,
+> `/mapping/export-owl`, `/mapping/import-owl`, `/tools/call`. Both
+> buckets now share a `_client_key()` helper so the same client is
+> tracked under the same identity in either bucket. Three new tests in
+> `tests/test_service_middleware.py::TestComputeRateLimit` pin
+> bucket-isolation, the auth/IP/anon key fallback, and the dep-wired
+> 429 round-trip on `/validate`. Multi-worker shared-bucket redesign
+> stays a separate Wave-6b WP per the audit text below.
+>
+> **Quick-fix half** (`/nl-samples` covered by `_check_nl_rate_limit`)
+> shipped in audit-v2 batch 1, see PR #15 / commit `82d8d6a`.
 
 **Where:** `arango_cypher/service.py` line 314 (`_check_nl_rate_limit`
 definition), applied at lines 1458 and 1561 only.
@@ -331,6 +344,15 @@ second so review is mechanical.
 ---
 
 ## 9. `ruff format --check` intentionally skipped in CI — **L**
+
+> **Status: CLOSED — 2026-04-30 (audit-v2 batch 2).** Format pass
+> shipped as the first commit of this batch (`b0a3241`, 102 files
+> reformatted, isolated from the substantive changes for clean
+> diff-by-commit review). CI gate flipped on in
+> `.github/workflows/ci.yml`: `ruff format --check .` now runs
+> alongside `ruff check .` in the `lint` job. The deferred follow-up
+> in the file's own comment is gone; the new comment cross-references
+> the audit close-out and the format-pass commit.
 
 **Where:** `.github/workflows/ci.yml:19-21`.
 

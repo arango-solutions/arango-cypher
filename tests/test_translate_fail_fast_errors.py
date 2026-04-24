@@ -26,7 +26,6 @@ from tests.helpers.mapping_fixtures import mapping_bundle_for
             "NOT_IMPLEMENTED",
             "Only MATCH is supported after WITH",
         ),
-
         # Relationship detail/type guardrails
         (
             "MATCH (u:User)-->(v:User) RETURN u",
@@ -43,7 +42,6 @@ from tests.helpers.mapping_fixtures import mapping_bundle_for
             "UNSUPPORTED",
             "Exactly one relationship type",
         ),
-
         # Expression compiler unsupported shapes
         (
             "MATCH (n:User) WHERE n.id = $1 RETURN n",
@@ -71,18 +69,16 @@ from tests.helpers.mapping_fixtures import mapping_bundle_for
             "toLower expects 1 arg",
         ),
         (
-            "MATCH (n:User) WHERE arango.foo(n.city) = \"x\" RETURN n",
+            'MATCH (n:User) WHERE arango.foo(n.city) = "x" RETURN n',
             "EXTENSIONS_DISABLED",
             "arango.* extension",
         ),
-
         # Inline node properties guardrails
         (
             "MATCH (n:User $props) RETURN n",
             "NOT_IMPLEMENTED",
             "Parameterized node properties are not supported",
         ),
-
         # Multi-pattern MATCH fail-fast branches
         (
             "MATCH (u:User)-[r:FOLLOWS]->(v:User), (x:User)-[r:FOLLOWS]->(y:User) RETURN u",
@@ -92,9 +88,8 @@ from tests.helpers.mapping_fixtures import mapping_bundle_for
         (
             "MATCH (u:User), (u)-[:FOLLOWS]->(v) RETURN u",
             "UNSUPPORTED",
-                "single label is required",
+            "single label is required",
         ),
-
     ],
 )
 def test_translate_fail_fast_errors_extra(cypher: str, code: str, msg_sub: str):
@@ -103,4 +98,3 @@ def test_translate_fail_fast_errors_extra(cypher: str, code: str, msg_sub: str):
         translate(cypher, mapping=mapping)
     assert e.value.code == code
     assert msg_sub.lower() in str(e.value).lower()
-

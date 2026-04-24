@@ -33,7 +33,8 @@ class TestStandaloneCall:
     def test_call_fulltext_yield(self, all_registry, pg_mapping):
         out = translate(
             "CALL arango.fulltext('users', 'name', 'test') YIELD doc",
-            mapping=pg_mapping, registry=all_registry,
+            mapping=pg_mapping,
+            registry=all_registry,
         )
         assert "FULLTEXT('users', 'name', 'test')" in out.aql
         assert "FOR doc IN" in out.aql
@@ -42,7 +43,8 @@ class TestStandaloneCall:
     def test_call_without_yield(self, all_registry, pg_mapping):
         out = translate(
             "CALL arango.fulltext('users', 'name', 'test')",
-            mapping=pg_mapping, registry=all_registry,
+            mapping=pg_mapping,
+            registry=all_registry,
         )
         assert "FULLTEXT(" in out.aql
         assert "RETURN _call_row" in out.aql
@@ -50,7 +52,8 @@ class TestStandaloneCall:
     def test_call_near(self, all_registry, pg_mapping):
         out = translate(
             "CALL arango.near('places', 40.7, -74.0) YIELD loc",
-            mapping=pg_mapping, registry=all_registry,
+            mapping=pg_mapping,
+            registry=all_registry,
         )
         assert "NEAR('places', 40.7, (-74.0))" in out.aql
         assert "FOR loc IN" in out.aql
@@ -58,7 +61,8 @@ class TestStandaloneCall:
     def test_call_within(self, all_registry, pg_mapping):
         out = translate(
             "CALL arango.within('places', 40.7, -74.0, 1000) YIELD loc",
-            mapping=pg_mapping, registry=all_registry,
+            mapping=pg_mapping,
+            registry=all_registry,
         )
         assert "WITHIN('places', 40.7, (-74.0), 1000)" in out.aql
 
@@ -83,7 +87,8 @@ class TestInQueryCall:
     def test_call_with_return(self, all_registry, pg_mapping):
         out = translate(
             "CALL arango.fulltext('posts', 'body', 'graph') YIELD doc RETURN doc.title AS title",
-            mapping=pg_mapping, registry=all_registry,
+            mapping=pg_mapping,
+            registry=all_registry,
         )
         assert "FULLTEXT('posts', 'body', 'graph')" in out.aql
         assert "RETURN {title: doc.title}" in out.aql
@@ -91,7 +96,8 @@ class TestInQueryCall:
     def test_match_then_call(self, all_registry, pg_mapping):
         out = translate(
             "MATCH (n:User) CALL arango.near('locations', 40.7, -74.0, 10) YIELD loc RETURN n.name AS name, loc",
-            mapping=pg_mapping, registry=all_registry,
+            mapping=pg_mapping,
+            registry=all_registry,
         )
         assert "FOR n IN @@collection" in out.aql
         assert "FOR loc IN NEAR(" in out.aql
@@ -104,7 +110,8 @@ class TestProcedureCompilers:
         with pytest.raises(CoreError) as exc_info:
             translate(
                 "CALL arango.fulltext('users', 'name') YIELD doc",
-                mapping=pg_mapping, registry=all_registry,
+                mapping=pg_mapping,
+                registry=all_registry,
             )
         assert exc_info.value.code == "UNSUPPORTED"
 
@@ -112,7 +119,8 @@ class TestProcedureCompilers:
         with pytest.raises(CoreError) as exc_info:
             translate(
                 "CALL arango.near('places') YIELD loc",
-                mapping=pg_mapping, registry=all_registry,
+                mapping=pg_mapping,
+                registry=all_registry,
             )
         assert exc_info.value.code == "UNSUPPORTED"
 
@@ -120,7 +128,8 @@ class TestProcedureCompilers:
         with pytest.raises(CoreError) as exc_info:
             translate(
                 "CALL arango.within('places', 40.7) YIELD loc",
-                mapping=pg_mapping, registry=all_registry,
+                mapping=pg_mapping,
+                registry=all_registry,
             )
         assert exc_info.value.code == "UNSUPPORTED"
 
@@ -128,6 +137,7 @@ class TestProcedureCompilers:
         with pytest.raises(CoreError) as exc_info:
             translate(
                 "CALL arango.nonexistent() YIELD x",
-                mapping=pg_mapping, registry=all_registry,
+                mapping=pg_mapping,
+                registry=all_registry,
             )
         assert exc_info.value.code == "UNKNOWN_EXTENSION"

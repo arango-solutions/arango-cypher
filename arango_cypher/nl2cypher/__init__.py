@@ -34,6 +34,7 @@ Usage::
     provider = OpenAIProvider(model="gpt-4o", api_key="sk-...")
     result = nl_to_cypher("...", mapping=bundle, llm_provider=provider)
 """
+
 from __future__ import annotations
 
 from ._aql import NL2AqlResult, nl_to_aql

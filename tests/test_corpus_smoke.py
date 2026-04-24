@@ -26,4 +26,3 @@ def test_translate_smoke_first_30_cases(corpus_cases, idx: int):
         assert isinstance(out.bind_vars, dict)
     except CoreError:
         pass
-

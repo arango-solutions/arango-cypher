@@ -70,9 +70,7 @@ TENANT_CTX_KEY = TenantContext(
 
 class TestCheckTenantScope:
     def test_fires_when_cypher_drops_tenant(self) -> None:
-        cypher = (
-            "MATCH (u:GSuiteUser) WHERE u.DEPARTMENT='Marketing' RETURN u.NAME"
-        )
+        cypher = "MATCH (u:GSuiteUser) WHERE u.DEPARTMENT='Marketing' RETURN u.NAME"
         v = check_tenant_scope(cypher, tenant_context=TENANT_CTX)
         assert isinstance(v, TenantScopeViolation)
         assert v.tenant_property == "TENANT_HEX_ID"
@@ -97,10 +95,7 @@ class TestCheckTenantScope:
         # `:TenantUser` must not satisfy the `:Tenant` constraint — the
         # whole point of the guardrail is that prefix-collision labels
         # are the common failure mode.
-        cypher = (
-            "MATCH (u:GSuiteUser)-[:GSUITEUSERTENANTUSER]->(:TenantUser) "
-            "RETURN u.NAME"
-        )
+        cypher = "MATCH (u:GSuiteUser)-[:GSUITEUSERTENANTUSER]->(:TenantUser) RETURN u.NAME"
         v = check_tenant_scope(cypher, tenant_context=TENANT_CTX)
         assert v is not None
 
@@ -214,11 +209,7 @@ class TestCheckTenantScope:
         # Device.TENANT_ID = '<key>' satisfies the scope because the
         # planner can hit the indexed equality. This is the cheaper
         # form the new prompt teaches the LLM to prefer.
-        cypher = (
-            "MATCH (d:Device) WHERE d.TENANT_ID = "
-            "'001c463d-500d-47c7-bc32-c824eb42f064' "
-            "RETURN d"
-        )
+        cypher = "MATCH (d:Device) WHERE d.TENANT_ID = '001c463d-500d-47c7-bc32-c824eb42f064' RETURN d"
         v = check_tenant_scope(
             cypher,
             tenant_context=TENANT_CTX_KEY,
@@ -233,11 +224,7 @@ class TestCheckTenantScope:
         # `MATCH (d:Device {TENANT_ID: '<key>'})` is semantically
         # identical to the WHERE form and must also satisfy the
         # guardrail.
-        cypher = (
-            "MATCH (d:Device {TENANT_ID: "
-            "'001c463d-500d-47c7-bc32-c824eb42f064'}) "
-            "RETURN d"
-        )
+        cypher = "MATCH (d:Device {TENANT_ID: '001c463d-500d-47c7-bc32-c824eb42f064'}) RETURN d"
         v = check_tenant_scope(
             cypher,
             tenant_context=TENANT_CTX_KEY,
@@ -251,10 +238,7 @@ class TestCheckTenantScope:
         # Filtering by the wrong tenant value must NOT satisfy the
         # scope — a hostile or buggy LLM that hardcodes another
         # tenant's _key would otherwise sneak through.
-        cypher = (
-            "MATCH (d:Device) WHERE d.TENANT_ID = 'some-other-tenant-key' "
-            "RETURN d"
-        )
+        cypher = "MATCH (d:Device) WHERE d.TENANT_ID = 'some-other-tenant-key' RETURN d"
         v = check_tenant_scope(
             cypher,
             tenant_context=TENANT_CTX_KEY,
@@ -349,13 +333,15 @@ class TestPromptBuilderTenantBlock:
         # tokens for this feature.
         baseline = PromptBuilder(schema_summary="S").render_system()
         with_none = PromptBuilder(
-            schema_summary="S", tenant_context=None,
+            schema_summary="S",
+            tenant_context=None,
         ).render_system()
         assert baseline == with_none
 
     def test_tenant_context_adds_scope_block(self) -> None:
         system = PromptBuilder(
-            schema_summary="S", tenant_context=TENANT_CTX,
+            schema_summary="S",
+            tenant_context=TENANT_CTX,
         ).render_system()
         assert "Current tenant scope" in system
         assert "Dagster Labs" in system
@@ -381,18 +367,24 @@ class TestPromptBuilderTenantBlock:
         #   * emit the per-entity denorm-filter example with the
         #     active _key as the literal (since Device.TENANT_ID
         #     stores Tenant._key in this schema family).
-        manifest = analyze_tenant_scope({
-            "conceptual_schema": {
-                "entities": [
-                    {"name": "Tenant", "properties": []},
-                    {"name": "GSuiteUser", "properties": [
-                        {"name": "TENANT_ID"}, {"name": "NAME"},
-                    ]},
-                ],
-                "relationships": [],
-            },
-            "physical_mapping": {"entities": {}, "relationships": {}},
-        })
+        manifest = analyze_tenant_scope(
+            {
+                "conceptual_schema": {
+                    "entities": [
+                        {"name": "Tenant", "properties": []},
+                        {
+                            "name": "GSuiteUser",
+                            "properties": [
+                                {"name": "TENANT_ID"},
+                                {"name": "NAME"},
+                            ],
+                        },
+                    ],
+                    "relationships": [],
+                },
+                "physical_mapping": {"entities": {}, "relationships": {}},
+            }
+        )
         system = PromptBuilder(
             schema_summary="S",
             tenant_context=TENANT_CTX_KEY,
@@ -414,18 +406,24 @@ class TestPromptBuilderTenantBlock:
         # column stores the _key, not the hex_id. The block falls
         # back to the `<Tenant._key>` placeholder so the LLM is told
         # to resolve the key first (typically by also binding :Tenant).
-        manifest = analyze_tenant_scope({
-            "conceptual_schema": {
-                "entities": [
-                    {"name": "Tenant", "properties": []},
-                    {"name": "GSuiteUser", "properties": [
-                        {"name": "TENANT_ID"}, {"name": "NAME"},
-                    ]},
-                ],
-                "relationships": [],
-            },
-            "physical_mapping": {"entities": {}, "relationships": {}},
-        })
+        manifest = analyze_tenant_scope(
+            {
+                "conceptual_schema": {
+                    "entities": [
+                        {"name": "Tenant", "properties": []},
+                        {
+                            "name": "GSuiteUser",
+                            "properties": [
+                                {"name": "TENANT_ID"},
+                                {"name": "NAME"},
+                            ],
+                        },
+                    ],
+                    "relationships": [],
+                },
+                "physical_mapping": {"entities": {}, "relationships": {}},
+            }
+        )
         system = PromptBuilder(
             schema_summary="S",
             tenant_context=TENANT_CTX,
@@ -439,17 +437,19 @@ class TestPromptBuilderTenantBlock:
         # must surface them in a "do NOT scope" list so the LLM
         # doesn't invent a tenant filter for them — that was the bug
         # reported on the demo schema.
-        manifest = analyze_tenant_scope({
-            "conceptual_schema": {
-                "entities": [
-                    {"name": "Tenant", "properties": []},
-                    {"name": "Cve", "properties": [{"name": "ID"}]},
-                    {"name": "AppVersion", "properties": [{"name": "VERSION"}]},
-                ],
-                "relationships": [],
-            },
-            "physical_mapping": {"entities": {}, "relationships": {}},
-        })
+        manifest = analyze_tenant_scope(
+            {
+                "conceptual_schema": {
+                    "entities": [
+                        {"name": "Tenant", "properties": []},
+                        {"name": "Cve", "properties": [{"name": "ID"}]},
+                        {"name": "AppVersion", "properties": [{"name": "VERSION"}]},
+                    ],
+                    "relationships": [],
+                },
+                "physical_mapping": {"entities": {}, "relationships": {}},
+            }
+        )
         system = PromptBuilder(
             schema_summary="S",
             tenant_context=TENANT_CTX_KEY,
@@ -464,18 +464,20 @@ class TestPromptBuilderTenantBlock:
         # Tenant via an edge — the prompt must put it in the
         # traversal-only group so the LLM doesn't try to filter on a
         # nonexistent denorm field.
-        manifest = analyze_tenant_scope({
-            "conceptual_schema": {
-                "entities": [
-                    {"name": "Tenant", "properties": []},
-                    {"name": "Library", "properties": [{"name": "NAME"}]},
-                ],
-                "relationships": [
-                    {"type": "TENANTLIBRARY", "from": "Tenant", "to": "Library"},
-                ],
-            },
-            "physical_mapping": {"entities": {}, "relationships": {}},
-        })
+        manifest = analyze_tenant_scope(
+            {
+                "conceptual_schema": {
+                    "entities": [
+                        {"name": "Tenant", "properties": []},
+                        {"name": "Library", "properties": [{"name": "NAME"}]},
+                    ],
+                    "relationships": [
+                        {"type": "TENANTLIBRARY", "from": "Tenant", "to": "Library"},
+                    ],
+                },
+                "physical_mapping": {"entities": {}, "relationships": {}},
+            }
+        )
         system = PromptBuilder(
             schema_summary="S",
             tenant_context=TENANT_CTX_KEY,
@@ -522,18 +524,24 @@ def multi_tenant_mapping() -> dict:
             "entities": [
                 {"name": "Tenant", "properties": [{"name": "TENANT_HEX_ID"}]},
                 {"name": "TenantUser", "properties": [{"name": "TENANT_ID"}]},
-                {"name": "GSuiteUser", "properties": [
-                    {"name": "TENANT_ID"}, {"name": "NAME"},
-                ]},
+                {
+                    "name": "GSuiteUser",
+                    "properties": [
+                        {"name": "TENANT_ID"},
+                        {"name": "NAME"},
+                    ],
+                },
             ],
             "relationships": [
                 {
                     "type": "TENANTUSERTENANT",
-                    "from": "TenantUser", "to": "Tenant",
+                    "from": "TenantUser",
+                    "to": "Tenant",
                 },
                 {
                     "type": "GSUITEUSERTENANTUSER",
-                    "from": "GSuiteUser", "to": "TenantUser",
+                    "from": "GSuiteUser",
+                    "to": "TenantUser",
                 },
             ],
         },
@@ -587,11 +595,17 @@ class TestNlToCypherFailClosed:
             max_retries=1,
         )
         assert result.method == "llm"
-        assert ":Tenant " in result.cypher or ":Tenant{" in result.cypher or "(:Tenant" in result.cypher or "(t:Tenant" in result.cypher
+        assert (
+            ":Tenant " in result.cypher
+            or ":Tenant{" in result.cypher
+            or "(:Tenant" in result.cypher
+            or "(t:Tenant" in result.cypher
+        )
         assert provider.calls == 1
 
     def test_passes_key_scoped_cypher_with_denorm_filter(
-        self, multi_tenant_mapping,
+        self,
+        multi_tenant_mapping,
     ) -> None:
         # End-to-end: when the LLM emits the canonical _key form with
         # the denormalised TENANT_ID filter on the target collection,
@@ -635,7 +649,8 @@ class TestNlToCypherFailClosed:
         assert provider.calls == 1
 
     def test_blocks_rule_based_fallback_in_multitenant(
-        self, multi_tenant_mapping,
+        self,
+        multi_tenant_mapping,
     ) -> None:
         # With no LLM provider, the rule-based fallback would normally
         # run — but it cannot enforce tenant scoping, so we must fail

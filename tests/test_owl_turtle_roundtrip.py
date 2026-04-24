@@ -1,4 +1,5 @@
 """Tests for OWL Turtle serialization/deserialization round-trip."""
+
 from __future__ import annotations
 
 from pathlib import Path

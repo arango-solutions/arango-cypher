@@ -62,4 +62,3 @@ def _summarize_explain_error(exc: BaseException) -> str:
     if len(msg) > 500:
         msg = msg[:497] + "..."
     return msg
-

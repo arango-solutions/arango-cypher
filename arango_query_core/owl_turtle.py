@@ -4,6 +4,7 @@ Supports round-tripping between the internal MappingBundle format and
 an OWL/Turtle ontology representation, following the ArangoDB annotation
 convention using ``phys:`` annotations for physical mapping info.
 """
+
 from __future__ import annotations
 
 import re
@@ -25,7 +26,7 @@ def mapping_to_turtle(bundle: MappingBundle) -> str:
     """Serialize a MappingBundle to OWL/Turtle format."""
     lines = [_PREFIXES.strip(), ""]
 
-    lines.append(': a owl:Ontology ;')
+    lines.append(": a owl:Ontology ;")
     lines.append('  rdfs:label "Conceptual Schema" ;')
     lines.append('  rdfs:comment "Conceptual schema from ArangoDB mapping." .')
     lines.append("")
@@ -174,9 +175,12 @@ def turtle_to_mapping(turtle: str) -> MappingBundle:
     entities_pm: dict[str, dict[str, Any]] = {}
     for name in classes:
         props = [
-            {"name": dp["name"].split("_")[-1] if "_" in dp["name"] else dp["name"],
-             "type": _from_xsd_type(dp.get("range", "xsd:string"))}
-            for dp in data_props if dp.get("domain") == name
+            {
+                "name": dp["name"].split("_")[-1] if "_" in dp["name"] else dp["name"],
+                "type": _from_xsd_type(dp.get("range", "xsd:string")),
+            }
+            for dp in data_props
+            if dp.get("domain") == name
         ]
         entities_cs.append({"name": name, "labels": [name], "properties": props})
         ann = annotations.get(name, {})
@@ -196,9 +200,12 @@ def turtle_to_mapping(turtle: str) -> MappingBundle:
         from_e = op.get("domain", "Any")
         to_e = op.get("range", "Any")
         props = [
-            {"name": dp["name"].replace(f"{rtype}_", ""),
-             "type": _from_xsd_type(dp.get("range", "xsd:string"))}
-            for dp in data_props if dp.get("domain") == rtype
+            {
+                "name": dp["name"].replace(f"{rtype}_", ""),
+                "type": _from_xsd_type(dp.get("range", "xsd:string")),
+            }
+            for dp in data_props
+            if dp.get("domain") == rtype
         ]
         rels_cs.append({"type": rtype, "fromEntity": from_e, "toEntity": to_e, "properties": props})
         ann = annotations.get(rtype, {})

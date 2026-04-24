@@ -20,7 +20,8 @@ def test_translate_call_goldens(corpus_cases, case_id: str, all_registry):
     mapping = mapping_bundle_for(case.mapping_fixture)
 
     out = translate(
-        case.cypher, mapping=mapping,
+        case.cypher,
+        mapping=mapping,
         registry=all_registry if case.extensions_enabled else None,
     )
 

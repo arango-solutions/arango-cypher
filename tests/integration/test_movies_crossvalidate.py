@@ -41,10 +41,7 @@ from tests.integration.datasets import seed_movies_lpg_dataset
 
 
 def _cross_enabled() -> bool:
-    return (
-        os.environ.get("RUN_INTEGRATION") == "1"
-        and os.environ.get("RUN_CROSS") == "1"
-    )
+    return os.environ.get("RUN_INTEGRATION") == "1" and os.environ.get("RUN_CROSS") == "1"
 
 
 def _env(name: str, default: str) -> str:
@@ -271,8 +268,7 @@ def test_movies_crossvalidate(query: dict[str, Any]) -> None:
     except Exception as e:
         if divergence:
             pytest.skip(
-                f"[{qid}] divergence flagged "
-                f"(AQL execution failed with {type(e).__name__}): {divergence}"
+                f"[{qid}] divergence flagged (AQL execution failed with {type(e).__name__}): {divergence}"
             )
         raise
 

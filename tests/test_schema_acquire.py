@@ -21,6 +21,7 @@ from arango_query_core import CoreError, MappingBundle
 # Helpers — mock db factories
 # ---------------------------------------------------------------------------
 
+
 def _make_mock_db(
     *,
     doc_collections: list[str] | None = None,
@@ -31,9 +32,9 @@ def _make_mock_db(
     db = MagicMock()
 
     cols: list[dict[str, Any]] = []
-    for name in (doc_collections or []):
+    for name in doc_collections or []:
         cols.append({"name": name, "type": 2})
-    for name in (edge_collections or []):
+    for name in edge_collections or []:
         cols.append({"name": name, "type": 3})
 
     db.collections.return_value = cols
@@ -61,6 +62,7 @@ def _make_mock_db(
 # ---------------------------------------------------------------------------
 # classify_schema
 # ---------------------------------------------------------------------------
+
 
 class TestClassifySchema:
     def test_pg_schema(self):
@@ -129,6 +131,7 @@ class TestClassifySchema:
 # _build_heuristic_mapping
 # ---------------------------------------------------------------------------
 
+
 class TestBuildHeuristicMapping:
     def test_pg_mapping(self):
         db = _make_mock_db(
@@ -176,6 +179,7 @@ class TestBuildHeuristicMapping:
 # ---------------------------------------------------------------------------
 # acquire_mapping_bundle — mocked analyzer
 # ---------------------------------------------------------------------------
+
 
 class TestAcquireMappingBundle:
     def test_import_error_when_not_installed(self):
@@ -227,10 +231,13 @@ class TestAcquireMappingBundle:
         mock_owl_module = MagicMock()
         mock_owl_module.export_conceptual_model_as_owl_turtle.return_value = "@prefix owl: ..."
 
-        with patch.dict("sys.modules", {
-            "schema_analyzer": mock_schema_analyzer,
-            "schema_analyzer.owl_export": mock_owl_module,
-        }):
+        with patch.dict(
+            "sys.modules",
+            {
+                "schema_analyzer": mock_schema_analyzer,
+                "schema_analyzer.owl_export": mock_owl_module,
+            },
+        ):
             bundle = acquire_mapping_bundle(db, include_owl=True)
 
         assert isinstance(bundle, MappingBundle)
@@ -265,10 +272,13 @@ class TestAcquireMappingBundle:
 
         mock_owl_module = MagicMock()
 
-        with patch.dict("sys.modules", {
-            "schema_analyzer": mock_schema_analyzer,
-            "schema_analyzer.owl_export": mock_owl_module,
-        }):
+        with patch.dict(
+            "sys.modules",
+            {
+                "schema_analyzer": mock_schema_analyzer,
+                "schema_analyzer.owl_export": mock_owl_module,
+            },
+        ):
             bundle = acquire_mapping_bundle(db, include_owl=False)
 
         assert isinstance(bundle, MappingBundle)
@@ -278,6 +288,7 @@ class TestAcquireMappingBundle:
 # ---------------------------------------------------------------------------
 # get_mapping — strategy routing
 # ---------------------------------------------------------------------------
+
 
 class TestGetMapping:
     def setup_method(self):
@@ -342,6 +353,7 @@ class TestGetMapping:
 # Caching
 # ---------------------------------------------------------------------------
 
+
 class TestCaching:
     def setup_method(self):
         _mapping_cache.clear()
@@ -371,7 +383,10 @@ class TestCaching:
         # Stale shape fingerprint forces a full re-introspection, not a
         # stats-only refresh, so bundle2 is guaranteed to be freshly built.
         _mapping_cache[key] = (
-            bundle1, ts, "stale-shape-fingerprint", "stale-full-fingerprint",
+            bundle1,
+            ts,
+            "stale-shape-fingerprint",
+            "stale-full-fingerprint",
         )
 
         bundle2 = get_mapping(db, strategy="heuristic", cache_collection=None)
@@ -389,6 +404,7 @@ class TestCaching:
 # ---------------------------------------------------------------------------
 # _cache_key edge cases
 # ---------------------------------------------------------------------------
+
 
 class TestCacheKey:
     def test_empty_on_exception(self):
@@ -438,6 +454,7 @@ class TestSchemaFingerprints:
 
     def test_shape_fp_empty_on_collections_failure(self):
         from arango_cypher.schema_acquire import _shape_fingerprint
+
         db = MagicMock()
         db.name = "testdb"
         db.collections.side_effect = Exception("fail")
@@ -448,6 +465,7 @@ class TestSchemaFingerprints:
     def test_shape_fp_deterministic_under_row_count_change(self):
         """The core win: writes must NOT invalidate the mapping cache."""
         from arango_cypher.schema_acquire import _shape_fingerprint
+
         db = self._make_db(
             [{"name": "users", "type": 2}],
             indexes_by_col={"users": [{"type": "persistent", "fields": ["email"]}]},
@@ -466,6 +484,7 @@ class TestSchemaFingerprints:
 
     def test_shape_fp_changes_when_index_added(self):
         from arango_cypher.schema_acquire import _shape_fingerprint
+
         db_before = self._make_db(
             [{"name": "users", "type": 2}],
             indexes_by_col={"users": []},
@@ -479,37 +498,30 @@ class TestSchemaFingerprints:
     def test_shape_fp_changes_when_index_uniqueness_flips(self):
         """Catches the pre-existing bug where only index COUNT was hashed."""
         from arango_cypher.schema_acquire import _shape_fingerprint
+
         db_before = self._make_db(
             [{"name": "users", "type": 2}],
-            indexes_by_col={
-                "users": [{"type": "persistent", "fields": ["email"], "unique": False}]
-            },
+            indexes_by_col={"users": [{"type": "persistent", "fields": ["email"], "unique": False}]},
         )
         db_after = self._make_db(
             [{"name": "users", "type": 2}],
-            indexes_by_col={
-                "users": [{"type": "persistent", "fields": ["email"], "unique": True}]
-            },
+            indexes_by_col={"users": [{"type": "persistent", "fields": ["email"], "unique": True}]},
         )
         assert _shape_fingerprint(db_before) != _shape_fingerprint(db_after)
 
     def test_shape_fp_changes_when_collection_added(self):
         from arango_cypher.schema_acquire import _shape_fingerprint
+
         db_before = self._make_db([{"name": "users", "type": 2}])
-        db_after = self._make_db(
-            [{"name": "users", "type": 2}, {"name": "orders", "type": 2}]
-        )
+        db_after = self._make_db([{"name": "users", "type": 2}, {"name": "orders", "type": 2}])
         assert _shape_fingerprint(db_before) != _shape_fingerprint(db_after)
 
     def test_full_fp_changes_with_count(self):
         from arango_cypher.schema_acquire import _full_fingerprint
-        db = self._make_db(
-            [{"name": "users", "type": 2}], counts_by_col={"users": 100}
-        )
+
+        db = self._make_db([{"name": "users", "type": 2}], counts_by_col={"users": 100})
         fp1 = _full_fingerprint(db)
-        db = self._make_db(
-            [{"name": "users", "type": 2}], counts_by_col={"users": 200}
-        )
+        db = self._make_db([{"name": "users", "type": 2}], counts_by_col={"users": 200})
         fp2 = _full_fingerprint(db)
         assert fp1 != fp2
 
@@ -521,9 +533,8 @@ class TestSchemaFingerprints:
             _full_fingerprint,
             _shape_fingerprint,
         )
-        db = self._make_db(
-            [{"name": "users", "type": 2}], counts_by_col={"users": 5}
-        )
+
+        db = self._make_db([{"name": "users", "type": 2}], counts_by_col={"users": 5})
         assert _shape_fingerprint(db) != _full_fingerprint(db)
 
     def test_cache_collection_itself_is_excluded(self):
@@ -534,6 +545,7 @@ class TestSchemaFingerprints:
         """
         from arango_cypher.schema_acquire import _shape_fingerprint
         from arango_cypher.schema_cache import DEFAULT_CACHE_COLLECTION
+
         db_without = self._make_db([{"name": "users", "type": 2}])
         db_with = self._make_db(
             [

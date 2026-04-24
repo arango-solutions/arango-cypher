@@ -15,6 +15,7 @@ We assert 25 ms / 1 ms — 9x and 20x above the 2026-04-20 baseline — so
 the test only fires on a real regression (GC pause, N^2 blow-up, ANTLR
 state churn) and not on shared-runner noise.
 """
+
 from __future__ import annotations
 
 import os
@@ -43,8 +44,7 @@ class TestTranslatePerfBudget:
     @pytest.fixture(scope="class")
     def mappings(self):
         return {
-            fixture: _load_mapping(fixture)
-            for fixture, _ in {v[0]: None for v in _CORPUS.values()}.items()
+            fixture: _load_mapping(fixture) for fixture, _ in {v[0]: None for v in _CORPUS.values()}.items()
         }
 
     def _measure_cold(self, cypher: str, mapping) -> list[float]:

@@ -5,10 +5,7 @@ import pytest
 from arango_cypher import translate
 from tests.helpers.mapping_fixtures import mapping_bundle_for
 
-COMPREHENSION_IDS = (
-    [f"C{n}" for n in range(500, 505)]
-    + [f"C{n}" for n in range(510, 512)]
-)
+COMPREHENSION_IDS = [f"C{n}" for n in range(500, 505)] + [f"C{n}" for n in range(510, 512)]
 
 
 @pytest.mark.parametrize("case_id", COMPREHENSION_IDS)

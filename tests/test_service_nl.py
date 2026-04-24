@@ -10,6 +10,7 @@ the keyword arguments the endpoint forwards, then assert on the
 contract. Integration tests for the actual translation live in
 ``tests/test_nl2cypher_execution_grounded.py`` and the eval harness.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -48,7 +49,9 @@ class TestRetryContextPlumbing:
     POST body → endpoint → :func:`nl_to_cypher` hop unchanged."""
 
     def test_retry_context_forwarded_to_nl_to_cypher(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch,
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         captured: dict[str, Any] = {}
 
@@ -72,13 +75,13 @@ class TestRetryContextPlumbing:
             },
         )
         assert resp.status_code == 200, resp.text
-        assert captured["retry_context"] == (
-            "parser: unexpected ')' at position 17"
-        )
+        assert captured["retry_context"] == ("parser: unexpected ')' at position 17")
         assert captured["question"] == "find people"
 
     def test_missing_retry_context_forwards_none(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch,
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Backward compat: pre-WP-29 clients that omit the field must
         see ``retry_context=None`` forwarded (not KeyError, not empty
@@ -109,7 +112,9 @@ class TestValidationFailedResponseShape:
     ``cypher`` to route into the red banner instead of the editor."""
 
     def test_validation_failed_result_passes_method_through(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch,
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         def _fake_nl_to_cypher(*args: Any, **kwargs: Any):
             return _fake_result(
@@ -139,7 +144,9 @@ class TestValidationFailedResponseShape:
         assert "validation failed" in body["explanation"]
 
     def test_session_token_is_optional_for_retry_context_flow(
-        self, client: TestClient, monkeypatch: pytest.MonkeyPatch,
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """WP-30 regenerate-with-hint must work without a session
         (entity resolution is just disabled; retry_context still
@@ -163,9 +170,7 @@ class TestValidationFailedResponseShape:
             },
         )
         assert resp.status_code == 200
-        assert captured["retry_context"] == (
-            "translate error: unknown collection X"
-        )
+        assert captured["retry_context"] == ("translate error: unknown collection X")
         assert captured.get("db") is None
 
 

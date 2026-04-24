@@ -5,6 +5,7 @@ the prompt-construction and schema-analysis code in ``_core`` and
 ``_aql``.  Per PRD §1.2, providers receive pre-rendered ``system`` and
 ``user`` strings and never touch physical schema details on their own.
 """
+
 from __future__ import annotations
 
 import os
@@ -26,7 +27,9 @@ class LLMProvider(Protocol):
     """
 
     def generate(
-        self, system: str, user: str,
+        self,
+        system: str,
+        user: str,
     ) -> tuple[str, dict[str, int]]:
         """Return ``(content, usage_dict)`` for the given system/user pair."""
         ...
@@ -53,7 +56,9 @@ class _BaseChatProvider:
         self._extra_headers = extra_headers or {}
 
     def _chat(
-        self, system: str, user: str,
+        self,
+        system: str,
+        user: str,
     ) -> tuple[str, dict[str, int]]:
         import requests
 
@@ -186,18 +191,22 @@ def split_system_for_anthropic_cache(system: str) -> list[dict[str, Any]]:
         return [{"type": "text", "text": "", "cache_control": {"type": "ephemeral"}}]
     idx = system.find(_ANTHROPIC_CACHE_BREAKPOINT)
     if idx == -1:
-        return [{
-            "type": "text",
-            "text": system,
-            "cache_control": {"type": "ephemeral"},
-        }]
+        return [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
     prefix = system[:idx].rstrip("\n")
     suffix = system[idx:]
-    blocks: list[dict[str, Any]] = [{
-        "type": "text",
-        "text": prefix,
-        "cache_control": {"type": "ephemeral"},
-    }]
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": prefix,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
     if suffix:
         blocks.append({"type": "text", "text": suffix})
     return blocks
@@ -257,11 +266,11 @@ class AnthropicProvider:
     ) -> None:
         self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         self.base_url = (
-            base_url
-            or os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")
+            base_url or os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1")
         ).rstrip("/")
         self.model = model or os.environ.get(
-            "ANTHROPIC_MODEL", "claude-sonnet-4-5",
+            "ANTHROPIC_MODEL",
+            "claude-sonnet-4-5",
         )
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -272,7 +281,9 @@ class AnthropicProvider:
         return split_system_for_anthropic_cache(system)
 
     def generate(
-        self, system: str, user: str,
+        self,
+        system: str,
+        user: str,
     ) -> tuple[str, dict[str, int]]:
         """Call the Messages API and return ``(content, usage_dict)``.
 

@@ -40,4 +40,3 @@ __all__ = [
     "parse_owl_with_rdflib",
     "turtle_to_mapping",
 ]
-

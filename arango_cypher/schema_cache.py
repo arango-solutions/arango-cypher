@@ -133,9 +133,7 @@ class ArangoSchemaCache:
             )
             return None
 
-    def get(
-        self, db: StandardDatabase
-    ) -> tuple[MappingBundle, str, str] | None:
+    def get(self, db: StandardDatabase) -> tuple[MappingBundle, str, str] | None:
         """Fetch cached ``(bundle, shape_fp, full_fp)`` or ``None`` on miss."""
         try:
             if not db.has_collection(self.collection_name):

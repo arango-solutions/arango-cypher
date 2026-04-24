@@ -16,9 +16,11 @@ jobs:
           python-version: "3.12"
       - run: pip install ruff
       - run: ruff check .
-      # ruff format --check intentionally omitted: ~95 files pre-date the
-      # format gate and rebreaking them in this PR would swamp reviewable
-      # changes. Track as follow-up: run `ruff format .` in an isolated PR.
+      # `ruff format .` was applied repo-wide in audit-v2 batch 2
+      # (commit `b0a3241`, 102 files reformatted, zero behaviour change),
+      # so the format gate is now enforced. To unbreak a future PR that
+      # trips this, run `ruff format .` locally and recommit.
+      - run: ruff format --check .
 
   test:
     runs-on: ubuntu-latest

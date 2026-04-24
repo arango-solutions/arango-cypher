@@ -66,8 +66,7 @@ def get_driver():  # pragma: no cover - exercised only under `cross` marker
         from neo4j import GraphDatabase  # type: ignore[import-not-found]
     except ImportError as e:
         raise RuntimeError(
-            "neo4j driver not installed; `pip install 'neo4j>=5'` "
-            "or install the `neo4j` extra."
+            "neo4j driver not installed; `pip install 'neo4j>=5'` or install the `neo4j` extra."
         ) from e
 
     uri, user, password = connection_params()
@@ -129,11 +128,13 @@ def _edges_by_type(edges: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]
         rtype = e.get("relation") or e.get("type")
         if not rtype or not _VALID_REL_TYPE.match(rtype):
             continue
-        out.setdefault(rtype, []).append({
-            "from": _strip_id(e["_from"]),
-            "to": _strip_id(e["_to"]),
-            "props": _edge_props(e),
-        })
+        out.setdefault(rtype, []).append(
+            {
+                "from": _strip_id(e["_from"]),
+                "to": _strip_id(e["_to"]),
+                "props": _edge_props(e),
+            }
+        )
     return out
 
 
@@ -278,18 +279,20 @@ def seed_neo4j_pg(
             for e in edges:
                 from_coll, from_key = e["_from"].split("/", 1)
                 to_coll, to_key = e["_to"].split("/", 1)
-                rows.append({
-                    "from_label": coll_to_label.get(from_coll, _label_from_collection(from_coll)),
-                    "from_key": from_key,
-                    "to_label": coll_to_label.get(to_coll, _label_from_collection(to_coll)),
-                    "to_key": to_key,
-                    "props": {k: v for k, v in e.items() if k not in {"_from", "_to", "_key"}},
-                })
+                rows.append(
+                    {
+                        "from_label": coll_to_label.get(from_coll, _label_from_collection(from_coll)),
+                        "from_key": from_key,
+                        "to_label": coll_to_label.get(to_coll, _label_from_collection(to_coll)),
+                        "to_key": to_key,
+                        "props": {k: v for k, v in e.items() if k not in {"_from", "_to", "_key"}},
+                    }
+                )
             for row in rows:
                 sess.run(
                     f"""
-                    MATCH (a:`{row['from_label']}` {{_key: $from_key}})
-                    MATCH (b:`{row['to_label']}` {{_key: $to_key}})
+                    MATCH (a:`{row["from_label"]}` {{_key: $from_key}})
+                    MATCH (b:`{row["to_label"]}` {{_key: $to_key}})
                     MERGE (a)-[r:`{rtype}`]->(b)
                     SET r += $props
                     """,

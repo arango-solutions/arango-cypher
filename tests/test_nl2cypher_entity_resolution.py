@@ -11,6 +11,7 @@ minimal duck-typed mock (see :class:`_FakeDb`).  They pin:
 * Zero-shot bit-identity: with ``use_entity_resolution=False`` the system
   prompt is byte-identical to the Wave 4-pre baseline.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -98,6 +99,7 @@ class TestExtractCandidates:
 class TestResolveWithMockedDb:
     def test_typo_corrected(self, movies_mapping) -> None:
         """'Forest Gump' → 'Forrest Gump' via mocked contains-match."""
+
         def responder(aql: str, bind_vars: dict[str, Any]):
             field = bind_vars.get("field")
             collection = bind_vars.get("@c")
@@ -128,6 +130,7 @@ class TestResolveWithMockedDb:
 
     def test_multiple_candidates_in_one_question(self, movies_mapping) -> None:
         """Both 'Tom Hanks' (Person.name) and 'Forest Gump' (Movie.title) resolve."""
+
         def responder(aql: str, bind_vars: dict[str, Any]):
             collection = bind_vars.get("@c")
             field = bind_vars.get("field")
@@ -149,6 +152,7 @@ class TestResolveWithMockedDb:
 
     def test_best_score_wins_when_multiple_props_match(self, movies_mapping) -> None:
         """When two properties of the same label both match, the higher score wins."""
+
         def responder(aql: str, bind_vars: dict[str, Any]):
             field = bind_vars.get("field")
             if bind_vars.get("@c") == "movies" and field == "title":
@@ -168,6 +172,7 @@ class TestResolveWithMockedDb:
 
     def test_below_threshold_filtered(self, movies_mapping) -> None:
         """Matches below ``min_score`` are dropped."""
+
         def responder(aql: str, bind_vars: dict[str, Any]):
             return [{"value": "Barely Related", "score": 0.3}]
 
@@ -200,6 +205,7 @@ class TestResolveWithMockedDb:
 
     def test_query_failure_returns_empty(self, movies_mapping) -> None:
         """A broken DB must not propagate — resolver logs and returns []."""
+
         class _Boom:
             class aql:  # noqa: N801
                 @staticmethod
@@ -263,11 +269,13 @@ class TestFuzzyScoring:
         assert resolver.fuzzy_threshold == 0.7
 
     def test_fuzzy_score_below_threshold_dropped_by_filter(
-        self, movies_mapping,
+        self,
+        movies_mapping,
     ) -> None:
         """When the DB returns score=0 (because fuzzy was below threshold),
         the resolver drops the candidate via min_score, not by inspecting AQL.
         """
+
         def responder(aql: str, bind_vars: dict[str, Any]):
             return []
 
@@ -308,8 +316,11 @@ class TestFormatPromptSection:
         resolver = EntityResolver(mapping=movies_mapping)
         resolved = [
             ResolvedEntity(
-                mention="Tom Hanks", label="Person", property="name",
-                value="Tom Hanks", score=1.0,
+                mention="Tom Hanks",
+                label="Person",
+                property="name",
+                value="Tom Hanks",
+                score=1.0,
             ),
         ]
         lines = resolver.format_prompt_section(resolved)
@@ -345,7 +356,8 @@ class TestNlToCypherIntegration:
             llm_provider=_Provider(),
         )
         expected = FROZEN_SYSTEM_PROMPT.replace(
-            "{schema}", _build_schema_summary(movies_mapping),
+            "{schema}",
+            _build_schema_summary(movies_mapping),
         )
         assert captured["system"] == expected
         assert "Resolved entities" not in captured["system"]

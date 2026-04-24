@@ -52,7 +52,11 @@ def test_translate_v0_requires_mapping():
     [
         ("RETURN 1", "UNSUPPORTED", "MATCH is required"),
         ("MATCH (n) RETURN n", "UNSUPPORTED", "label is required"),
-        ("MATCH (u:User)-[u:FOLLOWS]->(v:User) RETURN u", "UNSUPPORTED", "Relationship variable must not shadow"),
+        (
+            "MATCH (u:User)-[u:FOLLOWS]->(v:User) RETURN u",
+            "UNSUPPORTED",
+            "Relationship variable must not shadow",
+        ),
         (
             "MATCH (u:User)-[:FOLLOWS $props]->(v:User) RETURN u",
             "NOT_IMPLEMENTED",
@@ -81,7 +85,9 @@ def test_aql_executor_execute_forwards_to_python_arango():
 
     ex = AqlExecutor(db=FakeDb())
     out = ex.execute(
-        query=TranspiledQuery(aql="RETURN 1", bind_vars={"x": 1}, warnings=[]).to_aql_query(), batch_size=123, ttl=5
+        query=TranspiledQuery(aql="RETURN 1", bind_vars={"x": 1}, warnings=[]).to_aql_query(),
+        batch_size=123,
+        ttl=5,
     )
     assert out == [{"ok": True}]
     assert calls == [("RETURN 1", {"x": 1}, 123, {"ttl": 5})]
@@ -150,7 +156,9 @@ def test_extension_registry_compiles_registered_function_and_procedure():
 
 
 def test_mapping_resolver_mapping_not_found():
-    bundle = MappingBundle(conceptual_schema={}, physical_mapping={"entities": {}, "relationships": {}}, metadata={})
+    bundle = MappingBundle(
+        conceptual_schema={}, physical_mapping={"entities": {}, "relationships": {}}, metadata={}
+    )
     r = MappingResolver(bundle)
     with pytest.raises(CoreError) as e:
         r.resolve_entity("Missing")
@@ -161,7 +169,9 @@ def test_mapping_resolver_mapping_not_found():
 
 
 def test_mapping_resolver_non_dict_sections_are_treated_as_empty():
-    bundle = MappingBundle(conceptual_schema={}, physical_mapping={"entities": [], "relationships": None}, metadata={})
+    bundle = MappingBundle(
+        conceptual_schema={}, physical_mapping={"entities": [], "relationships": None}, metadata={}
+    )
     r = MappingResolver(bundle)
     with pytest.raises(CoreError) as e:
         r.resolve_entity("User")
@@ -171,7 +181,11 @@ def test_mapping_resolver_non_dict_sections_are_treated_as_empty():
 @pytest.mark.parametrize(
     "mutate,cypher,code_contains",
     [
-        (lambda pm: pm["entities"]["User"].__setitem__("style", "BOGUS"), "MATCH (n:User) RETURN n", "Unsupported entity mapping style"),
+        (
+            lambda pm: pm["entities"]["User"].__setitem__("style", "BOGUS"),
+            "MATCH (n:User) RETURN n",
+            "Unsupported entity mapping style",
+        ),
         (
             lambda pm: pm["entities"]["User"].__setitem__("collectionName", ""),
             "MATCH (u:User)-[:FOLLOWS]->(v:User) RETURN u",
@@ -225,5 +239,3 @@ def test_compile_type_of_relationship_generic_reads_rel_type_field():
         _compile_type_of_relationship("FOLLOWS", "r", "GENERIC_WITH_TYPE", bind_vars={"relTypeField": "type"})
         == "r[@relTypeField]"
     )
-
-

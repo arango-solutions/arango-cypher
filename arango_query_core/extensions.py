@@ -51,4 +51,3 @@ class ExtensionRegistry:
         if not proc:
             raise CoreError(f"Unknown extension procedure: {name}", code="UNKNOWN_EXTENSION")
         return proc(call_ast, ctx)
-

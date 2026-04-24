@@ -1,4 +1,5 @@
 """Tests for agentic tool wrappers."""
+
 from __future__ import annotations
 
 import json
@@ -25,10 +26,12 @@ def _load_mapping(name: str) -> dict:
 class TestTranslateTool:
     def test_basic_translation(self) -> None:
         mapping = _load_mapping("movies_pg")
-        result = translate_tool({
-            "cypher": "MATCH (p:Person) RETURN p.name",
-            "mapping": mapping,
-        })
+        result = translate_tool(
+            {
+                "cypher": "MATCH (p:Person) RETURN p.name",
+                "mapping": mapping,
+            }
+        )
         assert "error" not in result
         assert "FOR" in result["aql"]
         assert "RETURN" in result["aql"]
@@ -48,11 +51,13 @@ class TestTranslateTool:
 
     def test_with_params(self) -> None:
         mapping = _load_mapping("movies_pg")
-        result = translate_tool({
-            "cypher": "MATCH (p:Person) WHERE p.name = $name RETURN p",
-            "mapping": mapping,
-            "params": {"name": "Alice"},
-        })
+        result = translate_tool(
+            {
+                "cypher": "MATCH (p:Person) WHERE p.name = $name RETURN p",
+                "mapping": mapping,
+                "params": {"name": "Alice"},
+            }
+        )
         assert "error" not in result
         assert "name" in result["bind_vars"]
 

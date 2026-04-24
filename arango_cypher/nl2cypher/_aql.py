@@ -5,6 +5,7 @@ the direct NL→AQL path deliberately exposes collection names, edge
 collections, type discriminators, and cardinality statistics so the
 model can emit efficient AQL without going through Cypher.
 """
+
 from __future__ import annotations
 
 import logging
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class NL2AqlResult:
     """Result of a natural language to AQL direct translation."""
+
     aql: str
     bind_vars: dict[str, Any]
     explanation: str = ""
@@ -186,9 +188,7 @@ def _build_physical_schema_summary(bundle: MappingBundle) -> str:
                 for pname, pmeta in prop_entries:
                     hint = _property_quality_hint(pmeta if isinstance(pmeta, dict) else None)
                     formatted.append(f"{pname}{hint}")
-                    if isinstance(pmeta, dict) and (
-                        pmeta.get("sentinelValues") or pmeta.get("numericLike")
-                    ):
+                    if isinstance(pmeta, dict) and (pmeta.get("sentinelValues") or pmeta.get("numericLike")):
                         flagged_entity_props.append((label, pname, pmeta))
                 prop_str = ", ".join(formatted) if formatted else "no properties"
             else:
@@ -203,10 +203,7 @@ def _build_physical_schema_summary(bundle: MappingBundle) -> str:
             if isinstance(est, dict) and "estimated_count" in est:
                 count_info = f" — ~{est['estimated_count']:,} documents"
 
-            lines.append(
-                f"  Collection '{col}' (entity: {_escape_label(label)})"
-                f"{type_info}{count_info}"
-            )
+            lines.append(f"  Collection '{col}' (entity: {_escape_label(label)}){type_info}{count_info}")
             lines.append(f"    Fields: {prop_str}")
 
     if isinstance(pm.get("relationships"), dict):
@@ -241,10 +238,7 @@ def _build_physical_schema_summary(bundle: MappingBundle) -> str:
                     parts.append(f"pattern: {rs['cardinality_pattern']}")
                 cardinality_info = "\n    Cardinality: " + ", ".join(parts)
 
-            lines.append(
-                f"  Edge collection '{edge_col}' (relationship: "
-                f"{_escape_label(rtype)}){type_info}"
-            )
+            lines.append(f"  Edge collection '{edge_col}' (relationship: {_escape_label(rtype)}){type_info}")
             lines.append(
                 f"    Connects: {_escape_label(domain)}('{domain_col}') -> "
                 f"{_escape_label(range_)}('{range_col}')"
@@ -273,7 +267,9 @@ def _build_physical_schema_summary(bundle: MappingBundle) -> str:
     if entity_stats or rel_stats:
         lines.append("\nQuery optimization hints:")
         lines.append("  - Start traversals from the SMALLER collection when filtering by a property.")
-        lines.append("  - For 1:N relationships, traverse OUTBOUND from the '1' side to avoid scanning the 'N' side.")
+        lines.append(
+            "  - For 1:N relationships, traverse OUTBOUND from the '1' side to avoid scanning the 'N' side."
+        )
         lines.append("  - For N:1 relationships, traverse INBOUND from the '1' side.")
         lines.append("  - Use LIMIT early when only a few results are needed from large collections.")
 
@@ -320,7 +316,22 @@ def _extract_aql_from_response(text: str) -> tuple[str, dict[str, Any]]:
     aql_lines = []
     for line in lines:
         upper = line.upper()
-        if any(kw in upper for kw in ("FOR", "RETURN", "FILTER", "LET", "SORT", "LIMIT", "COLLECT", "INSERT", "UPDATE", "REMOVE", "WITH")):
+        if any(
+            kw in upper
+            for kw in (
+                "FOR",
+                "RETURN",
+                "FILTER",
+                "LET",
+                "SORT",
+                "LIMIT",
+                "COLLECT",
+                "INSERT",
+                "UPDATE",
+                "REMOVE",
+                "WITH",
+            )
+        ):
             aql_lines.append(line)
         elif aql_lines:
             aql_lines.append(line)
@@ -328,7 +339,9 @@ def _extract_aql_from_response(text: str) -> tuple[str, dict[str, Any]]:
 
 
 def _validate_aql_syntax(
-    aql: str, *, known_collections: set[str] | None = None,
+    aql: str,
+    *,
+    known_collections: set[str] | None = None,
 ) -> tuple[bool, str]:
     """Structural AQL syntax check.
 
@@ -344,9 +357,7 @@ def _validate_aql_syntax(
         return False, "empty AQL string"
 
     upper = aql.upper()
-    has_clause = any(
-        kw in upper for kw in ("FOR", "RETURN", "INSERT", "UPDATE", "REMOVE", "LET")
-    )
+    has_clause = any(kw in upper for kw in ("FOR", "RETURN", "INSERT", "UPDATE", "REMOVE", "LET"))
     if not has_clause:
         return False, "no recognizable AQL clause keyword found"
 
@@ -415,8 +426,11 @@ def _aql_tenant_scope_satisfied(
         known_entities = referenced_names & set(manifest.entities.keys())
         if known_entities:
             roles = {manifest.role_of(name) for name in known_entities}
-            if roles and EntityTenantRole.TENANT_SCOPED not in roles \
-                    and EntityTenantRole.TENANT_ROOT not in roles:
+            if (
+                roles
+                and EntityTenantRole.TENANT_SCOPED not in roles
+                and EntityTenantRole.TENANT_ROOT not in roles
+            ):
                 return True
 
     if _TENANT_COLLECTION_RE.search(aql or ""):
@@ -470,11 +484,7 @@ def _call_llm_for_aql(
         # entity's correct scoping path, so we no longer pin the
         # output to a hardcoded `FOR t IN Tenant` shape — that was
         # incorrect for the GLOBAL-only and denorm-filter cases.
-        system = (
-            system.rstrip()
-            + "\n\n"
-            + tenant_block.replace(":Tenant", "the Tenant collection")
-        )
+        system = system.rstrip() + "\n\n" + tenant_block.replace(":Tenant", "the Tenant collection")
     last_error = ""
     total_usage: dict[str, int] = {
         "prompt_tokens": 0,
@@ -503,7 +513,8 @@ def _call_llm_for_aql(
             aql, bind_vars = _extract_aql_from_response(content)
 
             ok, err_msg = _validate_aql_syntax(
-                aql, known_collections=known_collections,
+                aql,
+                known_collections=known_collections,
             )
             if ok:
                 # AQL-level tenant postcondition. Manifest-aware:
@@ -511,27 +522,25 @@ def _call_llm_for_aql(
                 # in addition to traversal-from-Tenant. See
                 # ``_aql_tenant_scope_satisfied`` for the full
                 # acceptance contract.
-                if (
-                    tenant_context is not None
-                    and not _aql_tenant_scope_satisfied(
-                        aql,
-                        tenant_context=tenant_context,
-                        manifest=tenant_manifest,
-                    )
+                if tenant_context is not None and not _aql_tenant_scope_satisfied(
+                    aql,
+                    tenant_context=tenant_context,
+                    manifest=tenant_manifest,
                 ):
                     last_error = (
                         "Query is not scoped to the active tenant. "
                         "Either filter a tenant-scoped collection on "
                         "its denormalised tenant field "
                         f"(e.g. `FILTER d.<TENANT_FIELD> == "
-                        f"\"{tenant_context.value}\"`), OR bind the "
+                        f'"{tenant_context.value}"`), OR bind the '
                         "Tenant collection by `_key` and traverse to "
                         "the target via the schema's tenant-scoping "
                         "edges. See the per-entity scoping rules above."
                     )
                     logger.warning(
                         "AQL tenant-scoping violation (attempt %d/%d)",
-                        attempt + 1, 1 + max_retries,
+                        attempt + 1,
+                        1 + max_retries,
                     )
                     continue
 
@@ -551,7 +560,10 @@ def _call_llm_for_aql(
             last_error = err_msg or "generated text did not parse as AQL"
             logger.info(
                 "LLM AQL attempt %d/%d: validation failed (%s) for: %s",
-                attempt + 1, 1 + max_retries, last_error, aql[:120],
+                attempt + 1,
+                1 + max_retries,
+                last_error,
+                aql[:120],
             )
         except Exception as e:
             logger.warning("LLM AQL call failed (attempt %d): %s", attempt + 1, e)
@@ -632,7 +644,9 @@ def nl_to_aql(
     known_collections = _collect_known_collections(bundle)
     tenant_manifest = analyze_tenant_scope(bundle) if tenant_context else None
     result = _call_llm_for_aql(
-        question, schema_summary, base_provider,
+        question,
+        schema_summary,
+        base_provider,
         max_retries=max_retries,
         known_collections=known_collections,
         tenant_context=tenant_context,
