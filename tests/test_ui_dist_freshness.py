@@ -179,16 +179,32 @@ class TestUiDistFreshness:
         verdict = _check_ui_dist_freshness(dist_dir=dist, src_dir=src)
         assert verdict == "ok"
 
-    def test_returns_ok_in_real_repo_after_recent_build(self) -> None:
-        """Smoke test against the real repo — ``ui/dist`` is current per the
-        2026-04-24 rebuild. If this asserts ``stale`` post-merge, someone
-        edited ``ui/src`` without rebuilding; the fix is the literal log
-        message: ``cd ui && npm run build``.
+    def test_real_repo_freshness_is_never_stale(self) -> None:
+        """Smoke test against the real repo — assert the dist (if present)
+        is not older than the src.
+
+        ``stale`` is the regression we actually care about: someone edited
+        ``ui/src`` without rerunning ``npm run build``. The other three
+        verdicts are all acceptable in their respective contexts:
+
+        * ``ok``      — local dev after a fresh build (the 2026-04-24
+                        rebuild that motivated this PR)
+        * ``missing`` — CI workflows that don't run ``npm run build``
+                        (lint / unit / packaging / integration jobs all
+                        skip the UI build; acceptable, the job is not
+                        exercising the UI mount)
+        * ``no_src``  — wheel-installed deployments with no ``ui/src``
+                        tree shipped
+
+        If this asserts ``stale``, the fix is the literal log message:
+        ``cd ui && npm run build`` and recommit.
         """
         verdict = _check_ui_dist_freshness()
-        # Acceptable verdicts in CI: ok (everyone rebuilt) or no_src (wheel).
-        # `stale` and `missing` are both bugs the operator wants to know about.
-        assert verdict in ("ok", "no_src"), (
-            f"Unexpected freshness verdict {verdict!r}; "
-            "if 'stale', run `cd ui && npm run build` and recommit."
+        assert verdict != "stale", (
+            f"ui/dist is older than ui/src; verdict={verdict!r}. "
+            "Run `cd ui && npm run build` and recommit."
+        )
+        assert verdict in ("ok", "missing", "no_src"), (
+            f"Unexpected freshness verdict {verdict!r}; expected one of "
+            "ok / missing / no_src."
         )
