@@ -1530,6 +1530,7 @@ class NLSuggestRequest(BaseModel):
 @app.post("/nl-samples")
 def nl_samples_endpoint(
     req: NLSuggestRequest,
+    _: None = Depends(_check_nl_rate_limit),
     _auth: _Session | None = Depends(_require_session_in_public_mode),
 ):
     """Return a representative set of NL questions for the given schema.

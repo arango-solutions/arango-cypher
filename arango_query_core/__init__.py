@@ -2,12 +2,14 @@ from .aql import AqlFragment, AqlQuery
 from .errors import CoreError
 from .extensions import ExtensionPolicy, ExtensionRegistry
 from .mapping import (
+    COLLECTION_NAME_RE,
     IndexInfo,
     MappingBundle,
     MappingResolver,
     MappingSource,
     PropertyInfo,
     RelationshipStats,
+    is_valid_collection_name,
     mapping_from_wire_dict,
     mapping_hash,
 )
@@ -19,6 +21,7 @@ except ImportError:
     parse_owl_with_rdflib = None  # type: ignore[assignment]
 
 __all__ = [
+    "COLLECTION_NAME_RE",
     "AqlFragment",
     "AqlQuery",
     "CoreError",
@@ -30,6 +33,7 @@ __all__ = [
     "MappingSource",
     "PropertyInfo",
     "RelationshipStats",
+    "is_valid_collection_name",
     "mapping_from_wire_dict",
     "mapping_hash",
     "mapping_to_turtle",
