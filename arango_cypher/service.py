@@ -220,6 +220,14 @@ async def _validation_error_handler(request: Request, exc: RequestValidationErro
 
 NL_RATE_LIMIT_PER_MINUTE = int(os.getenv("NL_RATE_LIMIT_PER_MINUTE", "10"))
 
+# Second, cheaper bucket for the CPU-bound (non-LLM) endpoints — translate,
+# validate, execute*, explain, aql-profile, schema/*, suggest-indexes,
+# mapping/*-owl, tools/call. Defaults an order of magnitude higher than the
+# LLM bucket per the audit-v2 finding #2 recommendation: high enough not to
+# trip a normal interactive workflow, low enough to bound a runaway script.
+# Override per-deployment via env. See docs/audits/2026-04-28-post-hardening-audit.md.
+COMPUTE_RATE_LIMIT_PER_MINUTE = int(os.getenv("COMPUTE_RATE_LIMIT_PER_MINUTE", "100"))
+
 SESSION_TTL_SECONDS = int(os.getenv("SESSION_TTL_SECONDS", "1800"))
 MAX_SESSIONS = int(os.getenv("MAX_SESSIONS", "100"))
 
@@ -309,12 +317,38 @@ class _TokenBucket:
 
 
 _nl_bucket = _TokenBucket(NL_RATE_LIMIT_PER_MINUTE)
+_compute_bucket = _TokenBucket(COMPUTE_RATE_LIMIT_PER_MINUTE)
+
+
+def _client_key(request: Request) -> str:
+    """Per-client rate-limit key.
+
+    Authorization header (a session token in our case) when available, else
+    the remote IP, else the literal string ``"anon"``. Centralised so both
+    rate-limit dependencies key identically — a request that exhausts the
+    NL bucket should also be tracked in the compute bucket under the same
+    identity.
+    """
+    return request.headers.get("Authorization") or (request.client.host if request.client else "anon")
 
 
 def _check_nl_rate_limit(request: Request) -> None:
-    session_key = request.headers.get("Authorization", request.client.host if request.client else "anon")
-    if not _nl_bucket.allow(session_key):
+    if not _nl_bucket.allow(_client_key(request)):
         raise HTTPException(status_code=429, detail="Rate limit exceeded for NL endpoints")
+
+
+def _check_compute_rate_limit(request: Request) -> None:
+    """Cheaper rate-limit bucket for the CPU-bound non-LLM endpoints.
+
+    Applied to ``/translate``, ``/validate``, ``/execute*``, ``/explain``,
+    ``/aql-profile``, ``/schema/*``, ``/suggest-indexes``,
+    ``/mapping/*-owl``, and ``/tools/call`` — see audit-v2 finding #2 for
+    the cost-tier rationale. Default capacity is
+    ``COMPUTE_RATE_LIMIT_PER_MINUTE`` (100/min), an order of magnitude
+    above the LLM bucket so a normal interactive workflow never trips it.
+    """
+    if not _compute_bucket.allow(_client_key(request)):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded for compute endpoints")
 
 
 def _require_session_in_public_mode(request: Request) -> _Session | None:
@@ -806,7 +840,10 @@ def cypher_profile():
 
 
 @app.post("/translate", response_model=TranslateResponse)
-def translate_endpoint(req: TranslateRequest):
+def translate_endpoint(
+    req: TranslateRequest,
+    _: None = Depends(_check_compute_rate_limit),
+):
     """Translate Cypher to AQL."""
     import logging as _log
 
@@ -860,7 +897,11 @@ def translate_endpoint(req: TranslateRequest):
 
 
 @app.post("/execute", response_model=ExecuteResponse)
-def execute_endpoint(req: ExecuteRequest, session: _Session = Depends(_get_session)):
+def execute_endpoint(
+    req: ExecuteRequest,
+    _: None = Depends(_check_compute_rate_limit),
+    session: _Session = Depends(_get_session),
+):
     """Translate Cypher to AQL and execute against the connected ArangoDB."""
     mapping = _mapping_from_dict(req.mapping)
     if mapping is None:
@@ -911,7 +952,11 @@ class ExecuteAqlRequest(BaseModel):
 
 
 @app.post("/execute-aql")
-def execute_aql_endpoint(req: ExecuteAqlRequest, session: _Session = Depends(_get_session)):
+def execute_aql_endpoint(
+    req: ExecuteAqlRequest,
+    _: None = Depends(_check_compute_rate_limit),
+    session: _Session = Depends(_get_session),
+):
     """Execute a raw AQL query directly (used by NL→AQL direct path)."""
     with _translate_errors("AQL execution failed"):
         t_exec = time.perf_counter()
@@ -929,7 +974,10 @@ def execute_aql_endpoint(req: ExecuteAqlRequest, session: _Session = Depends(_ge
 
 
 @app.post("/validate", response_model=ValidateResponse)
-def validate_endpoint(req: ValidateRequest):
+def validate_endpoint(
+    req: ValidateRequest,
+    _: None = Depends(_check_compute_rate_limit),
+):
     """Validate Cypher against the translator profile."""
     mapping = _mapping_from_dict(req.mapping)
     result = validate_cypher_profile(
@@ -944,7 +992,11 @@ def validate_endpoint(req: ValidateRequest):
 
 
 @app.post("/explain")
-def explain_endpoint(req: TranslateRequest, session: _Session = Depends(_get_session)):
+def explain_endpoint(
+    req: TranslateRequest,
+    _: None = Depends(_check_compute_rate_limit),
+    session: _Session = Depends(_get_session),
+):
     """Translate Cypher to AQL, then run AQL EXPLAIN to get the execution plan."""
     mapping = _mapping_from_dict(req.mapping)
     if mapping is None:
@@ -978,7 +1030,11 @@ def explain_endpoint(req: TranslateRequest, session: _Session = Depends(_get_ses
 
 
 @app.post("/aql-profile")
-def aql_profile_endpoint(req: TranslateRequest, session: _Session = Depends(_get_session)):
+def aql_profile_endpoint(
+    req: TranslateRequest,
+    _: None = Depends(_check_compute_rate_limit),
+    session: _Session = Depends(_get_session),
+):
     """Translate Cypher to AQL, execute with profiling, return runtime stats + results."""
     mapping = _mapping_from_dict(req.mapping)
     if mapping is None:
@@ -1110,6 +1166,7 @@ def _infer_edge_endpoints(
 def schema_introspect(
     sample: int = 50,
     force: bool = False,
+    _: None = Depends(_check_compute_rate_limit),
     session: _Session = Depends(_get_session),
 ):
     """Discover collections, edge collections, and their properties from the connected database.
@@ -1168,7 +1225,10 @@ def schema_properties(
 
 
 @app.get("/schema/summary")
-def schema_summary(req: TranslateRequest):
+def schema_summary(
+    req: TranslateRequest,
+    _: None = Depends(_check_compute_rate_limit),
+):
     """Return a structured summary of the mapping for the visual graph editor."""
     mapping = _mapping_from_dict(req.mapping)
     if mapping is None:
@@ -1179,6 +1239,7 @@ def schema_summary(req: TranslateRequest):
 
 @app.get("/schema/statistics")
 def schema_statistics(
+    _: None = Depends(_check_compute_rate_limit),
     session: _Session = Depends(_get_session),
 ):
     """Compute and return cardinality statistics for the connected database.
@@ -1295,7 +1356,10 @@ def schema_invalidate_cache(
 
 
 @app.post("/schema/force-reacquire")
-def schema_force_reacquire(session: _Session = Depends(_get_session)):
+def schema_force_reacquire(
+    _: None = Depends(_check_compute_rate_limit),
+    session: _Session = Depends(_get_session),
+):
     """Drop any cached mapping and rebuild from scratch via the analyzer.
 
     Operational tool for recovering from a poisoned cache: the previous
@@ -1389,7 +1453,10 @@ class ToolCallRequest(BaseModel):
 
 
 @app.post("/tools/call")
-def tools_call(req: ToolCallRequest):
+def tools_call(
+    req: ToolCallRequest,
+    _: None = Depends(_check_compute_rate_limit),
+):
     """Dispatch a tool call by name with arguments."""
     from .tools import call_tool
 
@@ -1401,7 +1468,10 @@ class SuggestIndexesRequest(BaseModel):
 
 
 @app.post("/suggest-indexes")
-def suggest_indexes(req: SuggestIndexesRequest):
+def suggest_indexes(
+    req: SuggestIndexesRequest,
+    _: None = Depends(_check_compute_rate_limit),
+):
     """Suggest indexes for the given mapping."""
     from .tools import suggest_indexes_tool
 
@@ -1713,7 +1783,10 @@ class OwlImportRequest(BaseModel):
 
 
 @app.post("/mapping/export-owl")
-def export_owl(req: OwlExportRequest):
+def export_owl(
+    req: OwlExportRequest,
+    _: None = Depends(_check_compute_rate_limit),
+):
     """Convert a mapping to OWL/Turtle format."""
     from arango_query_core.owl_turtle import mapping_to_turtle
 
@@ -1724,7 +1797,10 @@ def export_owl(req: OwlExportRequest):
 
 
 @app.post("/mapping/import-owl")
-def import_owl(req: OwlImportRequest):
+def import_owl(
+    req: OwlImportRequest,
+    _: None = Depends(_check_compute_rate_limit),
+):
     """Parse OWL/Turtle into a MappingBundle (as JSON)."""
     from arango_query_core.owl_turtle import turtle_to_mapping
 
