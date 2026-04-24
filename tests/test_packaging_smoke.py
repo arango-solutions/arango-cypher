@@ -20,10 +20,13 @@ Design notes
   so the real work is gated on ``RUN_PACKAGING=1`` plus the ``packaging``
   marker (skipped by default in ``pyproject.toml``'s markers config).
 * **Tests only the ``[service]`` extra**, matching what gets deployed
-  headlessly to the Arango Platform. ``[analyzer]`` is intentionally
-  excluded because ``arangodb-schema-analyzer`` is not yet published
-  (see ``docs/arango_packaging_service/deployment_runbook.md``). If that
-  extra ever becomes safe to include, add a second case to the test.
+  headlessly to the Arango Platform. As of
+  ``arangodb-schema-analyzer`` 0.6.0 (2026-04-23) that extra also
+  pulls the analyzer from PyPI, so this test now exercises the full
+  service-import chain end-to-end inside the clean venv (the
+  pre-0.6.0 packaging blocker tracked in PRD §15.1 is closed). If a
+  future ``[analyzer]``-only install path needs separate coverage,
+  add a second case here.
 * **Uses pip**, not ``uv``, for portability across runner images that may
   or may not have ``uv`` preinstalled. The question being answered —
   "does dependency resolution succeed in a clean environment" — is the

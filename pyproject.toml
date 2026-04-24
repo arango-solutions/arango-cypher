@@ -22,6 +22,15 @@ analyzer = [
   "arangodb-schema-analyzer>=0.6.0,<0.7.0",
 ]
 service = [
+  # As of arangodb-schema-analyzer 0.6.0 (2026-04-23) the analyzer is
+  # published to PyPI, so headless service installs (ServiceMaker /
+  # Container Manager / `pip install '.[service]'`) can resolve it
+  # without a private index. Required at module-load time by
+  # `arango_cypher.service` via `_require_analyzer_unless_opted_out`;
+  # without this pin the import errors out unless deployers manually
+  # set `ARANGO_CYPHER_ALLOW_HEURISTIC=1`. Pinned to the same band as
+  # the [analyzer] extra so the two stay in lockstep.
+  "arangodb-schema-analyzer>=0.6.0,<0.7.0",
   "typer>=0.9.0",
   "rich>=13.0.0",
 ]
