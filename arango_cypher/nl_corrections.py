@@ -27,8 +27,6 @@ never blocks a write.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import os
 import sqlite3
@@ -37,6 +35,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from arango_query_core import mapping_hash as _canonical_mapping_hash
 
 logger = logging.getLogger(__name__)
 
@@ -76,30 +76,16 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def _mapping_hash(mapping: dict[str, Any] | Any) -> str:
-    """Deterministic hash of the mapping for fingerprinting.
+    """Module-private alias for :func:`arango_query_core.mapping_hash`.
 
-    Mirrors :func:`arango_cypher.corrections._mapping_hash` so the two
-    stores share a single canonical fingerprint — a correction on the
-    same mapping is keyed identically regardless of which layer saved it
-    or which key spelling (snake_case vs. camelCase) the caller used.
+    See the twin in :mod:`arango_cypher.corrections` for the reason the
+    alias is retained: the canonical hash now lives in
+    :mod:`arango_query_core.mapping` so the two correction stores share
+    one source of truth. :mod:`tests.test_service_hardening` asserts on
+    this module attribute directly — keeping the alias avoids
+    re-pinning it in an adjacent PR.
     """
-    cs: Any
-    pm: Any
-    if hasattr(mapping, "conceptual_schema"):
-        cs = mapping.conceptual_schema
-        pm = mapping.physical_mapping
-    elif isinstance(mapping, dict):
-        cs = mapping.get("conceptual_schema")
-        if cs is None:
-            cs = mapping.get("conceptualSchema", {})
-        pm = mapping.get("physical_mapping")
-        if pm is None:
-            pm = mapping.get("physicalMapping", {})
-    else:
-        cs, pm = {}, {}
-    raw = {"cs": cs, "pm": pm}
-    blob = json.dumps(raw, sort_keys=True, default=str).encode()
-    return hashlib.sha256(blob).hexdigest()[:16]
+    return _canonical_mapping_hash(mapping)
 
 
 @dataclass

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from arango_query_core import CoreError, MappingBundle, MappingResolver
+from arango_query_core import CoreError, MappingBundle, MappingResolver, mapping_from_wire_dict
 
 from .api import get_cypher_profile, translate
 from .parser import parse_cypher
@@ -661,8 +661,10 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _dict_to_bundle(d: dict[str, Any]) -> MappingBundle:
-    return MappingBundle(
-        conceptual_schema=d.get("conceptualSchema") or d.get("conceptual_schema") or {},
-        physical_mapping=d.get("physicalMapping") or d.get("physical_mapping") or {},
-        metadata=d.get("metadata", {}),
-    )
+    """Tool-calling harness alias for :func:`mapping_from_wire_dict`.
+
+    No ``MappingSource`` attached — tool-calling payloads come from an
+    LLM and do not carry an audit-worthy provenance (unlike the HTTP
+    endpoint path in ``service.py``).
+    """
+    return mapping_from_wire_dict(d)

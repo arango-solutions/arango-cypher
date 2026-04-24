@@ -13,7 +13,7 @@ from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
 
-from arango_query_core import CoreError, MappingBundle, MappingSource
+from arango_query_core import CoreError, MappingBundle, MappingSource, mapping_from_wire_dict
 
 app = typer.Typer(
     name="arango-cypher-py",
@@ -52,10 +52,8 @@ def _load_mapping(
     if raw is None:
         return None
 
-    return MappingBundle(
-        conceptual_schema=raw.get("conceptual_schema") or raw.get("conceptualSchema", {}),
-        physical_mapping=raw.get("physical_mapping") or raw.get("physicalMapping", {}),
-        metadata=raw.get("metadata", {}),
+    return mapping_from_wire_dict(
+        raw,
         source=MappingSource(
             kind="explicit",
             notes=f"from {mapping_file}" if mapping_file else "inline JSON",
