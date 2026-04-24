@@ -408,7 +408,7 @@ Week 6:    Buffer / bug fixes from TCK runs
 
 **Goal:** Make this repo deployable to the Arango Platform via ServiceMaker + the Container Manager API, with the smallest possible change inside this repo.
 
-**Motivation:** See `docs/python_prd.md` §15. The only blocker is that our `[analyzer]` extra depends on `arangodb-schema-analyzer`, which is not published to any package index today — so `uv sync` fails inside the ServiceMaker build container. The decision in §15.1 is to fix this at the source (publish the analyzer) rather than build packaging tooling in this repo. That makes WP-19 a documentation + smoke-test effort here, with the actual packaging fix tracked upstream in `~/code/arango-schema-mapper`.
+**Motivation:** See `docs/python_prd.md` §15. The original blocker — `[analyzer]` depended on `arangodb-schema-analyzer`, which was not on any package index — was **resolved upstream on 2026-04-23** with the `0.6.0` release; the floor is now `>=0.6.1,<0.7` across `[analyzer]`, `[service]`, and `[dev]`, pinned via PR #8 on 2026-04-24. The decision in §15.1 (fix at the source, not inside this repo) stands, and with that fix now in place WP-19 is a pure documentation + smoke-test effort here: write the runbook, add a packaging smoke test, confirm the pin is published-only. No further upstream dependency.
 
 **Scope (must have):**
 
@@ -428,7 +428,7 @@ Week 6:    Buffer / bug fixes from TCK runs
    - Asserts `python -c "import arango_cypher.service"` succeeds inside that venv.
    This catches dependency-graph regressions that would break deployment without requiring a live platform.
 
-3. **`pyproject.toml` cleanup** — once `arangodb-schema-analyzer` is published upstream, pin it with a version specifier (`"arangodb-schema-analyzer>=X.Y.Z"`) in the `[analyzer]` extra. This WP lands after the publication.
+3. **`pyproject.toml` cleanup** — **done 2026-04-24 (PR #8).** `arangodb-schema-analyzer` is pinned as `>=0.6.1,<0.7` in `[analyzer]`, `[service]`, and `[dev]`. Three places because each extra is independently resolvable; a DRY refactor is tracked as a paper-cut item in the post-Wave-6a code-quality audit (§5 in the audit; separate from WP-19).
 
 **Scope (explicit non-goals):**
 
@@ -450,14 +450,14 @@ Week 6:    Buffer / bug fixes from TCK runs
 **Acceptance criteria:**
 
 1. The runbook document exists and a human following it end-to-end can deploy this repo to a staging Arango Platform without consulting external sources.
-2. `RUN_PACKAGING=1 pytest tests/integration/test_packaging_smoke.py` passes on a clean checkout (once `arangodb-schema-analyzer` publication lands).
-3. `pyproject.toml`'s `[analyzer]` extra pins a published version with no local-path or git references.
+2. `RUN_PACKAGING=1 pytest tests/integration/test_packaging_smoke.py` passes on a clean checkout. (Upstream publication dependency resolved 2026-04-23.)
+3. `pyproject.toml`'s `[analyzer]` extra pins a published version with no local-path or git references. *Done — pinned to `>=0.6.1,<0.7` as of 2026-04-24.*
 
-**Estimate:** 2-3 days in this repo, after the upstream analyzer publication. Runbook ~1 day, smoke test ~1 day, pyproject cleanup and verification ~0.5 day.
+**Estimate:** 2-3 days in this repo. Runbook ~1 day (done 2026-04-27 — see `docs/arango_packaging_service/deployment_runbook.md`), smoke test ~1 day (outstanding), pyproject cleanup ~0.5 day (done 2026-04-24 via PR #8).
 
 **Dependencies:**
 
-- **Upstream blocker:** `arangodb-schema-analyzer` must be published to PyPI (or the ArangoDB-internal package index, if one exists). Tracked in `~/code/arango-schema-mapper`, not in this repo. No useful work on WP-19 in this repo until that lands.
+- ~~**Upstream blocker:** `arangodb-schema-analyzer` must be published to PyPI.~~ **Resolved 2026-04-23** (analyzer `0.6.0` published; this repo bumped the floor to `0.6.1` in PR #8 on 2026-04-24).
 - Staging Arango Platform endpoint for runbook verification.
 
 **Related future work (out of scope for WP-19):**
@@ -935,7 +935,7 @@ Update this table as work packages are completed:
 | WP-16 | Datasets expansion | v0.3 | **Done** | 2026-04-13 |
 | WP-17 | NL-to-Cypher pipeline | v0.3 | **Done** | 2026-04-13 |
 | WP-18 | Index-aware transpilation | v0.3 | **Done** | 2026-04-13 |
-| WP-19 | Arango Platform deployment enablement | v0.4 | Blocked (upstream) | WP body above. Awaiting `arangodb-schema-analyzer` PyPI publication. |
+| WP-19 | Arango Platform deployment enablement | v0.4 | **Ready** (upstream dependency resolved 2026-04-23) | WP body above. Runbook landed 2026-04-27. Remaining: `tests/integration/test_packaging_smoke.py` (behind `RUN_PACKAGING=1`) and an end-to-end staging deploy to close acceptance criterion #1. |
 | WP-20 | Filter pushdown into traversals | v0.4 | **Done** | 2026-04-15 (WS-F/G sprint — PRUNE for variable-length, conservative rules). |
 | WP-26 | Translation caching (LRU, 256 entries) | v0.4 | **Done** | 2026-04-13. Originally tracked as WP-19; renumbered 2026-04-17 when WP-19 was reassigned to Arango Platform deployment enablement (PRD §15). |
 | WP-21 | List + pattern comprehensions | v0.4 | **Done** | 2026-04-13 |

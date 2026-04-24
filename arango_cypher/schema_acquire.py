@@ -1183,8 +1183,7 @@ def acquire_mapping_bundle(db: StandardDatabase, *, include_owl: bool = False) -
     except ImportError:
         raise ImportError(
             "arangodb-schema-analyzer is not installed. "
-            "Install it with: pip install arangodb-schema-analyzer  "
-            "or: pip install -e ~/code/arango-schema-mapper"
+            "Install it with: pip install 'arangodb-schema-analyzer>=0.6.1,<0.7'"
         ) from None
 
     analyzer = AgenticSchemaAnalyzer()

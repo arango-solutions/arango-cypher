@@ -86,7 +86,7 @@ The v0 translator supports:
 
 ### Requirements
 
-- Python 3.10+
+- Python 3.11+
 - An ArangoDB instance (local or remote) for integration tests
 
 ### Install
@@ -99,6 +99,8 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
+
+The `[service]`, `[analyzer]`, and `[dev]` extras pull `arangodb-schema-analyzer` (>=0.6.1, <0.7) directly from PyPI — the analyzer no longer requires a sibling dev checkout. The NL-prompt builder consumes the analyzer's `physicalLayout`, `physicalMapping.shardFamilies`, and `metadata.multitenancy.{style, tenantKey[], physicalEnforcement}` fields; the multi-tenant guardrail in `nl2cypher/tenant_scope.py` consumes `tenantScope.role` / `tenantScope.tenantField`.
 
 ### Usage
 
@@ -464,7 +466,7 @@ pytest
 
 ### Continuous integration
 
-- **`.github/workflows/ci.yml`** — ruff lint, unit tests on Python 3.10/3.11/3.12, integration tests against a CI-spun ArangoDB 3.11. Runs on every push / PR to `main`.
+- **`.github/workflows/ci.yml`** — ruff lint, unit tests on Python 3.11/3.12, integration tests against a CI-spun ArangoDB 3.11. Runs on every push / PR to `main`.
 - **`.github/workflows/nl2cypher-eval.yml`** — nightly NL → Cypher regression gate. Spins up ArangoDB 3.11, seeds the eval fixtures, then runs the live gate as a `strategy.matrix` of two provider rows:
   - `openai` → `gpt-4o-mini` → gates against [`tests/nl2cypher/eval/baseline.json`](tests/nl2cypher/eval/baseline.json)
   - `anthropic` → `claude-haiku-4-5` → gates against [`tests/nl2cypher/eval/baseline.anthropic.json`](tests/nl2cypher/eval/baseline.anthropic.json)

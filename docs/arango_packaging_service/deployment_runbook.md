@@ -8,33 +8,31 @@ The default platform deployment is **headless**: library + CLI + FastAPI endpoin
 
 ## Prerequisites (read before packaging)
 
-### 1. `arangodb-schema-analyzer` must be installable
+### 1. `arangodb-schema-analyzer` resolves from PyPI
 
-**This is the packaging blocker today** (PRD §15.1). The `[analyzer]` optional-dependency extra pulls in `arangodb-schema-analyzer`, which is not on any package index. Inside the ServiceMaker build container (no network to private indexes, no git auth), `uv sync` with the `analyzer` extra will fail with
+**This used to be the packaging blocker. It is no longer** (PRD §15.1). As of 2026-04-23 the analyzer is published to PyPI, and `pyproject.toml` pins the floor at `arangodb-schema-analyzer>=0.6.1,<0.7` across all three consumer extras (`[analyzer]`, `[service]`, `[dev]`). Inside the ServiceMaker build container, `uv sync --extra service` resolves the analyzer from the public index without any private-registry, git-auth, or vendored-wheel plumbing.
 
-```
-No matching distribution found for arangodb-schema-analyzer
-```
+If a deployment environment does not have outbound access to `pypi.org`, point `uv` at an internal mirror via `UV_INDEX_URL` / `UV_EXTRA_INDEX_URL` the same way every other PyPI-hosted runtime dependency is satisfied.
 
-There are two ways to unblock a deploy:
+**Historical escape hatch (still present, still supported for air-gapped / heuristic-only deploys):**
 
-1. **Recommended (permanent fix)** — publish `arangodb-schema-analyzer` to PyPI (or the ArangoDB internal PyPI mirror). Tracked in [`~/code/arango-schema-mapper`](https://github.com/). Once published, pin it in `pyproject.toml` (`arangodb-schema-analyzer>=<published-version>`) and proceed.
-2. **Interim (partial deploy)** — install *without* the `[analyzer]` extra. The analyzer powers the `/schema/introspect` route and the `arango-cypher-py mapping --strategy analyzer` CLI command (schema-from-live-DB generation). Every other code path — the Cypher→AQL transpiler, the NL→Cypher pipeline (WP-25), `/translate`, `/validate`, `/nl2cypher`, `/nl2aql` — works without it.
+- Install *without* the `[analyzer]` extra. The analyzer powers `/schema/introspect` and the `arango-cypher-py mapping --strategy analyzer` CLI. Every other code path — the Cypher→AQL transpiler, the NL→Cypher pipeline (WP-25), `/translate`, `/validate`, `/nl2cypher`, `/nl2aql` — works without it and falls back to the heuristic mapping tier when needed.
+- Operators who need the analyzer's precision without network access during build can generate mappings offline (with an analyzer-installed dev checkout) and POST them via the existing mapping endpoints:
 
-   Use this mode by *not* listing `analyzer` in the extras the build container installs. Operators who need the analyzer's precision can generate mappings offline (with an analyzer-installed dev checkout) and POST them via the existing mapping endpoints:
+  ```bash
+  # From a dev checkout with arangodb-schema-analyzer installed:
+  python -m arango_cypher.cli mapping --strategy analyzer --db <my-db> > precise_mapping.json
 
-   ```bash
-   # From a dev checkout with arangodb-schema-analyzer installed:
-   python -m arango_cypher.cli mapping --strategy analyzer --db <my-db> > precise_mapping.json
+  # Use this mapping in subsequent /translate calls or CLI operations.
+  ```
 
-   # Use this mapping in subsequent /translate calls or CLI operations.
-   ```
+- Setting `ARANGO_CYPHER_ALLOW_HEURISTIC=1` lets the service boot and serve `/translate` even if the analyzer import fails at runtime (see `.env.example`). Without that flag a failed analyzer import is treated as a hard startup error — desirable for production, opt-in for air-gapped / CI smoke environments.
 
-Do not switch the dependency to a `git+ssh://` URL — rejected in PRD §15.2 because it bakes SSH auth into the build container.
+Do not switch the dependency to a `git+ssh://` URL — rejected in PRD §15.2 because it bakes SSH auth into the build container, and unnecessary now that the analyzer is on PyPI.
 
 ### 2. Python and toolchain
 
-- `requires-python = ">=3.10"` in `pyproject.toml`. ServiceMaker's Python 3.11 / 3.12 runtime base images are both fine.
+- `requires-python = ">=3.11"` in `pyproject.toml`. ServiceMaker's Python 3.11 / 3.12 runtime base images are both fine; 3.10 is no longer supported (dropped 2026-04 alongside a `match`/`PEP 604`-typing sweep).
 - Build and dependency resolution use `uv` (platform default).
 
 ### 3. Required runtime environment

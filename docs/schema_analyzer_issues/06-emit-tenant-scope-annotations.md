@@ -206,4 +206,40 @@ on a collection that is in fact intentionally global).
   consumers' READMEs no longer need the disclaimer about deriving
   tenant roles.
 
+## Downstream adoption (2026-04-23)
+
+Shipped upstream in `arangodb-schema-analyzer v0.6.0` (mapper PR #17);
+floor in `arango-cypher-py` is now `>=0.6.1,<0.7` across the
+`[analyzer]`, `[service]`, and `[dev]` extras.
+
+Adoption in `arango-cypher-py`:
+
+* `arango_cypher/nl2cypher/tenant_scope.py::analyze_tenant_scope` reads
+  `tenantScope.role` (`TENANT_ROOT` / `TENANT_SCOPED` / `GLOBAL`) and
+  `tenantScope.tenantField` directly from each `entity` in the
+  physical mapping, and extends its discovery regex with the
+  `metadata.multitenancy.tenantKey[]` list from the upstream
+  classification. The manifest built from these annotations is the
+  primary authority for the per-label classification that
+  `check_tenant_scope` uses when deciding whether a denorm-field
+  filter satisfies the scope.
+* The local classification heuristic is retained as a back-compat
+  fallback for mappings produced by analyzers older than `0.6.x`
+  and for the heuristic mapping tier (which has no upstream
+  signals at all), in line with the
+  [`python_prd.md §5.2`](../python_prd.md#52-mapping-contract-we-will-consume)
+  "no workaround" policy — the workaround is the heuristic *tier*,
+  not a heuristic living on top of the analyzer output.
+* The adjacent signal `metadata.multitenancy.physicalEnforcement`
+  (PRD §6.2 bullet 4) is consumed by
+  `tenant_guardrail.multitenancy_physical_enforcement` to label
+  `TenantScopeViolation.physical_enforcement`, so log sinks can
+  distinguish data-leak-class violations (`False`, application
+  convention only) from translation-quality nits (`True`, physical
+  storage guarantees isolation regardless of the generated query).
+
+The adoption closes the drift risk flagged in `docs/python_prd.md`
+§5.2 where every downstream consumer was re-deriving the
+classification from the mapping.
+
 [cypher-py-impl]: https://github.com/ArthurKeen/arango-cypher-py/blob/main/arango_cypher/nl2cypher/tenant_scope.py

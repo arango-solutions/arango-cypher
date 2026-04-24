@@ -14,7 +14,7 @@
 ## Building and Running
 
 ### Prerequisites
-- Python 3.13 (Managed by `uv`)
+- Python 3.11+ (managed by `uv`; CI matrix 3.11 / 3.12)
 - Node.js 18+ (for UI development)
 - ArangoDB 3.11+
 

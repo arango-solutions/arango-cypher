@@ -6,6 +6,7 @@ Status: **Draft** (standalone document; to be merged into `python_prd.md` — se
 ### Changelog
 | Date | Changes |
 |------|---------|
+| 2026-04-27 | **Documented `metadata.multitenancy` + `physicalEnforcement` consumption (docs-only).** §3 extended with new §3.1 that specifies the `metadata.multitenancy` block shipped upstream in mapper PR #17 / analyzer `0.6.0` (style, `tenantKey[]`, `tenantKeyCollections`, `physicalEnforcement`, `evidence`), which fields the guardrail reads, how `physicalEnforcement` is used for log-triage labelling (data-leak vs. translation-quality) without being promoted to a Layer-5 gate, and the back-compat fallback for analyzers older than `0.6`. Added §3.2 summary table mapping each upstream metadata block (`tenantScope`, `shardingProfile`, `multitenancy`, `shardFamilies`) to the guardrail field that consumes it and the layer where that consumption happens. Closes the gap flagged in the post-Wave-6a code-quality audit where these signals were consumed by `tenant_guardrail.py` but not documented in the PRD. |
 | 2026-04-21 | Initial draft. Captures the six-layer tenant-safety architecture for ad-hoc NL queries against a disjoint-SmartGraph + satellite-collection multi-tenant schema. Supersedes no prior document; extends the existing tenant guardrail (`arango_cypher/nl2cypher/tenant_guardrail.py`, `tenant_scope.py`) with algorithmic AST rewriting and an EXPLAIN-plan gate. |
 
 ---
@@ -181,6 +182,65 @@ Adoption in this repo:
 - The Layer-5 EXPLAIN-plan validator (§7) will read `shardingProfile.style` once at session start: `OneShard` / `SatelliteGraph` ⇒ no shard-key enforcement; `DisjointSmartGraph` ⇒ hard-enforce; `SmartGraph` / `Sharded` ⇒ soft-enforce with warnings.
 
 The remaining `tenantScope.scopingPathFromTenant` item (BFS-derived edge path from `Tenant` to a scoped entity) is **not** yet covered upstream. It stays in this PRD as a separate work item (to be tracked when MT-1/5 lands) and remains a local computation on top of the upstream `tenantScope` annotation.
+
+### 3.1 Upstream `metadata.multitenancy` — database-level classification
+
+Alongside `metadata.shardingProfile` (which describes the cluster-physical story — sharding strategy, smart-graph attributes, per-collection kind), `arangodb-schema-analyzer >= 0.6.0` emits a separate `metadata.multitenancy` block that classifies the database's **multi-tenant deployment style**. Shipped in mapper PR #17 (upstream PRD §6.2 bullet 4), consumed locally since 2026-04-23.
+
+Shape:
+
+```jsonc
+{
+  "metadata": {
+    "multitenancy": {
+      "style": "disjoint_smartgraph" |
+               "shard_key" |
+               "discriminator_field" |
+               "collection_per_tenant" |
+               "database_per_tenant" |
+               "unknown_single_db" |
+               "none",
+      "tenantKey": ["TENANT_HEX_ID", "TENANT_ID", "tenantId"],
+      "tenantKeyCollections": ["Employee", "Device", "AppInstance", ...],
+      "physicalEnforcement": true | false,
+      "evidence": { "...opaque rationale for the classification..." }
+    }
+  }
+}
+```
+
+Field semantics used by the guardrail:
+
+| Field | Meaning | Consumer |
+|---|---|---|
+| `style` | One of seven categorical classifications. `none` means the analyzer found no tenancy signal at all (or saw only a single tenant); `unknown_single_db` means tenancy is present but the style could not be pinned. Any other value is a concrete deployment pattern. | `tenant_guardrail.multitenancy_physical_enforcement` treats `style in {none, absent}` as "no signal, fall back to heuristic / Layer 2". |
+| `tenantKey` | Ordered list of property names used to denormalise the tenant reference across collections (`TENANT_HEX_ID` first, fall-throughs after). | `tenant_scope.analyze_tenant_scope` extends its discovery regex with these names so a non-conventional tenant-column name is still recognised. |
+| `tenantKeyCollections` | Collections that carry a denormalised tenant column drawn from `tenantKey`. | Informational today; candidate signal for a future Layer 3 denorm-filter optimisation pass. |
+| `physicalEnforcement` | Whether the deployment's storage layer physically prevents cross-tenant reads. `True` for `disjoint_smartgraph` and `shard_key`; `False` for `discriminator_field`. `null` / absent for older analyzer versions or `style == "none"`. | `tenant_guardrail.TenantScopeViolation.physical_enforcement` surfaces this on every violation — `True` means a guardrail miss is a translation-quality concern (storage still blocks the leak), `False` / `None` means the guardrail is the only defense and a miss is a data-leak-class defect. |
+| `evidence` | Free-form blob with the analyzer's rationale (collections with shard keys, column-value entropy, etc.). | Logged at DEBUG for debugging the classification; never consumed programmatically. |
+
+**Why this is distinct from `tenantScope`.** `tenantScope` is a per-entity annotation (is `Employee` scoped? `GLOBAL`? `TENANT_ROOT`?) that drives per-query rewrite decisions; `metadata.multitenancy` is a per-database classification that drives per-session audit decisions. The two are complementary and are consumed in different layers:
+
+| Consumer | Reads | Layer |
+|---|---|---|
+| `nl2cypher/tenant_scope.py::analyze_tenant_scope` | `tenantScope.role`, `tenantScope.tenantField`, `metadata.multitenancy.tenantKey[]` | Layer 2 prompt + Layer 3 AST rewrite (future) |
+| `tenant_guardrail.multitenancy_physical_enforcement` | `metadata.multitenancy.style`, `metadata.multitenancy.physicalEnforcement` | Layer 2 postcheck violation label |
+| `schema_acquire.acquire_mapping_bundle` | `metadata.multitenancy.style` | INFO log on every acquisition |
+
+**`physicalEnforcement` is NOT a Layer 5 gate.** The guardrail surfaces the field on violations for log-triage purposes, but `physicalEnforcement=True` does **not** relax any of the Layer 3 / Layer 4 / Layer 5 checks — Layer 5 still refuses plans that scan a tenant-scoped collection without a bind-var tenant predicate, regardless of the underlying storage story. The reasoning is defence in depth: shard-key enforcement only covers scans through the graph; a direct `FOR d IN Employee` against the collection API still returns cross-tenant rows on a SmartGraph deployment. Disjoint-SmartGraph is the only style where storage alone would be sufficient, and even there we want the query-level refusal as a belt-and-suspenders signal for audit.
+
+**Back-compat for older analyzers.** When the bundle lacks `metadata.multitenancy` (analyzer < 0.6), the guardrail returns `None` and logs at DEBUG; callers treat the field as "no signal" and fall back to the `has_tenant_entity` heuristic plus Layer 2 prompt + postcheck. No hard error.
+
+### 3.2 Section summary — what each block gives the guardrail
+
+| Block | Scope | Field the guardrail reads | Purpose |
+|---|---|---|---|
+| `physicalMapping.entities[*].tenantScope` | Per-entity | `role`, `tenantField` | Classify each label referenced by a query as `TENANT_ROOT` / `TENANT_SCOPED` / `GLOBAL`; accept a denorm-field filter as scope satisfaction. |
+| `metadata.shardingProfile` | Per-database | `style`, per-collection `kind` | Surface a conceptual deployment hint to the LLM; drive the Layer-5 validator's sharding-vs-satellite branching. |
+| `metadata.multitenancy` | Per-database | `style`, `tenantKey[]`, `physicalEnforcement` | Extend tenant-column discovery with the upstream key list; label each violation as data-leak vs. translation-quality. |
+| `physicalMapping.shardFamilies` | Per-database | `members[]`, `discriminator`, `sharedProperties` | Render shard-family groupings into the LLM prompt (reduces the per-tenant-collection blowup in schema summaries). |
+
+All four blocks are consumed lazily — a missing block is silently treated as "no signal" and the guardrail falls back to the heuristic tier. No hard dependency on any single analyzer feature flag.
 
 [upstream-prd-62]: https://github.com/ArthurKeen/arango-schema-mapper/blob/main/docs/PRD.md
 [08-issue]: schema_analyzer_issues/08-emit-physical-layout-and-shard-topology.md
