@@ -17,6 +17,7 @@ CSV files expected (when using real data)::
     paradise_papers.nodes.address.csv
     paradise_papers.edges.csv
 """
+
 from __future__ import annotations
 
 import argparse
@@ -147,11 +148,41 @@ MAPPING = {
 # ── Sample data for testing (no real download needed) ────────────────
 
 SAMPLE_ENTITIES = [
-    {"_key": "e1", "name": "Acme Holdings Ltd", "jurisdiction": "BVI", "incorporation_date": "2005-03-15", "status": "Active"},
-    {"_key": "e2", "name": "Global Ventures Inc", "jurisdiction": "Panama", "incorporation_date": "2010-08-22", "status": "Active"},
-    {"_key": "e3", "name": "Oceanic Trust Corp", "jurisdiction": "Cayman Islands", "incorporation_date": "2007-01-10", "status": "Struck Off"},
-    {"_key": "e4", "name": "Pacific Trading Co", "jurisdiction": "BVI", "incorporation_date": "2012-06-01", "status": "Active"},
-    {"_key": "e5", "name": "Alpine Finance SA", "jurisdiction": "Switzerland", "incorporation_date": "2003-11-20", "status": "Active"},
+    {
+        "_key": "e1",
+        "name": "Acme Holdings Ltd",
+        "jurisdiction": "BVI",
+        "incorporation_date": "2005-03-15",
+        "status": "Active",
+    },
+    {
+        "_key": "e2",
+        "name": "Global Ventures Inc",
+        "jurisdiction": "Panama",
+        "incorporation_date": "2010-08-22",
+        "status": "Active",
+    },
+    {
+        "_key": "e3",
+        "name": "Oceanic Trust Corp",
+        "jurisdiction": "Cayman Islands",
+        "incorporation_date": "2007-01-10",
+        "status": "Struck Off",
+    },
+    {
+        "_key": "e4",
+        "name": "Pacific Trading Co",
+        "jurisdiction": "BVI",
+        "incorporation_date": "2012-06-01",
+        "status": "Active",
+    },
+    {
+        "_key": "e5",
+        "name": "Alpine Finance SA",
+        "jurisdiction": "Switzerland",
+        "incorporation_date": "2003-11-20",
+        "status": "Active",
+    },
 ]
 
 SAMPLE_OFFICERS = [
@@ -215,9 +246,7 @@ def seed_sample_data(db) -> dict[str, int]:
     edge_groups: dict[str, list] = {}
     for edge in SAMPLE_EDGES:
         coll_name = edge["_collection"]
-        edge_groups.setdefault(coll_name, []).append(
-            {"_from": edge["_from"], "_to": edge["_to"]}
-        )
+        edge_groups.setdefault(coll_name, []).append({"_from": edge["_from"], "_to": edge["_to"]})
 
     for coll_name, edges in edge_groups.items():
         coll = db.collection(coll_name)
@@ -292,10 +321,12 @@ def seed_from_csv(db, csv_dir: Path) -> dict[str, int]:
                 end_id = row.get("END_ID", row.get("node_id_end", ""))
                 if not start_id or not end_id:
                     continue
-                edge_batches[coll_name].append({
-                    "_from": f"Entity/{start_id}",
-                    "_to": f"Entity/{end_id}",
-                })
+                edge_batches[coll_name].append(
+                    {
+                        "_from": f"Entity/{start_id}",
+                        "_to": f"Entity/{end_id}",
+                    }
+                )
 
             for coll_name, edges in edge_batches.items():
                 if edges:

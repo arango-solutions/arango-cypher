@@ -16,4 +16,3 @@ def test_translate_with_then_match_cases_match_goldens(corpus_cases, case_id: st
     assert case.expected_aql is not None, "Golden AQL must be filled for with-then-match cases"
     assert out.aql.strip() == case.expected_aql.strip()
     assert out.bind_vars == case.expected_bind_vars
-

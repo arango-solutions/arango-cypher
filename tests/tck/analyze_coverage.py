@@ -11,6 +11,7 @@ Reports:
   - Skipped categories and reasons
   - Projected pass rate (full and core)
 """
+
 from __future__ import annotations
 
 import re
@@ -27,11 +28,13 @@ from tests.tck.runner import _build_mapping_for_scenario  # noqa: PLC2701
 
 _FEATURES_DIR = Path(__file__).resolve().parent / "features"
 
-_OUT_OF_SCOPE_CATS = frozenset({
-    "expressions/temporal",
-    "expressions/quantifier",
-    "clauses/call",
-})
+_OUT_OF_SCOPE_CATS = frozenset(
+    {
+        "expressions/temporal",
+        "expressions/quantifier",
+        "clauses/call",
+    }
+)
 
 _ERROR_STEP_PREFIXES = (
     "a SyntaxError should be raised",

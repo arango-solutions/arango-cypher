@@ -4,6 +4,7 @@ Unlike :mod:`owl_turtle` (which round-trips our own annotation convention),
 this module uses ``rdflib`` for robust parsing of arbitrary OWL/Turtle files
 produced by Protégé, TopBraid, or any standards-compliant OWL toolchain.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -26,8 +27,7 @@ def parse_owl_with_rdflib(turtle_text: str) -> MappingBundle:
         import rdflib
     except ImportError as e:
         raise ImportError(
-            "rdflib is required for OWL ingestion. "
-            "Install with: pip install arango-cypher-py[owl]"
+            "rdflib is required for OWL ingestion. Install with: pip install arango-cypher-py[owl]"
         ) from e
 
     g = rdflib.Graph()
@@ -69,12 +69,14 @@ def parse_owl_with_rdflib(turtle_text: str) -> MappingBundle:
         rel_name = _local_name(prop)
         domain = g.value(prop, RDFS.domain)
         range_ = g.value(prop, RDFS.range)
-        relationships.append({
-            "type": rel_name,
-            "fromEntity": _local_name(domain) if domain else "Any",
-            "toEntity": _local_name(range_) if range_ else "Any",
-            "properties": [],
-        })
+        relationships.append(
+            {
+                "type": rel_name,
+                "fromEntity": _local_name(domain) if domain else "Any",
+                "toEntity": _local_name(range_) if range_ else "Any",
+                "properties": [],
+            }
+        )
 
     # ── Physical mapping from phys: annotations ──────────────────────
     physical_entities: dict[str, dict[str, Any]] = {}

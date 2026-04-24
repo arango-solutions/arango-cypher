@@ -41,9 +41,9 @@ def _make_db(
 ) -> MagicMock:
     db = MagicMock()
     cols: list[dict[str, Any]] = []
-    for name in (doc_collections or []):
+    for name in doc_collections or []:
         cols.append({"name": name, "type": 2})
-    for name in (edge_collections or []):
+    for name in edge_collections or []:
         cols.append({"name": name, "type": 3})
     db.collections.return_value = cols
     docs_map = docs_by_collection or {}
@@ -143,9 +143,7 @@ class TestAttachWarning:
         rehydrated = bundle_from_doc(bundle_to_doc(augmented))
         assert rehydrated.metadata.get("warnings") == warnings
 
-        twice = _attach_warning(
-            augmented, code="OTHER", message="second warning"
-        )
+        twice = _attach_warning(augmented, code="OTHER", message="second warning")
         assert len(twice.metadata["warnings"]) == 2
         assert twice.metadata["warnings"][1] == {
             "code": "OTHER",
@@ -274,6 +272,7 @@ class TestGetMappingReacquires:
         # wrong reason.
         key = _cache_key(db)
         import time as _time
+
         _mapping_cache[key] = (cached, _time.time(), "mock-shape", "mock-full")
 
         with patch.dict("sys.modules", _mock_analyzer_modules()):
@@ -286,6 +285,4 @@ class TestGetMappingReacquires:
         assert fresh.source is not None
         assert fresh.source.kind == "schema_analyzer_export"
         fresh_warnings = (fresh.metadata or {}).get("warnings") or []
-        assert not any(
-            w.get("code") == "ANALYZER_NOT_INSTALLED" for w in fresh_warnings
-        )
+        assert not any(w.get("code") == "ANALYZER_NOT_INSTALLED" for w in fresh_warnings)

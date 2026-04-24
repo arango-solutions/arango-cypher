@@ -11,4 +11,3 @@ from tests.helpers.corpus import CorpusCase, load_all_cases
 def corpus_cases() -> list[CorpusCase]:
     cases_dir = Path(__file__).parent / "fixtures" / "cases"
     return load_all_cases(cases_dir)
-

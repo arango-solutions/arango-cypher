@@ -8,6 +8,7 @@ zero-shot baseline.
 
 These tests run fully offline — no LLM is ever invoked.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -38,12 +39,15 @@ def _rank_bm25_available() -> bool:
 def test_bm25_retriever_finds_similar_question() -> None:
     """With a tiny curated corpus, BM25 must surface the clearly-matching example."""
     examples = [
-        ("Who directed The Matrix?",
-         'MATCH (p:Person)-[:DIRECTED]->(m:Movie {title: "The Matrix"}) RETURN p.name'),
-        ("List all customers in Germany",
-         "MATCH (c:Customer) WHERE c.country = 'Germany' RETURN c.companyName"),
-        ("Show users older than 25",
-         "MATCH (u:User) WHERE u.age > 25 RETURN u.name"),
+        (
+            "Who directed The Matrix?",
+            'MATCH (p:Person)-[:DIRECTED]->(m:Movie {title: "The Matrix"}) RETURN p.name',
+        ),
+        (
+            "List all customers in Germany",
+            "MATCH (c:Customer) WHERE c.country = 'Germany' RETURN c.companyName",
+        ),
+        ("Show users older than 25", "MATCH (u:User) WHERE u.age > 25 RETURN u.name"),
     ]
     retriever = BM25Retriever(examples)
     top = retriever.retrieve("Who directed the film The Matrix", k=1)

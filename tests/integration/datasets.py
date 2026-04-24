@@ -10,7 +10,9 @@ from tests.integration.seed import _ensure_doc_collection, _ensure_edge_collecti
 logger = logging.getLogger(__name__)
 
 
-def _ensure_persistent_index(col: Any, fields: list[str], *, name: str | None = None, unique: bool = False) -> None:
+def _ensure_persistent_index(
+    col: Any, fields: list[str], *, name: str | None = None, unique: bool = False
+) -> None:
     """Create a persistent index if one covering the same fields does not exist."""
     existing = col.indexes()
     for idx in existing:
@@ -106,4 +108,3 @@ def seed_northwind_dataset(db: Any) -> None:
     _ensure_persistent_index(db.collection("products"), ["productName"], name="idx_products_name")
     _ensure_persistent_index(db.collection("orders"), ["orderDate"], name="idx_orders_date")
     _ensure_persistent_index(db.collection("categories"), ["categoryName"], name="idx_categories_name")
-

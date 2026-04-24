@@ -36,7 +36,7 @@ def test_validate_and_execute_roundtrip(arango_pytest_url: str):
     seed_social_dataset(db, mode="pg")
     mapping = mapping_bundle_for("pg")
 
-    cypher = 'MATCH (n:User) WHERE n.id = $id RETURN n.name AS name'
+    cypher = "MATCH (n:User) WHERE n.id = $id RETURN n.name AS name"
     v = validate_cypher_profile(cypher, mapping=mapping, params={"id": "u1"})
     assert v.ok, v.errors
 

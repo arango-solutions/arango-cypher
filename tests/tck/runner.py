@@ -23,11 +23,13 @@ from .normalize import parse_param_value, results_contain, results_match
 
 logger = logging.getLogger(__name__)
 
-_SKIP_TRANSLATE_CODES = frozenset({
-    "UNSUPPORTED",
-    "NOT_IMPLEMENTED",
-    "PARSE_ERROR",
-})
+_SKIP_TRANSLATE_CODES = frozenset(
+    {
+        "UNSUPPORTED",
+        "NOT_IMPLEMENTED",
+        "PARSE_ERROR",
+    }
+)
 
 _LABEL_RE = re.compile(r"(?<=[:(])([A-Z][A-Za-z0-9_]*)(?=[)\s:{,])")
 _REL_TYPE_RE = re.compile(r"\[:?\s*([A-Z][A-Z0-9_]*)[\s*\]{}]")
@@ -217,7 +219,7 @@ def _parse_cypher_props(prop_str: str) -> dict[str, Any]:
         if colon < 0:
             continue
         key = part[:colon].strip()
-        val_str = part[colon + 1:].strip()
+        val_str = part[colon + 1 :].strip()
         result[key] = _parse_cypher_value(val_str)
     return result
 
@@ -296,7 +298,7 @@ def _execute_create_directly(
     var_ids: dict[str, str] = {}
     anon_counter = 0
 
-    statements = re.split(r'\bCREATE\b', cypher, flags=re.IGNORECASE)
+    statements = re.split(r"\bCREATE\b", cypher, flags=re.IGNORECASE)
     for stmt in statements:
         stmt = stmt.strip()
         if not stmt:
@@ -526,8 +528,11 @@ def run_scenario(
         s = step.text
 
         if step.keyword in {"Given", "And"} and s in {
-            "an empty graph", "the empty graph", "any graph",
-            "an existing graph", "the existing graph",
+            "an empty graph",
+            "the empty graph",
+            "any graph",
+            "an existing graph",
+            "the existing graph",
         }:
             _reset_tck_graph(db)
             continue
@@ -570,13 +575,17 @@ def run_scenario(
             expect_ordered = False
             continue
 
-        if step.keyword in {"Then", "And"} and s.startswith("the result should be (ignoring element order for lists):"):
+        if step.keyword in {"Then", "And"} and s.startswith(
+            "the result should be (ignoring element order for lists):"
+        ):
             expected_rows = _parse_table(step.data_table)
             expect_ordered = False
             expect_ignoring_list_order = True
             continue
 
-        if step.keyword in {"Then", "And"} and s.startswith("the result should be, in order (ignoring element order for lists):"):
+        if step.keyword in {"Then", "And"} and s.startswith(
+            "the result should be, in order (ignoring element order for lists):"
+        ):
             expected_rows = _parse_table(step.data_table)
             expect_ordered = True
             expect_ignoring_list_order = True
@@ -662,7 +671,9 @@ def run_scenario(
 
     if expected_rows is not None:
         match, explanation = results_match(
-            rows, expected_rows, ordered=expect_ordered,
+            rows,
+            expected_rows,
+            ordered=expect_ordered,
         )
         if match:
             return ScenarioOutcome(status="passed")
@@ -670,7 +681,9 @@ def run_scenario(
 
     if expect_contains is not None:
         match, explanation = results_contain(
-            rows, expect_contains, ordered=expect_contains_ordered,
+            rows,
+            expect_contains,
+            ordered=expect_contains_ordered,
         )
         if match:
             return ScenarioOutcome(status="passed")
@@ -686,6 +699,7 @@ def run_feature(
     mapping_fixture: str,
 ) -> dict[str, Any]:
     from pathlib import Path
+
     path = Path(feature_path) if not isinstance(feature_path, Path) else feature_path
     feat: Feature = parse_feature(path)
     outcomes: list[ScenarioOutcome] = []

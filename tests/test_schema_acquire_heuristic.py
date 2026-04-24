@@ -119,10 +119,7 @@ class TestDetectTypeField:
         )
         notes: list[dict[str, Any]] = []
         assert _detect_type_field(db, col, notes_sink=notes) is None
-        assert any(
-            n["field"] == "label" and n["tier"] == 2 and "cardinality" in n["reason"]
-            for n in notes
-        )
+        assert any(n["field"] == "label" and n["tier"] == 2 and "cardinality" in n["reason"] for n in notes)
 
     def test_tier2_label_accepted_when_class_like(self):
         """Class-like label values below the cardinality cap are accepted."""
@@ -159,9 +156,7 @@ class TestDetectTypeField:
         """When both ``type`` and ``label`` cover ≥80% of sampled docs,
         the tier-1 ``type`` field is chosen regardless of ``label``'s shape."""
         col = "MixedDiscriminators"
-        sample_docs = [
-            {"type": "TypeA", "label": "Anything.rst", "k": i} for i in range(10)
-        ] + [
+        sample_docs = [{"type": "TypeA", "label": "Anything.rst", "k": i} for i in range(10)] + [
             {"type": "TypeB", "label": "Other.pdf", "k": i} for i in range(10)
         ]
         db = _make_heuristic_mock(
@@ -193,7 +188,7 @@ class TestDetectTypeField:
         bundle = _build_heuristic_mapping(db, "hybrid")
         entities = bundle.physical_mapping["entities"]
         assert len(entities) == 1
-        (label, pm), = entities.items()
+        ((label, pm),) = entities.items()
         assert pm["style"] == "COLLECTION"
         assert pm["collectionName"] == col
 
@@ -240,7 +235,7 @@ class TestBuildHeuristicMappingNotes:
         bundle = _build_heuristic_mapping(db, "hybrid")
         entities = bundle.physical_mapping["entities"]
         assert len(entities) == 1
-        (label, pm), = entities.items()
+        ((label, pm),) = entities.items()
         assert pm["style"] == "COLLECTION"
         assert "." not in label
 
@@ -249,9 +244,7 @@ class TestBuildHeuristicMappingNotes:
         173 rows and 2 distinct class-like ``type`` values produces two
         ``style=LABEL`` entities."""
         col = "nodes"
-        sample_docs = [{"type": "Person"} for _ in range(10)] + [
-            {"type": "Movie"} for _ in range(10)
-        ]
+        sample_docs = [{"type": "Person"} for _ in range(10)] + [{"type": "Movie"} for _ in range(10)]
         db = _make_heuristic_mock(
             doc_collections=[col],
             sample_docs_by_collection={col: sample_docs},

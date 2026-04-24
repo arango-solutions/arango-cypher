@@ -13,6 +13,7 @@ Usage::
         "mapping": {...},
     })
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -95,8 +96,7 @@ def translate_tool(request: dict[str, Any]) -> dict[str, Any]:
 SUGGEST_INDEXES_TOOL_SCHEMA = {
     "name": "suggest_indexes",
     "description": (
-        "Analyze a schema mapping and suggest ArangoDB indexes "
-        "that would improve query performance."
+        "Analyze a schema mapping and suggest ArangoDB indexes that would improve query performance."
     ),
     "parameters": {
         "type": "object",
@@ -145,17 +145,19 @@ def _analyze_indexes(bundle: MappingBundle) -> list[dict[str, Any]]:
             edge_coll = rmap.get("edgeCollectionName", "")
             type_field = rmap.get("typeField", "type")
             if not resolver.has_vci(rtype):
-                suggestions.append({
-                    "type": "persistent_index",
-                    "collection": edge_coll,
-                    "fields": [type_field],
-                    "reason": (
-                        f"Relationship '{rtype}' uses GENERIC_WITH_TYPE pattern. "
-                        f"A persistent index on '{type_field}' enables vertex-centric "
-                        f"filtering during traversals."
-                    ),
-                    "priority": "high",
-                })
+                suggestions.append(
+                    {
+                        "type": "persistent_index",
+                        "collection": edge_coll,
+                        "fields": [type_field],
+                        "reason": (
+                            f"Relationship '{rtype}' uses GENERIC_WITH_TYPE pattern. "
+                            f"A persistent index on '{type_field}' enables vertex-centric "
+                            f"filtering during traversals."
+                        ),
+                        "priority": "high",
+                    }
+                )
 
     entities = pm.get("entities", {})
     for ename, emap in entities.items():
@@ -166,16 +168,18 @@ def _analyze_indexes(bundle: MappingBundle) -> list[dict[str, Any]]:
 
         if style == "LABEL":
             type_field = emap.get("typeField", "type")
-            suggestions.append({
-                "type": "persistent_index",
-                "collection": coll,
-                "fields": [type_field],
-                "reason": (
-                    f"Entity '{ename}' uses LABEL style in collection '{coll}'. "
-                    f"An index on '{type_field}' speeds up type-based lookups."
-                ),
-                "priority": "medium",
-            })
+            suggestions.append(
+                {
+                    "type": "persistent_index",
+                    "collection": coll,
+                    "fields": [type_field],
+                    "reason": (
+                        f"Entity '{ename}' uses LABEL style in collection '{coll}'. "
+                        f"An index on '{type_field}' speeds up type-based lookups."
+                    ),
+                    "priority": "medium",
+                }
+            )
 
     for entity_def in cs.get("entities", []):
         ename = entity_def.get("name", "")
@@ -186,16 +190,17 @@ def _analyze_indexes(bundle: MappingBundle) -> list[dict[str, Any]]:
         for prop in entity_def.get("properties", []):
             pname = prop.get("name", "")
             if pname in ("name", "title", "email", "username", "key", "code", "id"):
-                suggestions.append({
-                    "type": "persistent_index",
-                    "collection": coll,
-                    "fields": [pname],
-                    "reason": (
-                        f"Property '{pname}' on '{ename}' is commonly used in "
-                        f"lookups and WHERE clauses."
-                    ),
-                    "priority": "medium",
-                })
+                suggestions.append(
+                    {
+                        "type": "persistent_index",
+                        "collection": coll,
+                        "fields": [pname],
+                        "reason": (
+                            f"Property '{pname}' on '{ename}' is commonly used in lookups and WHERE clauses."
+                        ),
+                        "priority": "medium",
+                    }
+                )
 
     return suggestions
 
@@ -207,8 +212,7 @@ def _analyze_indexes(bundle: MappingBundle) -> list[dict[str, Any]]:
 EXPLAIN_MAPPING_TOOL_SCHEMA = {
     "name": "explain_mapping",
     "description": (
-        "Explain how a Cypher label or relationship type maps to "
-        "ArangoDB collections and traversals."
+        "Explain how a Cypher label or relationship type maps to ArangoDB collections and traversals."
     ),
     "parameters": {
         "type": "object",
@@ -322,7 +326,8 @@ def propose_mapping_overrides_tool(request: dict[str, Any]) -> dict[str, Any]:
 
 
 def _analyze_mapping_overrides(
-    bundle: MappingBundle, context: str,
+    bundle: MappingBundle,
+    context: str,
 ) -> list[dict[str, Any]]:
     """Produce mapping override suggestions."""
     overrides: list[dict[str, Any]] = []
@@ -348,42 +353,42 @@ def _analyze_mapping_overrides(
             if style == "GENERIC_WITH_TYPE" and ec:
                 types_in_coll = edge_coll_types.get(ec, [])
                 if len(types_in_coll) == 1:
-                    overrides.append({
-                        "target": rtype,
-                        "kind": "relationship",
-                        "field": "style",
-                        "current": "GENERIC_WITH_TYPE",
-                        "suggested": "DEDICATED_COLLECTION",
-                        "rationale": (
-                            f"Edge collection '{ec}' contains only one relationship "
-                            f"type '{rtype}'. DEDICATED_COLLECTION avoids the "
-                            f"type-discriminator filter overhead."
-                        ),
-                    })
+                    overrides.append(
+                        {
+                            "target": rtype,
+                            "kind": "relationship",
+                            "field": "style",
+                            "current": "GENERIC_WITH_TYPE",
+                            "suggested": "DEDICATED_COLLECTION",
+                            "rationale": (
+                                f"Edge collection '{ec}' contains only one relationship "
+                                f"type '{rtype}'. DEDICATED_COLLECTION avoids the "
+                                f"type-discriminator filter overhead."
+                            ),
+                        }
+                    )
 
             domain = rmap.get("domain")
             range_ = rmap.get("range")
             if not domain or not range_:
-                overrides.append({
-                    "target": rtype,
-                    "kind": "relationship",
-                    "field": "domain/range",
-                    "current": f"domain={domain}, range={range_}",
-                    "suggested": "Specify explicit domain and range entities",
-                    "rationale": (
-                        f"Relationship '{rtype}' has missing domain or range. "
-                        f"Without these, IS_SAME_COLLECTION optimizations cannot "
-                        f"be applied."
-                    ),
-                })
+                overrides.append(
+                    {
+                        "target": rtype,
+                        "kind": "relationship",
+                        "field": "domain/range",
+                        "current": f"domain={domain}, range={range_}",
+                        "suggested": "Specify explicit domain and range entities",
+                        "rationale": (
+                            f"Relationship '{rtype}' has missing domain or range. "
+                            f"Without these, IS_SAME_COLLECTION optimizations cannot "
+                            f"be applied."
+                        ),
+                    }
+                )
 
     entities = pm.get("entities", {})
     if isinstance(entities, dict):
-        cs_entities = {
-            e.get("name", ""): e
-            for e in cs.get("entities", [])
-            if isinstance(e, dict)
-        }
+        cs_entities = {e.get("name", ""): e for e in cs.get("entities", []) if isinstance(e, dict)}
         for ename, emap in entities.items():
             if not isinstance(emap, dict):
                 continue
@@ -391,18 +396,20 @@ def _analyze_mapping_overrides(
             cs_props = cs_ent.get("properties", [])
             pm_props = emap.get("properties", {})
             if not cs_props and not pm_props:
-                overrides.append({
-                    "target": ename,
-                    "kind": "entity",
-                    "field": "properties",
-                    "current": "none",
-                    "suggested": "Add property definitions",
-                    "rationale": (
-                        f"Entity '{ename}' has no properties defined in either "
-                        f"the conceptual schema or physical mapping. This may "
-                        f"indicate incomplete schema introspection."
-                    ),
-                })
+                overrides.append(
+                    {
+                        "target": ename,
+                        "kind": "entity",
+                        "field": "properties",
+                        "current": "none",
+                        "suggested": "Add property definitions",
+                        "rationale": (
+                            f"Entity '{ename}' has no properties defined in either "
+                            f"the conceptual schema or physical mapping. This may "
+                            f"indicate incomplete schema introspection."
+                        ),
+                    }
+                )
 
         coll_labels: dict[str, list[str]] = {}
         for ename, emap in entities.items():
@@ -417,18 +424,20 @@ def _analyze_mapping_overrides(
         for key, labels in coll_labels.items():
             if len(labels) <= 2:
                 coll_name = key.split(":")[0]
-                overrides.append({
-                    "target": ", ".join(labels),
-                    "kind": "entity",
-                    "field": "style",
-                    "current": "LABEL (few types in shared collection)",
-                    "suggested": "Consider COLLECTION style with dedicated collections",
-                    "rationale": (
-                        f"Collection '{coll_name}' has only {len(labels)} "
-                        f"label(s) ({', '.join(labels)}). A dedicated collection "
-                        f"per entity may be simpler and faster."
-                    ),
-                })
+                overrides.append(
+                    {
+                        "target": ", ".join(labels),
+                        "kind": "entity",
+                        "field": "style",
+                        "current": "LABEL (few types in shared collection)",
+                        "suggested": "Consider COLLECTION style with dedicated collections",
+                        "rationale": (
+                            f"Collection '{coll_name}' has only {len(labels)} "
+                            f"label(s) ({', '.join(labels)}). A dedicated collection "
+                            f"per entity may be simpler and faster."
+                        ),
+                    }
+                )
 
     return overrides
 
@@ -499,20 +508,24 @@ def _build_explanation(
     for label in labels_found:
         if isinstance(entities, dict) and label in entities:
             emap = entities[label]
-            mappings_used.append({
-                "name": label,
-                "kind": "entity",
-                "collection": emap.get("collectionName", ""),
-                "style": emap.get("style", ""),
-            })
+            mappings_used.append(
+                {
+                    "name": label,
+                    "kind": "entity",
+                    "collection": emap.get("collectionName", ""),
+                    "style": emap.get("style", ""),
+                }
+            )
         elif isinstance(rels, dict) and label in rels:
             rmap = rels[label]
-            mappings_used.append({
-                "name": label,
-                "kind": "relationship",
-                "edgeCollection": rmap.get("edgeCollectionName", ""),
-                "style": rmap.get("style", ""),
-            })
+            mappings_used.append(
+                {
+                    "name": label,
+                    "kind": "relationship",
+                    "edgeCollection": rmap.get("edgeCollectionName", ""),
+                    "style": rmap.get("style", ""),
+                }
+            )
 
     aql = result.aql
     if "IS_SAME_COLLECTION" not in aql:
@@ -534,8 +547,7 @@ def _build_explanation(
                 rmap = rels[label]
                 if rmap.get("style") == "GENERIC_WITH_TYPE":
                     optimizations.append(
-                        f"Type discriminator filter added for GENERIC_WITH_TYPE "
-                        f"relationship '{label}'"
+                        f"Type discriminator filter added for GENERIC_WITH_TYPE relationship '{label}'"
                     )
 
     return {
@@ -659,6 +671,7 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _dict_to_bundle(d: dict[str, Any]) -> MappingBundle:
     """Tool-calling harness alias for :func:`mapping_from_wire_dict`.

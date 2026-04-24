@@ -1,4 +1,5 @@
 """Golden tests: verify all Northwind corpus queries translate without error."""
+
 from __future__ import annotations
 
 from pathlib import Path

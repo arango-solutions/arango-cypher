@@ -1,4 +1,5 @@
 """Tests for agentic tool wrappers (full suite)."""
+
 from __future__ import annotations
 
 import json
@@ -30,13 +31,16 @@ def _load_mapping(name: str) -> dict:
 # translate_tool
 # ---------------------------------------------------------------------------
 
+
 class TestTranslateTool:
     def test_basic_translation(self) -> None:
         mapping = _load_mapping("movies_pg")
-        result = translate_tool({
-            "cypher": "MATCH (p:Person) RETURN p.name",
-            "mapping": mapping,
-        })
+        result = translate_tool(
+            {
+                "cypher": "MATCH (p:Person) RETURN p.name",
+                "mapping": mapping,
+            }
+        )
         assert "error" not in result
         assert "FOR" in result["aql"]
         assert "RETURN" in result["aql"]
@@ -56,11 +60,13 @@ class TestTranslateTool:
 
     def test_with_params(self) -> None:
         mapping = _load_mapping("movies_pg")
-        result = translate_tool({
-            "cypher": "MATCH (p:Person) WHERE p.name = $name RETURN p",
-            "mapping": mapping,
-            "params": {"name": "Alice"},
-        })
+        result = translate_tool(
+            {
+                "cypher": "MATCH (p:Person) WHERE p.name = $name RETURN p",
+                "mapping": mapping,
+                "params": {"name": "Alice"},
+            }
+        )
         assert "error" not in result
         assert "name" in result["bind_vars"]
 
@@ -68,6 +74,7 @@ class TestTranslateTool:
 # ---------------------------------------------------------------------------
 # explain_mapping_tool
 # ---------------------------------------------------------------------------
+
 
 class TestExplainMapping:
     def test_explain_entity(self) -> None:
@@ -96,6 +103,7 @@ class TestExplainMapping:
 # ---------------------------------------------------------------------------
 # propose_mapping_overrides
 # ---------------------------------------------------------------------------
+
 
 class TestProposeMappingOverrides:
     def test_detects_single_type_generic(self) -> None:
@@ -193,13 +201,16 @@ class TestProposeMappingOverrides:
 # explain_translation
 # ---------------------------------------------------------------------------
 
+
 class TestExplainTranslation:
     def test_basic_explanation(self) -> None:
         mapping = _load_mapping("movies_pg")
-        result = explain_translation_tool({
-            "cypher": "MATCH (p:Person)-[:ACTED_IN]->(m:Movie) RETURN p.name, m.title",
-            "mapping": mapping,
-        })
+        result = explain_translation_tool(
+            {
+                "cypher": "MATCH (p:Person)-[:ACTED_IN]->(m:Movie) RETURN p.name, m.title",
+                "mapping": mapping,
+            }
+        )
         assert "error" not in result
         assert "aql" in result
         assert "bind_vars" in result
@@ -209,10 +220,12 @@ class TestExplainTranslation:
 
     def test_mappings_identified(self) -> None:
         mapping = _load_mapping("movies_pg")
-        result = explain_translation_tool({
-            "cypher": "MATCH (p:Person) RETURN p.name",
-            "mapping": mapping,
-        })
+        result = explain_translation_tool(
+            {
+                "cypher": "MATCH (p:Person) RETURN p.name",
+                "mapping": mapping,
+            }
+        )
         assert "error" not in result
         names = {m["name"] for m in result["mappings_used"]}
         assert "Person" in names
@@ -227,28 +240,31 @@ class TestExplainTranslation:
 
     def test_invalid_cypher(self) -> None:
         mapping = _load_mapping("movies_pg")
-        result = explain_translation_tool({
-            "cypher": "THIS IS NOT CYPHER!!!",
-            "mapping": mapping,
-        })
+        result = explain_translation_tool(
+            {
+                "cypher": "THIS IS NOT CYPHER!!!",
+                "mapping": mapping,
+            }
+        )
         assert "error" in result
 
     def test_lpg_generic_type_optimization(self) -> None:
         mapping = _load_mapping("movies_lpg")
-        result = explain_translation_tool({
-            "cypher": "MATCH (p:Person)-[:ACTED_IN]->(m:Movie) RETURN p.name",
-            "mapping": mapping,
-        })
-        assert "error" not in result
-        has_type_discriminator = any(
-            "GENERIC_WITH_TYPE" in o for o in result["optimizations"]
+        result = explain_translation_tool(
+            {
+                "cypher": "MATCH (p:Person)-[:ACTED_IN]->(m:Movie) RETURN p.name",
+                "mapping": mapping,
+            }
         )
+        assert "error" not in result
+        has_type_discriminator = any("GENERIC_WITH_TYPE" in o for o in result["optimizations"])
         assert has_type_discriminator
 
 
 # ---------------------------------------------------------------------------
 # validate_cypher
 # ---------------------------------------------------------------------------
+
 
 class TestValidateCypher:
     def test_valid_cypher(self) -> None:
@@ -257,9 +273,9 @@ class TestValidateCypher:
         assert "errors" not in result
 
     def test_valid_complex_cypher(self) -> None:
-        result = validate_cypher_tool({
-            "cypher": "MATCH (p:Person)-[:ACTED_IN]->(m:Movie) WHERE p.name = 'Tom' RETURN m.title"
-        })
+        result = validate_cypher_tool(
+            {"cypher": "MATCH (p:Person)-[:ACTED_IN]->(m:Movie) WHERE p.name = 'Tom' RETURN m.title"}
+        )
         assert result["valid"] is True
 
     def test_invalid_cypher(self) -> None:
@@ -279,6 +295,7 @@ class TestValidateCypher:
 # ---------------------------------------------------------------------------
 # schema_summary
 # ---------------------------------------------------------------------------
+
 
 class TestSchemaSummary:
     def test_pg_summary(self) -> None:
@@ -309,6 +326,7 @@ class TestSchemaSummary:
 # ---------------------------------------------------------------------------
 # Tool registry
 # ---------------------------------------------------------------------------
+
 
 class TestToolRegistry:
     ALL_TOOL_NAMES = {
@@ -347,10 +365,13 @@ class TestToolRegistry:
 
     def test_call_tool_dispatch_explain_translation(self) -> None:
         mapping = _load_mapping("movies_pg")
-        result = call_tool("explain_translation", {
-            "cypher": "MATCH (p:Person) RETURN p.name",
-            "mapping": mapping,
-        })
+        result = call_tool(
+            "explain_translation",
+            {
+                "cypher": "MATCH (p:Person) RETURN p.name",
+                "mapping": mapping,
+            },
+        )
         assert "aql" in result
 
     def test_call_unknown_tool(self) -> None:

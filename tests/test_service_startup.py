@@ -71,15 +71,10 @@ class TestImportTimeGuard:
         *new* FastAPI ``app`` instance, which would break every
         downstream test that imported the original app before us.
         """
-        names = [
-            name for name in list(sys.modules)
-            if name == "arango_cypher.service"
-        ]
+        names = [name for name in list(sys.modules) if name == "arango_cypher.service"]
         return names
 
-    def test_import_raises_when_analyzer_missing_and_no_opt_out(
-        self, monkeypatch
-    ):
+    def test_import_raises_when_analyzer_missing_and_no_opt_out(self, monkeypatch):
         monkeypatch.delenv("ARANGO_CYPHER_ALLOW_HEURISTIC", raising=False)
         removed = self._purge_service_modules()
         original = {name: sys.modules.pop(name) for name in removed}

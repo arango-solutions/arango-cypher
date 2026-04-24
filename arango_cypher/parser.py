@@ -38,4 +38,3 @@ def parse_cypher(cypher: str) -> ParseResult:
 
     tree = parser.oC_Cypher()
     return ParseResult(tree=tree)
-

@@ -52,9 +52,7 @@ class TestCORSMiddleware:
         )
         assert resp.status_code in (200, 204)
         allow = resp.headers.get("access-control-allow-origin", "")
-        assert allow in ("*", "http://localhost:5173"), (
-            f"CORS middleware not active: got {allow!r}"
-        )
+        assert allow in ("*", "http://localhost:5173"), f"CORS middleware not active: got {allow!r}"
 
     def test_actual_request_includes_cors_headers(self):
         client = TestClient(app)

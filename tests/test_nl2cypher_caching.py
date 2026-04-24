@@ -14,6 +14,7 @@ Covers:
 All tests run offline.  The OpenAI path is exercised via a mocked
 ``requests.post`` response — no network.
 """
+
 from __future__ import annotations
 
 import json
@@ -97,7 +98,8 @@ class TestCachedTokensPropagation:
                 }
 
         with patch(
-            "requests.post", return_value=_Resp(),
+            "requests.post",
+            return_value=_Resp(),
         ):
             content, usage = provider.generate("system", "user")
         assert content == "OK"
@@ -198,8 +200,7 @@ class TestAnthropicCacheControl:
     def test_split_with_examples_breakpoint(self) -> None:
         """Schema is cached; examples/resolved-entities form the uncached suffix."""
         system = (
-            "Prelude\n\nSCHEMA:\n  Node :Person\n\n"
-            "## Examples\nQ: who?\n```cypher\nMATCH (n) RETURN n\n```"
+            "Prelude\n\nSCHEMA:\n  Node :Person\n\n## Examples\nQ: who?\n```cypher\nMATCH (n) RETURN n\n```"
         )
         blocks = split_system_for_anthropic_cache(system)
         assert len(blocks) == 2
@@ -262,7 +263,8 @@ class TestAnthropicCacheControl:
 
         with patch("requests.post", side_effect=_capture):
             content, usage = provider.generate(
-                "Prelude\n\nSCHEMA\n\n## Examples\nQ: x", "user question",
+                "Prelude\n\nSCHEMA\n\n## Examples\nQ: x",
+                "user question",
             )
 
         assert content == "MATCH (n) RETURN n"
@@ -361,7 +363,8 @@ class TestProviderResolution:
     """get_llm_provider should resolve Anthropic via explicit and auto-detect paths."""
 
     def test_explicit_anthropic_with_key_returns_anthropic_provider(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from arango_cypher.nl2cypher import get_llm_provider
 
@@ -374,7 +377,8 @@ class TestProviderResolution:
         assert provider.api_key == "ak"
 
     def test_explicit_anthropic_without_key_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from arango_cypher.nl2cypher import get_llm_provider
 
@@ -383,7 +387,8 @@ class TestProviderResolution:
         assert get_llm_provider() is None
 
     def test_autodetect_falls_back_to_anthropic_when_only_anthropic_key_set(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from arango_cypher.nl2cypher import get_llm_provider
 
@@ -395,7 +400,8 @@ class TestProviderResolution:
         assert isinstance(provider, AnthropicProvider)
 
     def test_autodetect_prefers_openai_over_anthropic(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """OpenAI wins on auto-detect because the eval gate baseline is calibrated to it."""
         from arango_cypher.nl2cypher import OpenAIProvider, get_llm_provider
@@ -430,8 +436,7 @@ class TestAnthropicLiveSmoke:
         _, usage1 = provider.generate(system, user)
         _, usage2 = provider.generate(system, user)
         assert usage2["cached_tokens"] > 0, (
-            f"expected cache hit on second request, got usage={usage2}; "
-            f"first request usage was {usage1}"
+            f"expected cache hit on second request, got usage={usage2}; first request usage was {usage1}"
         )
 
 

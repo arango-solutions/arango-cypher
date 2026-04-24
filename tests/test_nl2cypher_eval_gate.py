@@ -11,6 +11,7 @@ Two concerns:
    ``RUN_NL2CYPHER_EVAL=1`` — it requires a live LLM and a committed
    ``baseline.json``.  In the standard unit-test run it is skipped.
 """
+
 from __future__ import annotations
 
 import json
@@ -97,6 +98,7 @@ class TestPatternMatchLogic:
     def test_pattern_match_all_required(self) -> None:
         """All declared patterns must match — ANY-style would over-accept."""
         from tests.nl2cypher.eval.runner import _pattern_match
+
         assert _pattern_match(
             'MATCH (p:Person {name: "Tom Hanks"})-[:ACTED_IN]->(m:Movie) RETURN m',
             [r"(?is)MATCH.*Person.*Tom Hanks", r"(?is)ACTED_IN.*Movie"],
@@ -108,10 +110,12 @@ class TestPatternMatchLogic:
 
     def test_pattern_match_invalid_regex_treated_as_fail(self) -> None:
         from tests.nl2cypher.eval.runner import _pattern_match
+
         assert not _pattern_match("MATCH (n) RETURN n", ["("])
 
     def test_empty_patterns_vacuously_match(self) -> None:
         from tests.nl2cypher.eval.runner import _pattern_match
+
         assert _pattern_match("anything", [])
 
 
@@ -136,16 +140,12 @@ class TestRunner:
                 category="baseline",
             ),
         ]
-        provider = _ScriptedProvider({
-            "tom hanks": (
-                'MATCH (p:Person {name: "Tom Hanks"})-[:ACTED_IN]->(m:Movie) '
-                'RETURN m.title'
-            ),
-            "matrix": (
-                'MATCH (p:Person)-[:DIRECTED]->(m:Movie {title: "The Matrix"}) '
-                'RETURN p.name'
-            ),
-        })
+        provider = _ScriptedProvider(
+            {
+                "tom hanks": ('MATCH (p:Person {name: "Tom Hanks"})-[:ACTED_IN]->(m:Movie) RETURN m.title'),
+                "matrix": ('MATCH (p:Person)-[:DIRECTED]->(m:Movie {title: "The Matrix"}) RETURN p.name'),
+            }
+        )
         report: Report = run_eval(
             config={"name": "test", "use_fewshot": False, "use_entity_resolution": False},
             provider=provider,
@@ -168,9 +168,11 @@ class TestRunner:
                 category="typo",
             ),
         ]
-        provider = _ScriptedProvider({
-            "forest gump": 'MATCH (m:Movie {title: "Forest Gump"}) RETURN m',
-        })
+        provider = _ScriptedProvider(
+            {
+                "forest gump": 'MATCH (m:Movie {title: "Forest Gump"}) RETURN m',
+            }
+        )
         report = run_eval(
             config={"name": "zero", "use_fewshot": False, "use_entity_resolution": False},
             provider=provider,
@@ -186,13 +188,15 @@ class TestRunner:
             def generate(self, system: str, user: str) -> tuple[str, dict[str, int]]:
                 raise RuntimeError("LLM unreachable")
 
-        cases = [EvalCase(
-            id="err",
-            mapping_fixture="movies_pg",
-            question="anything",
-            expected_patterns=[],
-            category="baseline",
-        )]
+        cases = [
+            EvalCase(
+                id="err",
+                mapping_fixture="movies_pg",
+                question="anything",
+                expected_patterns=[],
+                category="baseline",
+            )
+        ]
         report = run_eval(
             config={"name": "x", "use_fewshot": False, "use_entity_resolution": False},
             provider=_BoomProvider(),
@@ -268,9 +272,7 @@ def _gate_ok(baseline: dict, fresh: dict) -> bool:
         return False
     if baseline["pattern_match_rate"] - fresh["pattern_match_rate"] > 0.05:
         return False
-    if baseline["tokens_mean"] > 0 and (
-        fresh["tokens_mean"] / baseline["tokens_mean"] > 1.20
-    ):
+    if baseline["tokens_mean"] > 0 and (fresh["tokens_mean"] / baseline["tokens_mean"] > 1.20):
         return False
     if fresh["retries_mean"] - baseline["retries_mean"] > 0.3:
         return False
@@ -306,8 +308,7 @@ def test_gate_against_baseline() -> None:
     provider = get_llm_provider()
     if provider is None:
         pytest.skip(
-            "no LLM provider configured "
-            "(set OPENAI_API_KEY, OPENROUTER_API_KEY, or ANTHROPIC_API_KEY)",
+            "no LLM provider configured (set OPENAI_API_KEY, OPENROUTER_API_KEY, or ANTHROPIC_API_KEY)",
         )
 
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
@@ -319,6 +320,7 @@ def test_gate_against_baseline() -> None:
     db_for_fixture: dict = {}
     if os.environ.get("NL2CYPHER_EVAL_USE_DB") == "1":
         from tests.nl2cypher.eval.runner import open_eval_db_handles
+
         db_for_fixture = open_eval_db_handles()
 
     report = run_eval(
@@ -353,21 +355,24 @@ class TestBaselinePerProviderLookup:
         assert path.name == "baseline.json"
 
     def test_openai_resolves_to_default_baseline(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """openai (gate reference) keeps the unqualified baseline filename."""
         monkeypatch.setenv("NL2CYPHER_EVAL_PROVIDER", "openai")
         assert _baseline_path_for_provider().name == "baseline.json"
 
     def test_openrouter_falls_through_to_default(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """OpenRouter is OpenAI-compatible, so it reuses baseline.json."""
         monkeypatch.setenv("NL2CYPHER_EVAL_PROVIDER", "openrouter")
         assert _baseline_path_for_provider().name == "baseline.json"
 
     def test_anthropic_resolves_to_anthropic_baseline(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """anthropic must gate against baseline.anthropic.json, not baseline.json."""
         monkeypatch.setenv("NL2CYPHER_EVAL_PROVIDER", "anthropic")
@@ -404,22 +409,37 @@ class TestRunnerDbPlumbing:
         def _fake_nl_to_cypher(question: str, **kwargs):  # noqa: ARG001
             captured.append(kwargs.get("db"))
             from arango_cypher.nl2cypher import NL2CypherResult
+
             return NL2CypherResult(cypher="MATCH (n) RETURN n", source="llm")
 
         case_movies = EvalCase(
-            id="m", mapping_fixture="movies_pg",
-            question="x", expected_patterns=[], category="baseline",
+            id="m",
+            mapping_fixture="movies_pg",
+            question="x",
+            expected_patterns=[],
+            category="baseline",
         )
         case_nw = EvalCase(
-            id="n", mapping_fixture="northwind_pg",
-            question="y", expected_patterns=[], category="baseline",
+            id="n",
+            mapping_fixture="northwind_pg",
+            question="y",
+            expected_patterns=[],
+            category="baseline",
         )
         cfg = {"name": "full", "use_entity_resolution": True, "use_execution_grounded": True}
         with patch("tests.nl2cypher.eval.runner.nl_to_cypher", side_effect=_fake_nl_to_cypher):
-            run_case(case_movies, provider=None, config=cfg,
-                     db_for_fixture={"movies_pg": movies_db, "northwind_pg": northwind_db})
-            run_case(case_nw, provider=None, config=cfg,
-                     db_for_fixture={"movies_pg": movies_db, "northwind_pg": northwind_db})
+            run_case(
+                case_movies,
+                provider=None,
+                config=cfg,
+                db_for_fixture={"movies_pg": movies_db, "northwind_pg": northwind_db},
+            )
+            run_case(
+                case_nw,
+                provider=None,
+                config=cfg,
+                db_for_fixture={"movies_pg": movies_db, "northwind_pg": northwind_db},
+            )
 
         assert captured == [movies_db, northwind_db]
 
@@ -434,11 +454,15 @@ class TestRunnerDbPlumbing:
         def _fake_nl_to_cypher(question: str, **kwargs):  # noqa: ARG001
             captured.append(kwargs.get("db"))
             from arango_cypher.nl2cypher import NL2CypherResult
+
             return NL2CypherResult(cypher="MATCH (n) RETURN n", source="llm")
 
         case = EvalCase(
-            id="x", mapping_fixture="movies_pg",
-            question="q", expected_patterns=[], category="baseline",
+            id="x",
+            mapping_fixture="movies_pg",
+            question="q",
+            expected_patterns=[],
+            category="baseline",
         )
         cfg = {"name": "full", "use_entity_resolution": True, "use_execution_grounded": True}
         with patch("tests.nl2cypher.eval.runner.nl_to_cypher", side_effect=_fake_nl_to_cypher):
@@ -458,11 +482,15 @@ class TestRunnerDbPlumbing:
         def _fake_nl_to_cypher(question: str, **kwargs):  # noqa: ARG001
             captured.append(kwargs.get("db"))
             from arango_cypher.nl2cypher import NL2CypherResult
+
             return NL2CypherResult(cypher="MATCH (n) RETURN n", source="llm")
 
         case = EvalCase(
-            id="x", mapping_fixture="movies_pg",
-            question="q", expected_patterns=[], category="baseline",
+            id="x",
+            mapping_fixture="movies_pg",
+            question="q",
+            expected_patterns=[],
+            category="baseline",
         )
         cfg = {"name": "full", "use_entity_resolution": True, "use_execution_grounded": True}
         with patch("tests.nl2cypher.eval.runner.nl_to_cypher", side_effect=_fake_nl_to_cypher):
@@ -484,11 +512,15 @@ class TestRunnerDbPlumbing:
         def _fake_nl_to_cypher(question: str, **kwargs):  # noqa: ARG001
             captured.append(kwargs.get("db"))
             from arango_cypher.nl2cypher import NL2CypherResult
+
             return NL2CypherResult(cypher="MATCH (n) RETURN n", source="llm")
 
         case = EvalCase(
-            id="x", mapping_fixture="movies_pg",
-            question="q", expected_patterns=[], category="baseline",
+            id="x",
+            mapping_fixture="movies_pg",
+            question="q",
+            expected_patterns=[],
+            category="baseline",
         )
         cfg = {
             "name": "few_shot_plus_entity",
@@ -497,8 +529,7 @@ class TestRunnerDbPlumbing:
             "use_execution_grounded": False,
         }
         with patch("tests.nl2cypher.eval.runner.nl_to_cypher", side_effect=_fake_nl_to_cypher):
-            run_case(case, provider=None, config=cfg,
-                     db_for_fixture={"movies_pg": my_db})
+            run_case(case, provider=None, config=cfg, db_for_fixture={"movies_pg": my_db})
 
         assert captured == [my_db]
 
@@ -514,11 +545,15 @@ class TestRunnerDbPlumbing:
         def _fake_nl_to_cypher(question: str, **kwargs):  # noqa: ARG001
             captured.append(kwargs.get("db"))
             from arango_cypher.nl2cypher import NL2CypherResult
+
             return NL2CypherResult(cypher="MATCH (n) RETURN n", source="llm")
 
         case = EvalCase(
-            id="x", mapping_fixture="movies_pg",
-            question="q", expected_patterns=[], category="baseline",
+            id="x",
+            mapping_fixture="movies_pg",
+            question="q",
+            expected_patterns=[],
+            category="baseline",
         )
         cfg = {
             "name": "zero_shot",
@@ -527,8 +562,7 @@ class TestRunnerDbPlumbing:
             "use_execution_grounded": False,
         }
         with patch("tests.nl2cypher.eval.runner.nl_to_cypher", side_effect=_fake_nl_to_cypher):
-            run_case(case, provider=None, config=cfg,
-                     db_for_fixture={"movies_pg": my_db})
+            run_case(case, provider=None, config=cfg, db_for_fixture={"movies_pg": my_db})
 
         assert captured == [None]
 
@@ -537,7 +571,8 @@ class TestOpenEvalDbHandles:
     """The env-var-driven DB connection helper."""
 
     def test_no_arango_url_returns_empty(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from tests.nl2cypher.eval.runner import open_eval_db_handles
 
@@ -545,7 +580,8 @@ class TestOpenEvalDbHandles:
         assert open_eval_db_handles() == {}
 
     def test_per_fixture_env_override(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """``NL2CYPHER_EVAL_<FIXTURE>_DB`` overrides the default name."""
         from tests.nl2cypher.eval.runner import _fixture_db_name
@@ -554,7 +590,8 @@ class TestOpenEvalDbHandles:
         assert _fixture_db_name("movies_pg") == "my_movies_db"
 
     def test_unknown_fixture_returns_none(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from tests.nl2cypher.eval.runner import _fixture_db_name
 

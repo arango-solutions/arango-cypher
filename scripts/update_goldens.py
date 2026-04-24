@@ -7,6 +7,7 @@ key order, comments, blank lines).
 Usage:
     python scripts/update_goldens.py CXXX [CYYY ...]
 """
+
 from __future__ import annotations
 
 import re
@@ -35,9 +36,33 @@ def _detect_indent(case_block: str) -> int:
 
 _PLAIN_SCALAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_./@-]*$")
 _RESERVED_PLAIN = {
-    "y", "Y", "yes", "Yes", "YES", "n", "N", "no", "No", "NO",
-    "true", "True", "TRUE", "false", "False", "FALSE",
-    "on", "On", "ON", "off", "Off", "OFF", "null", "Null", "NULL", "~", "",
+    "y",
+    "Y",
+    "yes",
+    "Yes",
+    "YES",
+    "n",
+    "N",
+    "no",
+    "No",
+    "NO",
+    "true",
+    "True",
+    "TRUE",
+    "false",
+    "False",
+    "FALSE",
+    "on",
+    "On",
+    "ON",
+    "off",
+    "Off",
+    "OFF",
+    "null",
+    "Null",
+    "NULL",
+    "~",
+    "",
 }
 
 
@@ -50,11 +75,7 @@ def _format_bind_value(value: object) -> str:
     if isinstance(value, (int, float)):
         return str(value)
     if isinstance(value, str):
-        if (
-            value
-            and value not in _RESERVED_PLAIN
-            and _PLAIN_SCALAR_RE.match(value)
-        ):
+        if value and value not in _RESERVED_PLAIN and _PLAIN_SCALAR_RE.match(value):
             return value
         return yaml.safe_dump(value, default_style='"').strip()
     return yaml.safe_dump(value, default_flow_style=True).strip()
@@ -98,7 +119,7 @@ def _replace_case_aql(
         body_indent = " " * (aql_indent + 2)
         body = "".join(body_indent + line + "\n" for line in new_aql.splitlines())
         new_block = bm.group(1) + body
-        case_block = case_block[: bm.start()] + new_block + case_block[bm.end():]
+        case_block = case_block[: bm.start()] + new_block + case_block[bm.end() :]
     else:
         quoted_re = re.compile(
             rf"^([ \t]{{{aql_indent}}}aql:\s*)(\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*')(\s*\n)",
@@ -107,15 +128,11 @@ def _replace_case_aql(
         qm = quoted_re.search(case_block)
         if not qm:
             return text, False
-        escaped = (
-            new_aql.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
-        )
+        escaped = new_aql.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
         if not escaped.endswith("\\n"):
             escaped += "\\n"
         case_block = (
-            case_block[: qm.start()]
-            + qm.group(1) + f"\"{escaped}\"" + qm.group(3)
-            + case_block[qm.end():]
+            case_block[: qm.start()] + qm.group(1) + f'"{escaped}"' + qm.group(3) + case_block[qm.end() :]
         )
 
     # Replace the bind_vars block (mapping under expected:).
@@ -127,13 +144,12 @@ def _replace_case_aql(
     if bvm:
         item_indent = " " * (aql_indent + 2)
         body_lines = [
-            f"{item_indent}{_format_bind_key(k)}: {_format_bind_value(v)}\n"
-            for k, v in new_bind_vars.items()
+            f"{item_indent}{_format_bind_key(k)}: {_format_bind_value(v)}\n" for k, v in new_bind_vars.items()
         ]
         body = "".join(body_lines)
-        case_block = case_block[: bvm.start()] + bvm.group(1) + body + case_block[bvm.end():]
+        case_block = case_block[: bvm.start()] + bvm.group(1) + body + case_block[bvm.end() :]
 
-    return text[: m.start()] + case_block + text[m.end():], True
+    return text[: m.start()] + case_block + text[m.end() :], True
 
 
 def update_case_ids(case_ids: set[str]) -> None:

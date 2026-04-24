@@ -112,4 +112,3 @@ def arango_pytest_url() -> str:
     yield url
 
     subprocess.run(down, cwd=root, capture_output=True, text=True)
-

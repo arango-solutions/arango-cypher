@@ -1,4 +1,5 @@
 """Integration tests for the Northwind e-commerce dataset."""
+
 from __future__ import annotations
 
 import os

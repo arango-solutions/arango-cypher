@@ -1,4 +1,5 @@
 """Golden tests for regex =~ support and SET comma-separated properties."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -19,6 +20,4 @@ def test_regex_and_set_comma(case: dict) -> None:
     out = translate(case["cypher"], mapping=mapping)
 
     for fragment in case.get("expect_aql_contains", []):
-        assert fragment in out.aql, (
-            f"[{case['id']}] expected {fragment!r} in AQL:\n{out.aql}"
-        )
+        assert fragment in out.aql, f"[{case['id']}] expected {fragment!r} in AQL:\n{out.aql}"

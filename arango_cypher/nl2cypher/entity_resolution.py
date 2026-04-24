@@ -18,6 +18,7 @@ The module degrades gracefully when no ``db`` handle is configured —
 :meth:`EntityResolver.resolve` returns ``[]`` and the prompt reverts
 to its pre-WP-25.2 shape.
 """
+
 from __future__ import annotations
 
 import logging
@@ -52,23 +53,104 @@ on boolean/numeric columns.
 """
 
 
-_STOPWORDS: frozenset[str] = frozenset({
-    "a", "an", "the", "and", "or", "but", "is", "are", "was", "were",
-    "in", "on", "at", "of", "to", "from", "with", "by", "for", "as",
-    "who", "what", "when", "where", "why", "how", "which", "that",
-    "all", "any", "some", "each", "every", "both", "find", "list",
-    "show", "get", "return", "count", "how many", "give me", "tell me",
-    "i", "me", "my", "we", "our", "you", "your",
-})
+_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "but",
+        "is",
+        "are",
+        "was",
+        "were",
+        "in",
+        "on",
+        "at",
+        "of",
+        "to",
+        "from",
+        "with",
+        "by",
+        "for",
+        "as",
+        "who",
+        "what",
+        "when",
+        "where",
+        "why",
+        "how",
+        "which",
+        "that",
+        "all",
+        "any",
+        "some",
+        "each",
+        "every",
+        "both",
+        "find",
+        "list",
+        "show",
+        "get",
+        "return",
+        "count",
+        "how many",
+        "give me",
+        "tell me",
+        "i",
+        "me",
+        "my",
+        "we",
+        "our",
+        "you",
+        "your",
+    }
+)
 
 
-_SENTENCE_INITIAL_FILLERS: frozenset[str] = frozenset({
-    "did", "does", "do", "has", "have", "had", "is", "are", "was", "were",
-    "can", "could", "should", "would", "will", "shall", "may", "might",
-    "who", "what", "when", "where", "why", "how", "which", "that",
-    "find", "list", "show", "get", "return", "count", "give", "tell",
-    "please", "let", "i", "we",
-})
+_SENTENCE_INITIAL_FILLERS: frozenset[str] = frozenset(
+    {
+        "did",
+        "does",
+        "do",
+        "has",
+        "have",
+        "had",
+        "is",
+        "are",
+        "was",
+        "were",
+        "can",
+        "could",
+        "should",
+        "would",
+        "will",
+        "shall",
+        "may",
+        "might",
+        "who",
+        "what",
+        "when",
+        "where",
+        "why",
+        "how",
+        "which",
+        "that",
+        "find",
+        "list",
+        "show",
+        "get",
+        "return",
+        "count",
+        "give",
+        "tell",
+        "please",
+        "let",
+        "i",
+        "we",
+    }
+)
 """Lowercased function words that, when they appear sentence-initial and get
 auto-capitalized by convention, should NOT be treated as entity mentions.
 
@@ -134,9 +216,7 @@ class EntityResolver:
         self.fuzzy_threshold = fuzzy_threshold
         self._cache: dict[tuple[int, str], list[ResolvedEntity]] = {}
         self._schema_labels: set[str] = self._collect_schema_labels(mapping)
-        self._resolver: MappingResolver | None = (
-            MappingResolver(mapping) if mapping is not None else None
-        )
+        self._resolver: MappingResolver | None = MappingResolver(mapping) if mapping is not None else None
 
     def _collect_schema_labels(self, mapping: MappingBundle | None) -> set[str]:
         """Return the lowercased set of conceptual labels + relationship types.
@@ -426,10 +506,7 @@ class EntityResolver:
         meta = props_meta.get(prop, {}) if isinstance(props_meta, dict) else {}
         field_name = str(meta["field"]) if isinstance(meta, dict) and meta.get("field") else prop
 
-        type_filter = (
-            "  FILTER d[@type_field] == @type_value\n"
-            if type_field and type_value else ""
-        )
+        type_filter = "  FILTER d[@type_field] == @type_value\n" if type_field and type_value else ""
 
         aql = (
             f"FOR d IN @@c\n"
@@ -466,7 +543,10 @@ class EntityResolver:
         except Exception as exc:
             logger.info(
                 "EntityResolver query failed for %s.%s ~= %r: %s",
-                label, field_name, mention, exc,
+                label,
+                field_name,
+                mention,
+                exc,
             )
             return None
 
@@ -496,10 +576,7 @@ class EntityResolver:
         """
         out: list[str] = []
         for r in resolved:
-            out.append(
-                f'"{r.mention}" → {r.label}.{r.property} = "{r.value}" '
-                f"(similarity {r.score:.2f})"
-            )
+            out.append(f'"{r.mention}" → {r.label}.{r.property} = "{r.value}" (similarity {r.score:.2f})')
         return out
 
 

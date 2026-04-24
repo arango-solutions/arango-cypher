@@ -132,9 +132,7 @@ def _seed_cache(fake: _MutableFakeDb, *, stat_marker: int = 0) -> None:
     shape_fp = _shape_fingerprint(fake.db)
     full_fp = _full_fingerprint(fake.db)
     _mc[_cache_key(fake.db)] = (bundle, time.time(), shape_fp, full_fp)
-    ArangoSchemaCache().set(
-        fake.db, bundle=bundle, shape_fingerprint=shape_fp, full_fingerprint=full_fp
-    )
+    ArangoSchemaCache().set(fake.db, bundle=bundle, shape_fingerprint=shape_fp, full_fingerprint=full_fp)
 
 
 @pytest.fixture
@@ -235,9 +233,7 @@ class TestSchemaStatus:
         )
         _seed_cache(fake)
 
-        fake.indexes["users"] = [
-            {"type": "persistent", "fields": ["email"], "unique": True}
-        ]
+        fake.indexes["users"] = [{"type": "persistent", "fields": ["email"], "unique": True}]
 
         resp = client.get("/schema/status")
         assert resp.status_code == 200
@@ -347,9 +343,7 @@ class TestIntrospectWarnings:
                 "relationships": [],
             },
             physical_mapping={
-                "entities": {
-                    "User": {"style": "COLLECTION", "collectionName": "users"}
-                },
+                "entities": {"User": {"style": "COLLECTION", "collectionName": "users"}},
                 "relationships": {},
             },
             metadata={
@@ -383,9 +377,7 @@ class TestIntrospectWarnings:
             }
         ]
 
-    def test_introspect_warnings_empty_list_when_none(
-        self, fake_session_factory, monkeypatch
-    ):
+    def test_introspect_warnings_empty_list_when_none(self, fake_session_factory, monkeypatch):
         from arango_cypher import schema_acquire
 
         fake_session_factory(
@@ -400,9 +392,7 @@ class TestIntrospectWarnings:
                 "relationships": [],
             },
             physical_mapping={
-                "entities": {
-                    "User": {"style": "COLLECTION", "collectionName": "users"}
-                },
+                "entities": {"User": {"style": "COLLECTION", "collectionName": "users"}},
                 "relationships": {},
             },
             metadata={},
@@ -431,9 +421,7 @@ class TestForceReacquire:
         resp = client.post("/schema/force-reacquire")
         assert resp.status_code == 401
 
-    def test_force_reacquire_invokes_analyzer_strategy(
-        self, fake_session_factory, monkeypatch
-    ):
+    def test_force_reacquire_invokes_analyzer_strategy(self, fake_session_factory, monkeypatch):
         """The endpoint must call get_mapping with strategy="analyzer" and force_refresh=True."""
         from arango_cypher import schema_acquire
 
@@ -446,15 +434,11 @@ class TestForceReacquire:
         captured_kwargs: dict[str, Any] = {}
         fresh_bundle = MappingBundle(
             conceptual_schema={
-                "entities": [
-                    {"name": "User", "labels": ["User"], "properties": []}
-                ],
+                "entities": [{"name": "User", "labels": ["User"], "properties": []}],
                 "relationships": [],
             },
             physical_mapping={
-                "entities": {
-                    "User": {"style": "COLLECTION", "collectionName": "users"}
-                },
+                "entities": {"User": {"style": "COLLECTION", "collectionName": "users"}},
                 "relationships": {},
             },
             metadata={},
@@ -484,9 +468,7 @@ class TestForceReacquire:
         assert body["entity_count"] == 1
         assert body["relationship_count"] == 0
 
-    def test_force_reacquire_503_when_analyzer_missing(
-        self, fake_session_factory, monkeypatch
-    ):
+    def test_force_reacquire_503_when_analyzer_missing(self, fake_session_factory, monkeypatch):
         from arango_cypher import schema_acquire
 
         fake_session_factory(
@@ -505,9 +487,7 @@ class TestForceReacquire:
         detail = resp.json()["detail"]
         assert "arangodb-schema-analyzer" in detail
 
-    def test_force_reacquire_passes_through_warnings(
-        self, fake_session_factory, monkeypatch
-    ):
+    def test_force_reacquire_passes_through_warnings(self, fake_session_factory, monkeypatch):
         from arango_cypher import schema_acquire
 
         fake_session_factory(
@@ -527,12 +507,8 @@ class TestForceReacquire:
             owl_turtle=None,
             source=MappingSource(kind="schema_analyzer_export"),
         )
-        monkeypatch.setattr(
-            schema_acquire, "get_mapping", lambda db, **kw: warned
-        )
+        monkeypatch.setattr(schema_acquire, "get_mapping", lambda db, **kw: warned)
 
         resp = client.post("/schema/force-reacquire")
         assert resp.status_code == 200
-        assert resp.json()["warnings"] == [
-            {"code": "SOMETHING", "message": "a downstream warning"}
-        ]
+        assert resp.json()["warnings"] == [{"code": "SOMETHING", "message": "a downstream warning"}]

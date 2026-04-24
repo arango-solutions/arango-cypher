@@ -1,4 +1,5 @@
 """Tests for arango_cypher.cli (translate, run, mapping, doctor)."""
+
 from __future__ import annotations
 
 import json
@@ -101,9 +102,11 @@ def test_translate_with_params(tmp_path):
         [
             "translate",
             "MATCH (n:User) WHERE n.name = $name RETURN n",
-            "-m", str(mf),
+            "-m",
+            str(mf),
             "--json",
-            "--params", '{"name": "Alice"}',
+            "--params",
+            '{"name": "Alice"}',
         ],
     )
     assert result.exit_code == 0
@@ -114,8 +117,14 @@ def test_translate_with_params(tmp_path):
 def test_translate_bad_params():
     result = runner.invoke(
         app,
-        ["translate", "MATCH (n:User) RETURN n",
-         "--mapping-json", json.dumps(_SIMPLE_MAPPING), "-p", "{bad}"],
+        [
+            "translate",
+            "MATCH (n:User) RETURN n",
+            "--mapping-json",
+            json.dumps(_SIMPLE_MAPPING),
+            "-p",
+            "{bad}",
+        ],
     )
     assert result.exit_code != 0
 

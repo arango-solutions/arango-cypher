@@ -172,9 +172,11 @@ def execute(
     Returns the AQL cursor result.
     """
     result = translate(
-        cypher, mapping=mapping, extensions=extensions,
-        registry=registry, params=params,
+        cypher,
+        mapping=mapping,
+        extensions=extensions,
+        registry=registry,
+        params=params,
     )
     executor = AqlExecutor(db=db)
     return executor.execute(result.to_aql_query(), **kwargs)
-

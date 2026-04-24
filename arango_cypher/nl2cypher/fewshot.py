@@ -11,6 +11,7 @@ module stays import-safe when the dependency is not installed. Callers
 should use :meth:`FewShotIndex.from_corpus_files`, which transparently
 downgrades to a no-op retriever if BM25 is unavailable.
 """
+
 from __future__ import annotations
 
 import logging
@@ -25,8 +26,7 @@ logger = logging.getLogger(__name__)
 class Retriever(Protocol):
     """Protocol for retrievers that return (question, cypher) pairs."""
 
-    def retrieve(self, question: str, k: int = 3) -> list[tuple[str, str]]:
-        ...
+    def retrieve(self, question: str, k: int = 3) -> list[tuple[str, str]]: ...
 
 
 def _tokenize(text: str) -> list[str]:

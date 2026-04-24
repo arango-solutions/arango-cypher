@@ -47,9 +47,7 @@ def fresh_store(tmp_path, monkeypatch):
     # Also reset the nl2cypher core cache + listener-registration flag.
     monkeypatch.setattr(nl2cypher_core, "_DEFAULT_FEWSHOT_INDEX", None)
     monkeypatch.setattr(nl2cypher_core, "_DEFAULT_FEWSHOT_RESOLVED", False)
-    monkeypatch.setattr(
-        nl2cypher_core, "_DEFAULT_FEWSHOT_INVALIDATION_REGISTERED", False
-    )
+    monkeypatch.setattr(nl2cypher_core, "_DEFAULT_FEWSHOT_INVALIDATION_REGISTERED", False)
     yield db_path
     # Close the sqlite connection so the temp file can be cleaned up on Windows.
     if nl_corrections._conn is not None:
@@ -324,6 +322,6 @@ class TestHTTPEndpoints:
         # the new pair.
         index_after = nl2cypher_core._get_default_fewshot_index()
         assert index_after is not None
-        assert any(
-            "won an Oscar" in q for q, _ in index_after.examples
-        ), "HTTP POST should have triggered rebuild with the new correction"
+        assert any("won an Oscar" in q for q, _ in index_after.examples), (
+            "HTTP POST should have triggered rebuild with the new correction"
+        )

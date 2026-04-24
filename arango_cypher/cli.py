@@ -1,4 +1,5 @@
 """CLI entry point for arango-cypher-py: Cypher → AQL transpiler."""
+
 # ruff: noqa: B008  — typer.Option / typer.Argument in signatures is idiomatic
 from __future__ import annotations
 
@@ -314,7 +315,9 @@ def doctor(
                 out.print(f"[yellow]⚠[/yellow]  Missing VCI indexes ({len(vci_issues)} relationship(s)):")
                 seen_colls: set[str] = set()
                 for rtype, edge_coll, type_field in vci_issues:
-                    out.print(f"    [yellow]•[/yellow] '{rtype}' on edge collection '{edge_coll}' (type field: '{type_field}')")
+                    out.print(
+                        f"    [yellow]•[/yellow] '{rtype}' on edge collection '{edge_coll}' (type field: '{type_field}')"
+                    )
                     if edge_coll not in seen_colls:
                         seen_colls.add(edge_coll)
                         out.print(

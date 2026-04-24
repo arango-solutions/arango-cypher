@@ -27,4 +27,3 @@ def test_arangodb_connectivity_smoke():
             last_err = e
             time.sleep(1)
     raise AssertionError(f"Failed to connect to ArangoDB at {url} within timeout") from last_err
-

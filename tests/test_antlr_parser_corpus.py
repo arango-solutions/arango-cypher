@@ -26,4 +26,3 @@ def test_parse_all_corpus_cases(corpus_cases):
 def test_parse_rejects_invalid_input(bad: str):
     with pytest.raises(CoreError):
         parse_cypher(bad)
-

@@ -32,4 +32,3 @@ def mapping_bundle_for(name: str) -> MappingBundle:
         metadata=metadata,
         source=MappingSource(kind="schema_analyzer_export", notes=f"loaded from {p.name}"),
     )
-

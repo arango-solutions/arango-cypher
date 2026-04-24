@@ -1,4 +1,5 @@
 """Golden tests for WP-9: Full OPTIONAL MATCH (multi-segment, node-only, leading)."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -20,6 +21,4 @@ def test_optional_match_full(case: dict) -> None:
 
     aql = out.aql
     for fragment in case.get("expect_aql_contains", []):
-        assert fragment in aql, (
-            f"[{case['id']}] expected AQL to contain {fragment!r}, got:\n{aql}"
-        )
+        assert fragment in aql, f"[{case['id']}] expected AQL to contain {fragment!r}, got:\n{aql}"

@@ -18,6 +18,7 @@ from tests.tck.normalize import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _write_feature(tmp_path: Path, content: str) -> Path:
     p = tmp_path / "test.feature"
     p.write_text(textwrap.dedent(content), encoding="utf-8")
@@ -27,6 +28,7 @@ def _write_feature(tmp_path: Path, content: str) -> Path:
 # ---------------------------------------------------------------------------
 # gherkin.py — basic parsing (existing test, expanded)
 # ---------------------------------------------------------------------------
+
 
 def test_tck_feature_parser_smoke():
     p = Path(__file__).resolve().parent / "features" / "sample.feature"
@@ -40,9 +42,12 @@ def test_tck_feature_parser_smoke():
 # gherkin.py — Scenario Outline / Examples expansion
 # ---------------------------------------------------------------------------
 
+
 class TestScenarioOutlineExpansion:
     def test_outline_expands_to_correct_count(self, tmp_path: Path):
-        p = _write_feature(tmp_path, """\
+        p = _write_feature(
+            tmp_path,
+            """\
         Feature: Outline test
 
           Scenario Outline: Return literal
@@ -59,12 +64,15 @@ class TestScenarioOutlineExpansion:
             | 1       | 1        |
             | 'foo'   | 'foo'    |
             | true    | true     |
-        """)
+        """,
+        )
         feat = parse_feature(p)
         assert len(feat.scenarios) == 3
 
     def test_outline_substitutes_docstring(self, tmp_path: Path):
-        p = _write_feature(tmp_path, """\
+        p = _write_feature(
+            tmp_path,
+            """\
         Feature: Sub test
 
           Scenario Outline: Query sub
@@ -78,14 +86,17 @@ class TestScenarioOutlineExpansion:
             | val  |
             | 42   |
             | 'hi' |
-        """)
+        """,
+        )
         feat = parse_feature(p)
         assert len(feat.scenarios) == 2
         assert "42" in feat.scenarios[0].steps[0].doc_string
         assert "'hi'" in feat.scenarios[1].steps[0].doc_string
 
     def test_outline_substitutes_table_cells(self, tmp_path: Path):
-        p = _write_feature(tmp_path, """\
+        p = _write_feature(
+            tmp_path,
+            """\
         Feature: Table sub test
 
           Scenario Outline: Table sub
@@ -101,7 +112,8 @@ class TestScenarioOutlineExpansion:
             | answer |
             | 42     |
             | 99     |
-        """)
+        """,
+        )
         feat = parse_feature(p)
         assert len(feat.scenarios) == 2
         then_step_0 = feat.scenarios[0].steps[1]
@@ -112,7 +124,9 @@ class TestScenarioOutlineExpansion:
         assert then_step_1.data_table[1][0] == "99"
 
     def test_outline_name_includes_params(self, tmp_path: Path):
-        p = _write_feature(tmp_path, """\
+        p = _write_feature(
+            tmp_path,
+            """\
         Feature: Named outline
 
           Scenario Outline: Checking <x>
@@ -126,13 +140,16 @@ class TestScenarioOutlineExpansion:
             | x |
             | 1 |
             | 2 |
-        """)
+        """,
+        )
         feat = parse_feature(p)
         assert "x=1" in feat.scenarios[0].name
         assert "x=2" in feat.scenarios[1].name
 
     def test_multiple_examples_tables(self, tmp_path: Path):
-        p = _write_feature(tmp_path, """\
+        p = _write_feature(
+            tmp_path,
+            """\
         Feature: Multi examples
 
           Scenario Outline: Multi
@@ -150,12 +167,15 @@ class TestScenarioOutlineExpansion:
             | v |
             | 2 |
             | 3 |
-        """)
+        """,
+        )
         feat = parse_feature(p)
         assert len(feat.scenarios) == 3
 
     def test_mixed_scenarios_and_outlines(self, tmp_path: Path):
-        p = _write_feature(tmp_path, """\
+        p = _write_feature(
+            tmp_path,
+            """\
         Feature: Mixed
 
           Scenario: Plain
@@ -176,14 +196,17 @@ class TestScenarioOutlineExpansion:
             | v |
             | a |
             | b |
-        """)
+        """,
+        )
         feat = parse_feature(p)
         assert len(feat.scenarios) == 3
         assert feat.scenarios[0].name == "Plain"
         assert "v=a" in feat.scenarios[1].name
 
     def test_outline_without_examples_produces_nothing(self, tmp_path: Path):
-        p = _write_feature(tmp_path, """\
+        p = _write_feature(
+            tmp_path,
+            """\
         Feature: Empty outline
 
           Scenario Outline: No examples
@@ -192,7 +215,8 @@ class TestScenarioOutlineExpansion:
               RETURN <v>
               \"\"\"
             Then the result should be empty
-        """)
+        """,
+        )
         feat = parse_feature(p)
         assert len(feat.scenarios) == 0
 
@@ -200,6 +224,7 @@ class TestScenarioOutlineExpansion:
 # ---------------------------------------------------------------------------
 # normalize.py — normalize_expected_value
 # ---------------------------------------------------------------------------
+
 
 class TestNormalizeExpectedValue:
     def test_null(self):
@@ -271,6 +296,7 @@ class TestNormalizeExpectedValue:
 # normalize.py — normalize_actual_value
 # ---------------------------------------------------------------------------
 
+
 class TestNormalizeActualValue:
     def test_strips_meta_keys(self):
         doc = {"_id": "x/1", "_key": "1", "_rev": "abc", "name": "Alice"}
@@ -306,6 +332,7 @@ class TestNormalizeActualValue:
 # ---------------------------------------------------------------------------
 # normalize.py — results_match
 # ---------------------------------------------------------------------------
+
 
 class TestResultsMatch:
     def test_matching_rows(self):
@@ -366,6 +393,7 @@ class TestResultsMatch:
 # normalize.py — parse_param_value
 # ---------------------------------------------------------------------------
 
+
 class TestParseParamValue:
     def test_int(self):
         assert parse_param_value("42") == 42
@@ -396,9 +424,12 @@ class TestParseParamValue:
 # gherkin.py — doc string and data table parsing
 # ---------------------------------------------------------------------------
 
+
 class TestGherkinDocStringAndTable:
     def test_step_with_docstring(self, tmp_path: Path):
-        p = _write_feature(tmp_path, """\
+        p = _write_feature(
+            tmp_path,
+            """\
         Feature: Docstring
 
           Scenario: With docstring
@@ -407,14 +438,17 @@ class TestGherkinDocStringAndTable:
               MATCH (n) RETURN n
               \"\"\"
             Then the result should be empty
-        """)
+        """,
+        )
         feat = parse_feature(p)
         when_step = feat.scenarios[0].steps[0]
         assert when_step.doc_string is not None
         assert "MATCH (n) RETURN n" in when_step.doc_string
 
     def test_step_with_data_table(self, tmp_path: Path):
-        p = _write_feature(tmp_path, """\
+        p = _write_feature(
+            tmp_path,
+            """\
         Feature: Table
 
           Scenario: With table
@@ -426,7 +460,8 @@ class TestGherkinDocStringAndTable:
               RETURN 1
               \"\"\"
             Then the result should be empty
-        """)
+        """,
+        )
         feat = parse_feature(p)
         given_step = feat.scenarios[0].steps[0]
         assert given_step.data_table is not None
@@ -437,6 +472,7 @@ class TestGherkinDocStringAndTable:
 # ---------------------------------------------------------------------------
 # Integration smoke (requires ArangoDB)
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.integration
 def test_tck_runner_smoke_integration():
