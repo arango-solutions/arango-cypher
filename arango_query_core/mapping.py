@@ -2,12 +2,43 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from .errors import CoreError
 
 JsonObj = dict[str, Any]
+
+
+# ArangoDB collection-name grammar (per the official docs):
+#   * starts with a letter or underscore
+#   * 1 to 256 chars total
+#   * subsequent chars: letter, digit, underscore, or hyphen
+#
+# Used as a defence-in-depth guard wherever a collection name must be
+# embedded directly into an AQL string (e.g. ``FOR d IN `<name>``` or
+# ``RETURN LENGTH(`<name>`)``). Backticks alone prevent most forms because
+# the AQL grammar requires balanced backticks around an identifier — but a
+# stray backtick or newline in the input would still escape the quote, so we
+# regex-validate first and refuse to interpolate anything that doesn't match.
+#
+# Lifted from ``arango_cypher/service.py:_COLLECTION_NAME_RE`` (introduced
+# at the ``/tenants?collection=`` boundary in the 2026-04-24 service-side
+# hardening sprint) so non-service callers (notably
+# ``arango_cypher/schema_acquire.py:compute_statistics``) get the same
+# guarantee without re-importing service-internal symbols.
+COLLECTION_NAME_RE: re.Pattern[str] = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,255}$")
+
+
+def is_valid_collection_name(name: str) -> bool:
+    """Return ``True`` iff *name* matches the ArangoDB collection-name grammar.
+
+    A pure-string predicate (no DB call) used as a precondition before
+    embedding *name* into an AQL string. Callers that need the exception
+    form should raise their own typed error on a ``False`` return.
+    """
+    return isinstance(name, str) and bool(COLLECTION_NAME_RE.match(name))
 
 
 @dataclass(frozen=True)

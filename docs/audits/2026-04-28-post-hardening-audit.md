@@ -44,6 +44,13 @@ No **H**-severity findings.
 
 ## 1. `compute_statistics` f-strings collection names into AQL — **M**
 
+> **Status: CLOSED — 2026-04-29 (audit-v2 batch 1).** Lifted `_COLLECTION_NAME_RE`
+> into `arango_query_core.mapping` as `COLLECTION_NAME_RE` + `is_valid_collection_name()`
+> and reworked all four AQL sites in `compute_statistics` to (a) regex-validate
+> the collection name against the ArangoDB grammar before any DB call and
+> (b) backtick-quote the identifier inside the AQL string. Invalid names
+> short-circuit to `count=0` (same as the existing `except` branch).
+
 **Where:** `arango_cypher/schema_acquire.py` lines 1344, 1356, 1375, 1388.
 
 **What:**
@@ -106,6 +113,12 @@ half a day for the bind-var form with goldens.
 ---
 
 ## 2. Rate limiter covers only 2 of ~35 endpoints — **M**
+
+> **Status: PARTIAL — 2026-04-29 (audit-v2 batch 1).** Quick-fix half done:
+> `_check_nl_rate_limit` `Depends(...)` added to `/nl-samples` (the most
+> concerning gap per the audit, since it's LLM-gated). The broader
+> half-day expansion to the rest of the LLM-/CPU-heavy endpoints
+> (~6 more sites) stays open as a separate item.
 
 **Where:** `arango_cypher/service.py` line 314 (`_check_nl_rate_limit`
 definition), applied at lines 1458 and 1561 only.
@@ -182,6 +195,16 @@ these paths will silently degrade CI coverage:
 ---
 
 ## 4. `mapping_from_wire_dict` / `mapping_hash` — indirect coverage only — **L**
+
+> **Status: CLOSED — 2026-04-29 (audit-v2 batch 1).** New
+> `tests/test_mapping_helpers.py` with 18 dedicated cases covering
+> snake/camel-case symmetry, snake-wins-when-both-present precedence,
+> missing-keys → empty-dict normalisation, `MappingSource` pass-through,
+> owl_turtle intentional-no-read, hash determinism across key insertion
+> order, hash sensitivity to `{cs, pm}`, hash insensitivity to
+> `metadata` and `owl_turtle` (the documented canonical contract),
+> dict-vs-bundle-vs-stub equivalence, empty-input baseline, and the
+> hasattr / unknown-type fallback branches.
 
 **Where:** `arango_query_core/mapping.py`; introduced by PR #10.
 

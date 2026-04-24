@@ -24,7 +24,12 @@ from typing import TYPE_CHECKING, Any, Literal
 # The wrappers bake in our cache-collection exclusion; see §5 of
 # docs/schema_analyzer_issues/WAVE_4M_ARCHITECTURE.md for why excluding the
 # cache collection is a correctness invariant, not a perf tweak.
-from arango_query_core import CoreError, MappingBundle, MappingSource
+from arango_query_core import (
+    CoreError,
+    MappingBundle,
+    MappingSource,
+    is_valid_collection_name,
+)
 
 from .schema_cache import (
     DEFAULT_CACHE_COLLECTION,
@@ -1339,21 +1344,39 @@ def compute_statistics(
         if not isinstance(emap, dict):
             continue
         col_name = emap.get("collectionName", label)
+        # AQL identifier safety: collection names land in this function from
+        # whatever JSON the caller (UI, schema-analyzer export, hand-edited
+        # mapping) supplied, so we re-validate against the ArangoDB
+        # collection-name grammar before splicing them into an AQL string.
+        # Invalid names short-circuit to count=0 — the same outcome the
+        # except: branch produced before, just without the round-trip to
+        # the DB and the resulting noisy server-side parse error.
+        col_name_safe = is_valid_collection_name(col_name)
         if col_name not in seen_collections:
-            try:
-                cursor = db.aql.execute(f"RETURN LENGTH({col_name})")
-                count = next(cursor, 0)
-            except Exception:
-                count = 0
+            count = 0
+            if col_name_safe:
+                try:
+                    cursor = db.aql.execute(f"RETURN LENGTH(`{col_name}`)")
+                    count = next(cursor, 0)
+                except Exception:
+                    count = 0
             col_counts[col_name] = {"count": count, "is_edge": False}
             seen_collections.add(col_name)
 
         style = emap.get("style", "COLLECTION")
         type_field = emap.get("typeField")
         type_value = emap.get("typeValue")
-        if style in ("LABEL", "GENERIC_WITH_TYPE") and type_field and type_value:
+        if (
+            col_name_safe
+            and style in ("LABEL", "GENERIC_WITH_TYPE")
+            and type_field
+            and type_value
+        ):
             try:
-                aql = f"FOR d IN {col_name} FILTER d.`{type_field}` == @tv COLLECT WITH COUNT INTO c RETURN c"
+                aql = (
+                    f"FOR d IN `{col_name}` FILTER d.`{type_field}` == @tv "
+                    "COLLECT WITH COUNT INTO c RETURN c"
+                )
                 cursor = db.aql.execute(aql, bind_vars={"tv": type_value})
                 entity_count = next(cursor, 0)
             except Exception:
@@ -1370,12 +1393,16 @@ def compute_statistics(
         if not edge_col:
             continue
 
+        # Same validation contract as the entity loop above — see comment there.
+        edge_col_safe = is_valid_collection_name(edge_col)
         if edge_col not in seen_collections:
-            try:
-                cursor = db.aql.execute(f"RETURN LENGTH({edge_col})")
-                edge_count = next(cursor, 0)
-            except Exception:
-                edge_count = 0
+            edge_count = 0
+            if edge_col_safe:
+                try:
+                    cursor = db.aql.execute(f"RETURN LENGTH(`{edge_col}`)")
+                    edge_count = next(cursor, 0)
+                except Exception:
+                    edge_count = 0
             col_counts[edge_col] = {"count": edge_count, "is_edge": True}
             seen_collections.add(edge_col)
 
@@ -1383,9 +1410,17 @@ def compute_statistics(
         type_field = rmap.get("typeField")
         type_value = rmap.get("typeValue")
 
-        if style == "GENERIC_WITH_TYPE" and type_field and type_value:
+        if (
+            edge_col_safe
+            and style == "GENERIC_WITH_TYPE"
+            and type_field
+            and type_value
+        ):
             try:
-                aql = f"FOR e IN {edge_col} FILTER e.`{type_field}` == @tv COLLECT WITH COUNT INTO c RETURN c"
+                aql = (
+                    f"FOR e IN `{edge_col}` FILTER e.`{type_field}` == @tv "
+                    "COLLECT WITH COUNT INTO c RETURN c"
+                )
                 cursor = db.aql.execute(aql, bind_vars={"tv": type_value})
                 edge_count = next(cursor, 0)
             except Exception:

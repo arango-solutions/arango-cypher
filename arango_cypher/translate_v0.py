@@ -163,7 +163,15 @@ def _build_collection_index_hint(
         return f'OPTIONS {{indexHint: "{best_idx.name}", forceIndexHint: false}}'
 
     indexed_fields = [f for f in filtered_fields if any(p.field == f and p.indexed for p in props.values())]
-    if indexed_fields:
+    # Only warn when the mapping *does* carry index metadata for this entity
+    # but none of the named indexes happens to cover the filtered fields.
+    # When the entity has zero ``IndexInfo`` entries (a common shape from the
+    # schema-analyzer export, which sets ``PropertyInfo.indexed=true`` from
+    # ArangoDB's catalog without round-tripping the named-index list) the
+    # warning has no actionable advice — every indexed field would trip it,
+    # and the user has nothing to fix in the mapping. Suppress that case so
+    # the warning bubble only fires when there's a real mapping gap.
+    if indexed_fields and indexes:
         warnings = _active_warnings.get()
         msg = (
             f"Filtered field(s) {indexed_fields} on '{label}' are marked indexed "
