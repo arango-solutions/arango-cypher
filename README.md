@@ -389,7 +389,7 @@ Features:
 
 ```
 arango_cypher/          # Cypher parser + translate API + NL pipeline
-  _antlr/              # ANTLR-generated lexer/parser/visitor
+  _antlr/              # ANTLR-generated lexer/parser (no visitor — see CONTRIBUTING.md)
   parser.py            # Parse Cypher → parse tree
   translate_v0.py      # Parse tree → AQL translation engine
   profile.py           # Arango Cypher profile manifest (get_cypher_profile)

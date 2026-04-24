@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -68,6 +70,76 @@ class MappingBundle:
     metadata: JsonObj
     owl_turtle: str | None = None
     source: MappingSource | None = None
+
+
+def mapping_from_wire_dict(
+    d: JsonObj,
+    *,
+    source: MappingSource | None = None,
+) -> MappingBundle:
+    """Build a :class:`MappingBundle` from a wire-format dict.
+
+    Accepts either snake_case (``conceptual_schema`` / ``physical_mapping``)
+    or camelCase (``conceptualSchema`` / ``physicalMapping``) keys — the
+    FastAPI endpoints post camelCase from the UI while the Python API
+    uses snake_case, and this helper is the single spelling-normalising
+    entry point so every consumer (HTTP service, CLI, tool-calling
+    harness) produces an identically-keyed bundle.
+
+    The ``metadata`` field passes through unchanged; ``owl_turtle`` is
+    intentionally *not* read here (the existing wire contract never
+    carried it — see `docs/python_prd.md` §14 open item).
+
+    Pair this helper with :func:`mapping_hash` (below): round-tripping a
+    wire dict through ``mapping_from_wire_dict`` and hashing the result
+    produces the same fingerprint regardless of input spelling.
+    """
+    return MappingBundle(
+        conceptual_schema=d.get("conceptual_schema") or d.get("conceptualSchema") or {},
+        physical_mapping=d.get("physical_mapping") or d.get("physicalMapping") or {},
+        metadata=d.get("metadata", {}),
+        source=source,
+    )
+
+
+def mapping_hash(mapping: MappingBundle | JsonObj | Any) -> str:
+    """Deterministic 16-hex-char fingerprint of a mapping bundle.
+
+    Accepts either a :class:`MappingBundle` instance or a wire-format
+    dict with snake_case or camelCase keys (see
+    :func:`mapping_from_wire_dict` for the accepted key shapes). The
+    fingerprint is stable across key spellings: the same logical
+    mapping submitted as camelCase by the UI and as snake_case by the
+    Python API produces the same hash, so downstream lookup tables
+    (``corrections`` / ``nl_corrections``) key identically regardless
+    of caller.
+
+    The output is a 16-character prefix of the SHA-256 of the
+    JSON-canonicalised ``{cs, pm}`` pair — enough entropy to avoid
+    collisions within any realistic corrections-store size while
+    staying short enough to inline into log lines and index-column
+    values.
+    """
+    cs: Any
+    pm: Any
+    if isinstance(mapping, MappingBundle):
+        cs = mapping.conceptual_schema
+        pm = mapping.physical_mapping
+    elif hasattr(mapping, "conceptual_schema"):
+        cs = mapping.conceptual_schema
+        pm = mapping.physical_mapping
+    elif isinstance(mapping, dict):
+        cs = mapping.get("conceptual_schema")
+        if cs is None:
+            cs = mapping.get("conceptualSchema", {})
+        pm = mapping.get("physical_mapping")
+        if pm is None:
+            pm = mapping.get("physicalMapping", {})
+    else:
+        cs, pm = {}, {}
+    raw = {"cs": cs, "pm": pm}
+    blob = json.dumps(raw, sort_keys=True, default=str).encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
 
 
 class MappingResolver:

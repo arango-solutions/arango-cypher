@@ -44,6 +44,7 @@ from arango_query_core import (
     MappingBundle,
     MappingResolver,
     MappingSource,
+    mapping_from_wire_dict,
 )
 
 from .api import get_cypher_profile, translate, validate_cypher_profile
@@ -662,12 +663,17 @@ def _describe_connect_error(exc: BaseException) -> str:
 
 
 def _mapping_from_dict(d: dict[str, Any] | None) -> MappingBundle | None:
+    """Thin wrapper around :func:`arango_query_core.mapping_from_wire_dict`.
+
+    Kept as a module-private alias because ``scripts/benchmark_translate``
+    imports this name. The wrapper adds the ``None``-short-circuit and
+    the ``MappingSource`` tag that identify the bundle as an HTTP-posted
+    mapping in downstream logs.
+    """
     if d is None:
         return None
-    return MappingBundle(
-        conceptual_schema=d.get("conceptual_schema") or d.get("conceptualSchema") or {},
-        physical_mapping=d.get("physical_mapping") or d.get("physicalMapping") or {},
-        metadata=d.get("metadata", {}),
+    return mapping_from_wire_dict(
+        d,
         source=MappingSource(kind="explicit", notes="supplied via HTTP"),
     )
 

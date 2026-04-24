@@ -98,7 +98,7 @@ RUN_NL2CYPHER_EVAL=1 pytest tests/test_nl2cypher_eval_gate.py
 - **ANTLR Regeneration:**
   If the grammar at `grammar/Cypher.g4` is modified, regenerate the parser:
   ```bash
-  antlr4 -Dlanguage=Python3 -visitor -o arango_cypher/_antlr grammar/Cypher.g4
+  antlr4 -Dlanguage=Python3 -o arango_cypher/_antlr grammar/Cypher.g4
   ```
 - **Golden Tests:** New translation capabilities should be accompanied by fixture-based golden tests in `tests/fixtures/cases/`.
 

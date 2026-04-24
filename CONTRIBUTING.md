@@ -44,7 +44,7 @@ Configuration is in `pyproject.toml` under `[tool.ruff]`.
 If you modify `grammar/Cypher.g4`, regenerate the Python parser:
 
 ```bash
-antlr4 -Dlanguage=Python3 -visitor -o arango_cypher/_antlr grammar/Cypher.g4
+antlr4 -Dlanguage=Python3 -o arango_cypher/_antlr grammar/Cypher.g4
 ```
 
 Do not hand-edit files in `arango_cypher/_antlr/`.

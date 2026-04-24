@@ -10,7 +10,6 @@ All data stays local — nothing is sent externally.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import sqlite3
@@ -18,6 +17,8 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+from arango_query_core import mapping_hash as _canonical_mapping_hash
 
 _DB_PATH = os.getenv("CORRECTIONS_DB", "corrections.db")
 _lock = threading.Lock()
@@ -51,35 +52,16 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def _mapping_hash(mapping: dict[str, Any] | Any) -> str:
-    """Deterministic hash of the mapping for fingerprinting.
+    """Module-private alias for :func:`arango_query_core.mapping_hash`.
 
-    Both snake_case (``conceptual_schema`` / ``physical_mapping``) and
-    camelCase (``conceptualSchema`` / ``physicalMapping``) key shapes are
-    accepted on the wire — the FastAPI endpoints normalise from camelCase
-    on POST and the python API uses snake_case. Hashing the *first* shape
-    we see would silently bucket "the same mapping" under two different
-    hashes depending on caller, so :func:`lookup` would miss corrections
-    saved by the alternative caller. We resolve to a canonical
-    snake_case form here before hashing so the fingerprint is the
-    contract, not the spelling.
+    Kept private (leading underscore) so external callers reach for the
+    canonical ``arango_query_core.mapping_hash`` instead. The alias
+    exists because :mod:`tests.test_service_hardening` asserts on this
+    module attribute directly (pin for the ``corrections``/``nl_corrections``
+    symmetry introduced in the 2026-04-26 hardening PR) and moving the
+    assertion would be an unnecessary churn.
     """
-    cs: Any
-    pm: Any
-    if hasattr(mapping, "conceptual_schema"):
-        cs = mapping.conceptual_schema
-        pm = mapping.physical_mapping
-    elif isinstance(mapping, dict):
-        cs = mapping.get("conceptual_schema")
-        if cs is None:
-            cs = mapping.get("conceptualSchema", {})
-        pm = mapping.get("physical_mapping")
-        if pm is None:
-            pm = mapping.get("physicalMapping", {})
-    else:
-        cs, pm = {}, {}
-    raw = {"cs": cs, "pm": pm}
-    blob = json.dumps(raw, sort_keys=True, default=str).encode()
-    return hashlib.sha256(blob).hexdigest()[:16]
+    return _canonical_mapping_hash(mapping)
 
 
 @dataclass
