@@ -10,6 +10,7 @@ Usage::
 
 from __future__ import annotations
 
+import ipaddress
 import logging as _logging
 import os
 import re
@@ -18,9 +19,11 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
@@ -83,6 +86,17 @@ app = FastAPI(
     root_path=os.getenv("ROOT_PATH", ""),
 )
 
+# ``ARANGO_CYPHER_PUBLIC_MODE`` is the single switch that flips the service
+# from "single-user / local-dev / inside-trusted-network" defaults to
+# "shared / multi-user / public-internet" defaults. It exists because the
+# UI Workbench is happy without auth on a developer laptop, but the same
+# code path on a public host needs every sensitive endpoint locked behind
+# a session token. Flag is read once at import time so the surface stays
+# deterministic for an operator inspecting the running config.
+_PUBLIC_MODE = os.getenv("ARANGO_CYPHER_PUBLIC_MODE", "").lower() in ("true", "1", "yes")
+
+_svc_logger = _logging.getLogger("arango_cypher.service")
+
 _cors_origins_raw = os.getenv("CORS_ALLOWED_ORIGINS", "*")
 _cors_origins = (
     ["*"]
@@ -90,25 +104,118 @@ _cors_origins = (
     else [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
 )
 
+# CORS credentialed-wildcard guardrail. The pre-existing default
+# (``allow_origins=["*"]`` + ``allow_credentials=True``) is unsafe — modern
+# browsers refuse the combination, but Starlette's CORSMiddleware *does*
+# echo back ``Access-Control-Allow-Origin: <Origin>`` with credentials,
+# which silently downgrades the policy to "any origin can carry the
+# session cookie" if a non-browser caller obeys the header. Three
+# behaviours follow:
+#
+#   1. ``CORS_ALLOWED_ORIGINS=*`` and ``ARANGO_CYPHER_CORS_CREDENTIALS`` not
+#      explicitly set: silently downgrade ``allow_credentials`` to False.
+#      The legacy local-dev workflow (no credentialed XHR) keeps working;
+#      no operator action required.
+#   2. ``CORS_ALLOWED_ORIGINS=*`` with ``ARANGO_CYPHER_CORS_CREDENTIALS=1``:
+#      refuse to start. The combination is never safe and we want the
+#      operator to discover it at deploy time, not after a session leaks.
+#   3. Explicit origin list: honour ``ARANGO_CYPHER_CORS_CREDENTIALS``
+#      (default True for back-compat with the existing UI flow).
+_cors_credentials_raw = os.getenv("ARANGO_CYPHER_CORS_CREDENTIALS")
+_cors_is_wildcard = _cors_origins == ["*"]
+if _cors_is_wildcard and _cors_credentials_raw and _cors_credentials_raw.lower() in ("1", "true", "yes"):
+    raise RuntimeError(
+        "Refusing to start: CORS_ALLOWED_ORIGINS='*' combined with "
+        "ARANGO_CYPHER_CORS_CREDENTIALS=true is unsafe. Pin an explicit "
+        "origin list (e.g. CORS_ALLOWED_ORIGINS=https://app.example.com) "
+        "or unset ARANGO_CYPHER_CORS_CREDENTIALS."
+    )
+if _cors_is_wildcard:
+    _cors_credentials = False
+    if _cors_credentials_raw is None:
+        _svc_logger.warning(
+            "CORS_ALLOWED_ORIGINS='*' detected; allow_credentials forced off. "
+            "Pin an explicit origin list to enable credentialed CORS."
+        )
+else:
+    _cors_credentials = True
+    if _cors_credentials_raw is not None:
+        _cors_credentials = _cors_credentials_raw.lower() in ("1", "true", "yes")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_credentials=True,
+    allow_credentials=_cors_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-_svc_logger = _logging.getLogger("arango_cypher.service")
+
+def _sanitize_pydantic_errors(errors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip credential-shaped tokens from a Pydantic ``errors()`` list.
+
+    Pydantic v2 echoes the offending ``input`` value back in every
+    validation error, which is invaluable for client debugging *and*
+    catastrophic for any payload that happened to embed a password
+    (saved-correction notes, NL questions that quote a connection
+    string, etc.). We can't drop ``input`` wholesale — the UI's
+    "tell me what you sent that broke" affordance depends on it —
+    so we walk the structure and run the same scalar-level
+    :func:`_sanitize_error` redaction on every string value found,
+    one nesting level deep (which is enough for every Pydantic input
+    shape we currently emit).
+    """
+    cleaned: list[dict[str, Any]] = []
+    for err in errors:
+        new = dict(err)
+        if "input" in new:
+            new["input"] = _redact_value(new["input"])
+        if "msg" in new and isinstance(new["msg"], str):
+            new["msg"] = _sanitize_error(new["msg"])
+        cleaned.append(new)
+    return cleaned
+
+
+def _redact_value(val: Any) -> Any:
+    """Recursive credential-pattern redaction on arbitrary JSON-shaped data."""
+    if isinstance(val, str):
+        return _sanitize_error(val)
+    if isinstance(val, dict):
+        return {k: _redact_value(v) for k, v in val.items()}
+    if isinstance(val, list):
+        return [_redact_value(v) for v in val]
+    return val
 
 
 @app.exception_handler(RequestValidationError)
 async def _validation_error_handler(request: Request, exc: RequestValidationError):
-    body = await request.body()
-    _svc_logger.warning(
-        "Pydantic 422 on %s %s: %s | body[:200]=%s",
-        request.method, request.url.path, exc.errors(), body[:200],
-    )
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    # Body fragments help diagnose UI ↔ service contract drift but they
+    # routinely contain credentials (saved-correction payloads echo
+    # ``ARANGO_PASS``, ``Authorization`` headers leak via
+    # ``X-Arango-Session`` typos, etc.). Always run the same redaction
+    # the error-translator uses, and skip body logging entirely in
+    # public mode where the operator has signalled a hostile audience.
+    safe_errors = _sanitize_pydantic_errors(exc.errors())
+    if _PUBLIC_MODE:
+        _svc_logger.warning(
+            "Pydantic 422 on %s %s: %s",
+            request.method,
+            request.url.path,
+            safe_errors,
+        )
+    else:
+        body = await request.body()
+        body_preview = body[:200].decode("utf-8", errors="replace") if body else ""
+        body_preview = _sanitize_error(body_preview) if body_preview else ""
+        _svc_logger.warning(
+            "Pydantic 422 on %s %s: %s | body[:200]=%s",
+            request.method,
+            request.url.path,
+            safe_errors,
+            body_preview,
+        )
+    return JSONResponse(status_code=422, content={"detail": safe_errors})
+
 
 NL_RATE_LIMIT_PER_MINUTE = int(os.getenv("NL_RATE_LIMIT_PER_MINUTE", "10"))
 
@@ -209,6 +316,22 @@ def _check_nl_rate_limit(request: Request) -> None:
         raise HTTPException(status_code=429, detail="Rate limit exceeded for NL endpoints")
 
 
+def _require_session_in_public_mode(request: Request) -> _Session | None:
+    """Dependency: enforce session auth iff ``ARANGO_CYPHER_PUBLIC_MODE``.
+
+    Used by endpoints that have a legitimate "no auth needed on a single-
+    user dev box" mode (NL translation, correction CRUD, /connections)
+    but must be locked down on a shared host. Returns the resolved
+    session in public mode so callers that want to *use* the session
+    (e.g. to bind the NL request to the authenticated DB) don't need a
+    second dependency lookup; returns ``None`` in default mode so
+    callers that don't need the session aren't forced to thread it.
+    """
+    if not _PUBLIC_MODE:
+        return None
+    return _get_session(request)
+
+
 def _build_registry() -> ExtensionRegistry:
     reg = ExtensionRegistry(policy=ExtensionPolicy(enabled=True))
     register_all_extensions(reg)
@@ -221,6 +344,7 @@ _default_registry = _build_registry()
 # ---------------------------------------------------------------------------
 # Request/Response models
 # ---------------------------------------------------------------------------
+
 
 class ConnectRequest(BaseModel):
     url: str = Field(default="http://localhost:8529")
@@ -355,6 +479,139 @@ _PROXY_ENV_VARS = (
 )
 
 
+# ---------------------------------------------------------------------------
+# /connect SSRF guard
+# ---------------------------------------------------------------------------
+#
+# The /connect endpoint takes a caller-supplied URL and opens a TCP
+# connection to it. That's intentional — the UI's connect dialog is the
+# whole point of this product — but it also means an unauthenticated POST
+# can probe arbitrary internal infrastructure from the service host (the
+# class textbook SSRF). We can't fully block private targets without
+# breaking the legitimate dev workflow ("connect to my localhost ArangoDB"),
+# so the policy splits along trust:
+#
+#   * Always reject cloud-metadata literals (AWS / Azure / OpenStack /
+#     GCP / Alibaba). There is no plausible reason to point this service
+#     at 169.254.169.254, and the cost of a misclick is full IAM
+#     credential exfiltration.
+#   * In ``ARANGO_CYPHER_PUBLIC_MODE``, additionally reject any
+#     literal-IP host inside RFC1918 / loopback / link-local / ULA so a
+#     public deployment can't be coerced into reaching internal services.
+#     Operators who deliberately allow private targets (e.g. a co-located
+#     ArangoDB on the same VPC) opt in via
+#     ``ARANGO_CYPHER_CONNECT_ALLOWED_HOSTS``.
+#
+# We intentionally do *not* perform DNS resolution here. Resolving the
+# host opens a second SSRF vector (DNS rebinding, slow targets used as a
+# blocking-IO probe), and operators using DNS in front of private
+# infra should pin via ``ARANGO_CYPHER_CONNECT_ALLOWED_HOSTS`` anyway.
+
+_BLOCK_METADATA_HOSTS = frozenset(
+    {
+        "169.254.169.254",  # AWS / Azure / OpenStack / DigitalOcean
+        "100.100.100.200",  # Alibaba Cloud
+        "metadata.google.internal",
+        "metadata.goog",
+        "metadata",  # GCP shorthand
+    }
+)
+_BLOCK_METADATA_IPS = frozenset(
+    {
+        ipaddress.ip_address("169.254.169.254"),
+        ipaddress.ip_address("100.100.100.200"),
+        ipaddress.ip_address("fd00:ec2::254"),  # AWS IPv6 metadata
+    }
+)
+_PRIVATE_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+    ipaddress.ip_network("fe80::/10"),
+)
+
+
+def _connect_allowed_hosts() -> frozenset[str]:
+    """Operator-supplied allowlist of host strings that bypass the SSRF guard.
+
+    Re-read on every call (not cached) so tests can monkeypatch the env
+    var per case. The cost is one ``os.environ.get`` plus a string split
+    per ``/connect`` request, which is negligible next to the TCP
+    handshake the endpoint is about to perform.
+    """
+    raw = os.environ.get("ARANGO_CYPHER_CONNECT_ALLOWED_HOSTS", "")
+    return frozenset(h.strip().lower() for h in raw.split(",") if h.strip())
+
+
+def _check_connect_target(url: str) -> None:
+    """Raise ``HTTPException(400)`` if ``url`` points at a forbidden target.
+
+    See the module-level comment block above for the policy. The check
+    is best-effort by design — a determined caller can wrap a forbidden
+    address behind a public DNS name we can't see without resolving.
+    The intent is to refuse the obvious foot-guns (literal cloud-metadata
+    IPs, hard-coded RFC1918 hostnames in a public deployment) without
+    pretending to provide complete network isolation; that's the job of
+    the surrounding network/SG configuration.
+    """
+    try:
+        parsed = urlparse(url if "://" in url else f"http://{url}")
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid connection URL") from exc
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise HTTPException(status_code=400, detail="Connection URL is missing a host")
+
+    allowlist = _connect_allowed_hosts()
+    if host in allowlist:
+        return
+
+    # Strip IPv6 brackets that ``urlparse`` already removes from
+    # ``hostname`` but a raw user-supplied IPv6 literal might still carry.
+    bare = host.strip("[]")
+
+    if host in _BLOCK_METADATA_HOSTS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Refusing to connect to cloud metadata service host. Set "
+                "ARANGO_CYPHER_CONNECT_ALLOWED_HOSTS if this is intentional."
+            ),
+        )
+
+    try:
+        ip = ipaddress.ip_address(bare)
+    except ValueError:
+        return
+
+    if ip in _BLOCK_METADATA_IPS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Refusing to connect to cloud metadata IP. Set "
+                "ARANGO_CYPHER_CONNECT_ALLOWED_HOSTS if this is intentional."
+            ),
+        )
+
+    if not _PUBLIC_MODE:
+        return
+
+    for net in _PRIVATE_NETWORKS:
+        if ip in net:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Refusing to connect to private/loopback address {ip} in public mode. "
+                    "Pin the literal via ARANGO_CYPHER_CONNECT_ALLOWED_HOSTS to override."
+                ),
+            )
+
+
 def _walk_cause_chain(exc: BaseException) -> list[BaseException]:
     """Return the chain of exceptions from outer to root via __cause__/__context__."""
     seen: list[BaseException] = []
@@ -419,6 +676,7 @@ def _mapping_from_dict(d: dict[str, Any] | None) -> MappingBundle | None:
 # Endpoints
 # ---------------------------------------------------------------------------
 
+
 # Liveness / readiness probe for container orchestrators (Arango Platform's
 # Container Manager, Kubernetes, docker-compose healthchecks, etc.). Cheap,
 # unauthenticated, no DB call -- returning 200 proves the process is up and
@@ -437,6 +695,7 @@ def health() -> dict[str, str]:
 @app.post("/connect", response_model=ConnectResponse)
 def connect(req: ConnectRequest):
     """Authenticate to ArangoDB; returns a session token."""
+    _check_connect_target(req.url)
     try:
         url = req.url.rstrip("/")
         client = ArangoClient(hosts=url)
@@ -460,7 +719,9 @@ def connect(req: ConnectRequest):
     _sessions[token] = _Session(token=token, db=db, client=client)
 
     try:
-        databases = [d for d in client.db("_system", username=req.username, password=req.password).databases()]
+        databases = [
+            d for d in client.db("_system", username=req.username, password=req.password).databases()
+        ]
     except Exception:
         databases = [req.database]
 
@@ -476,8 +737,8 @@ def disconnect(session: _Session = Depends(_get_session)):
 
 
 @app.get("/connections")
-def list_connections():
-    """List active sessions (admin/debug)."""
+def list_connections(_auth: _Session | None = Depends(_require_session_in_public_mode)):
+    """List active sessions (admin/debug). Requires auth in public mode."""
     _prune_expired()
     return {
         "active": len(_sessions),
@@ -493,16 +754,21 @@ def list_connections():
     }
 
 
-_PUBLIC_MODE = os.getenv("ARANGO_CYPHER_PUBLIC_MODE", "").lower() in ("true", "1", "yes")
-
-
 @app.get("/connect/defaults")
 def connect_defaults():
     """Return .env default values for pre-filling the connection dialog.
 
     Uses ARANGO_URL directly if set, otherwise builds from
     ARANGO_HOST/ARANGO_PORT/ARANGO_PROTOCOL.
-    Disabled when ARANGO_CYPHER_PUBLIC_MODE=true.
+
+    Disabled entirely when ``ARANGO_CYPHER_PUBLIC_MODE=true``. The
+    password is omitted from the response by default — the field is
+    still present (the UI's connect dialog binds against it) but the
+    value is the empty string so a curious anonymous caller can't
+    pull ``ARANGO_PASS`` out of the .env on a single-user dev box.
+    Operators who want the legacy "auto-fill the password" convenience
+    on a trusted laptop can set ``ARANGO_CYPHER_EXPOSE_DEFAULTS_PASSWORD``
+    to ``1``.
     """
     if _PUBLIC_MODE:
         raise HTTPException(status_code=404, detail="Not available in public mode")
@@ -514,11 +780,16 @@ def connect_defaults():
         protocol = os.getenv("ARANGO_PROTOCOL", "http")
         arango_url = f"{protocol}://{host}:{port}"
 
+    expose_pw = os.getenv("ARANGO_CYPHER_EXPOSE_DEFAULTS_PASSWORD", "").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     return {
         "url": arango_url.rstrip("/"),
         "database": os.getenv("ARANGO_DB", "_system"),
         "username": os.getenv("ARANGO_USER", "root"),
-        "password": os.getenv("ARANGO_PASS", ""),
+        "password": os.getenv("ARANGO_PASS", "") if expose_pw else "",
     }
 
 
@@ -532,6 +803,7 @@ def cypher_profile():
 def translate_endpoint(req: TranslateRequest):
     """Translate Cypher to AQL."""
     import logging as _log
+
     _log.getLogger("arango_cypher.service").info(
         "translate request: cypher=%r, mapping_keys=%s",
         req.cypher[:80] if req.cypher else "(empty)",
@@ -552,7 +824,10 @@ def translate_endpoint(req: TranslateRequest):
         )
     except CoreError as e:
         _log.getLogger("arango_cypher.service").warning(
-            "translate CoreError: %s (code=%s) for cypher=%r", e, e.code, req.cypher[:80],
+            "translate CoreError: %s (code=%s) for cypher=%r",
+            e,
+            e.code,
+            req.cypher[:80],
         )
         raise HTTPException(
             status_code=422,
@@ -565,7 +840,8 @@ def translate_endpoint(req: TranslateRequest):
         return TranslateResponse(
             aql=correction.corrected_aql,
             bind_vars=correction.bind_vars or result.bind_vars,
-            warnings=[{"message": f"Using learned correction #{correction.id}"}] + list(result.warnings or []),
+            warnings=[{"message": f"Using learned correction #{correction.id}"}]
+            + list(result.warnings or []),
             elapsed_ms=elapsed_ms,
         )
 
@@ -743,7 +1019,9 @@ def aql_profile_endpoint(req: TranslateRequest, session: _Session = Depends(_get
 # ---------------------------------------------------------------------------
 
 
-def _sample_properties(db: StandardDatabase, collection_name: str, sample_size: int = 100) -> dict[str, dict[str, Any]]:
+def _sample_properties(
+    db: StandardDatabase, collection_name: str, sample_size: int = 100
+) -> dict[str, dict[str, Any]]:
     """Sample documents from a collection and infer property names and types."""
     try:
         cursor = db.aql.execute(
@@ -797,7 +1075,9 @@ def _infer_type(val: Any) -> str:
 
 
 def _infer_edge_endpoints(
-    db: StandardDatabase, edge_collection: str, limit: int = 20,
+    db: StandardDatabase,
+    edge_collection: str,
+    limit: int = 20,
 ) -> tuple[str | None, str | None]:
     """Sample _from/_to in an edge collection to determine which document collections it connects."""
     try:
@@ -1044,9 +1324,7 @@ def schema_force_reacquire(session: _Session = Depends(_get_session)):
         "source": {"kind": source_kind, "notes": source_notes},
         "warnings": warnings,
         "entity_count": len(bundle.conceptual_schema.get("entities") or []),
-        "relationship_count": len(
-            bundle.conceptual_schema.get("relationships") or []
-        ),
+        "relationship_count": len(bundle.conceptual_schema.get("relationships") or []),
     }
 
 
@@ -1095,6 +1373,7 @@ def sample_queries(dataset: str | None = None):
 def tools_schemas():
     """Return OpenAI-compatible function schemas for all agentic tools."""
     from .tools import get_tool_schemas
+
     return {"tools": get_tool_schemas()}
 
 
@@ -1107,6 +1386,7 @@ class ToolCallRequest(BaseModel):
 def tools_call(req: ToolCallRequest):
     """Dispatch a tool call by name with arguments."""
     from .tools import call_tool
+
     return call_tool(req.name, req.arguments)
 
 
@@ -1118,6 +1398,7 @@ class SuggestIndexesRequest(BaseModel):
 def suggest_indexes(req: SuggestIndexesRequest):
     """Suggest indexes for the given mapping."""
     from .tools import suggest_indexes_tool
+
     return suggest_indexes_tool({"mapping": req.mapping})
 
 
@@ -1136,8 +1417,7 @@ class TenantContextPayload(BaseModel):
     property: str = Field(
         ...,
         description=(
-            "Physical property name on the Tenant entity (e.g. "
-            "'TENANT_HEX_ID', 'NAME', 'SUBDOMAIN')."
+            "Physical property name on the Tenant entity (e.g. 'TENANT_HEX_ID', 'NAME', 'SUBDOMAIN')."
         ),
     )
     value: str = Field(..., description="Exact value to match.")
@@ -1167,7 +1447,11 @@ class NL2CypherRequest(BaseModel):
 
 
 @app.post("/nl2cypher")
-def nl2cypher_endpoint(req: NL2CypherRequest, _: None = Depends(_check_nl_rate_limit)):
+def nl2cypher_endpoint(
+    req: NL2CypherRequest,
+    _: None = Depends(_check_nl_rate_limit),
+    auth_session: _Session | None = Depends(_require_session_in_public_mode),
+):
     """Translate a natural language question into Cypher.
 
     When ``session_token`` is supplied and entity resolution is enabled,
@@ -1176,12 +1460,22 @@ def nl2cypher_endpoint(req: NL2CypherRequest, _: None = Depends(_check_nl_rate_l
     their database-correct form (WP-25.2).  Without a token the resolver
     is silently disabled and the prompt falls back to its pre-WP-25.2
     shape.
+
+    In ``ARANGO_CYPHER_PUBLIC_MODE`` the request body's
+    ``session_token`` field is ignored — the authenticated session
+    (resolved from ``X-Arango-Session`` / ``Authorization``) is used
+    instead, so a caller cannot point one user's NL request at another
+    user's database by guessing the body field.
     """
     from .nl2cypher import nl_to_cypher
     from .nl2cypher.tenant_guardrail import TenantContext
 
     db = None
-    if req.use_entity_resolution and req.session_token:
+    if _PUBLIC_MODE:
+        if auth_session is not None and req.use_entity_resolution:
+            db = auth_session.db
+            auth_session.touch()
+    elif req.use_entity_resolution and req.session_token:
         sess = _sessions.get(req.session_token)
         if sess is not None:
             db = sess.db
@@ -1228,7 +1522,10 @@ class NLSuggestRequest(BaseModel):
 
 
 @app.post("/nl-samples")
-def nl_samples_endpoint(req: NLSuggestRequest):
+def nl_samples_endpoint(
+    req: NLSuggestRequest,
+    _auth: _Session | None = Depends(_require_session_in_public_mode),
+):
     """Return a representative set of NL questions for the given schema.
 
     Used by the UI to seed the "Ask" history after schema mapping. Falls back
@@ -1253,7 +1550,11 @@ class NL2AqlRequest(BaseModel):
 
 
 @app.post("/nl2aql")
-def nl2aql_endpoint(req: NL2AqlRequest, _: None = Depends(_check_nl_rate_limit)):
+def nl2aql_endpoint(
+    req: NL2AqlRequest,
+    _: None = Depends(_check_nl_rate_limit),
+    _auth: _Session | None = Depends(_require_session_in_public_mode),
+):
     """Translate a natural language question directly into AQL (bypassing Cypher)."""
     from .nl2cypher import nl_to_aql
     from .nl2cypher.tenant_guardrail import TenantContext
@@ -1446,7 +1747,10 @@ class CorrectionRequest(BaseModel):
 
 
 @app.post("/corrections")
-def save_correction(req: CorrectionRequest):
+def save_correction(
+    req: CorrectionRequest,
+    _auth: _Session | None = Depends(_require_session_in_public_mode),
+):
     """Save a user-corrected AQL query for future reuse."""
     row_id = _corrections.save(
         cypher=req.cypher,
@@ -1461,7 +1765,10 @@ def save_correction(req: CorrectionRequest):
 
 
 @app.get("/corrections")
-def list_corrections(limit: int = 100):
+def list_corrections(
+    limit: int = 100,
+    _auth: _Session | None = Depends(_require_session_in_public_mode),
+):
     """List stored corrections, most recent first."""
     items = _corrections.list_all(limit=limit)
     return {
@@ -1483,7 +1790,10 @@ def list_corrections(limit: int = 100):
 
 
 @app.delete("/corrections/{correction_id}")
-def delete_correction(correction_id: int):
+def delete_correction(
+    correction_id: int,
+    _auth: _Session | None = Depends(_require_session_in_public_mode),
+):
     """Delete a single correction."""
     found = _corrections.delete(correction_id)
     if not found:
@@ -1492,7 +1802,9 @@ def delete_correction(correction_id: int):
 
 
 @app.delete("/corrections")
-def delete_all_corrections():
+def delete_all_corrections(
+    _auth: _Session | None = Depends(_require_session_in_public_mode),
+):
     """Delete all corrections."""
     count = _corrections.delete_all()
     return {"status": "deleted", "count": count}
@@ -1521,7 +1833,10 @@ class NLCorrectionRequest(BaseModel):
 
 
 @app.post("/nl-corrections")
-def save_nl_correction(req: NLCorrectionRequest):
+def save_nl_correction(
+    req: NLCorrectionRequest,
+    _auth: _Session | None = Depends(_require_session_in_public_mode),
+):
     """Save an approved (NL question → Cypher) pair for few-shot retrieval.
 
     The pair is appended to the BM25 corpus the next time
@@ -1544,7 +1859,10 @@ def save_nl_correction(req: NLCorrectionRequest):
 
 
 @app.get("/nl-corrections")
-def list_nl_corrections(limit: int = 100):
+def list_nl_corrections(
+    limit: int = 100,
+    _auth: _Session | None = Depends(_require_session_in_public_mode),
+):
     """List stored NL corrections, most recent first."""
     items = _nl_corrections.list_all(limit=limit)
     return {
@@ -1564,7 +1882,10 @@ def list_nl_corrections(limit: int = 100):
 
 
 @app.delete("/nl-corrections/{correction_id}")
-def delete_nl_correction(correction_id: int):
+def delete_nl_correction(
+    correction_id: int,
+    _auth: _Session | None = Depends(_require_session_in_public_mode),
+):
     """Delete a single NL correction."""
     found = _nl_corrections.delete(correction_id)
     if not found:
@@ -1573,7 +1894,9 @@ def delete_nl_correction(correction_id: int):
 
 
 @app.delete("/nl-corrections")
-def delete_all_nl_corrections():
+def delete_all_nl_corrections(
+    _auth: _Session | None = Depends(_require_session_in_public_mode),
+):
     """Delete all NL corrections."""
     count = _nl_corrections.delete_all()
     return {"status": "deleted", "count": count}
@@ -1654,6 +1977,7 @@ if _UI_DIR.is_dir():
     # its JS / CSS / icons without a rebuild.
     _UI_ASSETS = _UI_DIR / "assets"
     if _UI_ASSETS.is_dir():
+
         class _ImmutableAssets(StaticFiles):
             """StaticFiles subclass that marks hashed Vite assets immutable."""
 
@@ -1672,9 +1996,11 @@ if _UI_DIR.is_dir():
     for _icon in ("favicon.svg", "icons.svg"):
         _icon_path = _UI_DIR / _icon
         if _icon_path.is_file():
+
             def _make_icon_route(path: Path):
                 async def _serve_icon() -> FileResponse:
                     return FileResponse(path)
+
                 return _serve_icon
 
             app.add_api_route(
