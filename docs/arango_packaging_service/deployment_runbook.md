@@ -80,10 +80,13 @@ Produces `arango-cypher-py-0.1.0.tar.gz`. Upload and deploy per the upstream Ser
 A minimal clean-container install, matching what ServiceMaker will do:
 
 ```bash
-RUN_PACKAGING=1 pytest tests/test_packaging_smoke.py -v
+RUN_PACKAGING=1 pytest tests/integration/test_packaging_smoke.py -v
 ```
 
-This test (gated off by default so day-to-day CI is fast) builds the tarball, unpacks it into a fresh `uv` venv, and runs `uv sync` against the `[service]` extra. If it passes, ServiceMaker should too. If the analyzer prerequisite above is not met and `analyzer` is included in the extras, it will fail fast here with the "no matching distribution" error — which is what you want.
+Lives at [`tests/integration/test_packaging_smoke.py`](../../tests/integration/test_packaging_smoke.py); gated off by default (`RUN_PACKAGING=1`) so day-to-day CI is fast. The test contains two cases:
+
+- **`test_pyproject_extras_pin_published_versions_only`** — unconditional (runs on every `pytest` invocation, not gated). Parses `pyproject.toml` and refuses any `file:`, `./`, git / hg / svn, or ` @ `-direct-reference dependency in the `[analyzer]` / `[service]` / `[cli]` / `[owl]` / `[dev]` extras. Guards WP-19 acceptance criterion #3 as a standing regression. ~50 ms.
+- **`test_sdist_builds_and_imports_with_service_extras`** — `RUN_PACKAGING=1`-gated end-to-end. Runs `python -m build --sdist` (produces `arango_cypher_py-<ver>.tar.gz`), creates a throwaway venv via `python -m venv`, installs the sdist with the `[service,analyzer]` extras via `pip install '<sdist>[service,analyzer]'`, and asserts `import arango_cypher.service` succeeds inside that venv. Uses the portable stdlib toolchain (`build` + `venv` + `pip`) rather than `uv` so CI doesn't need a non-stdlib install; if you prefer `uv` locally, `uv build --sdist && uv sync --extra service --extra analyzer` is equivalent. Typical runtime 25–90 s depending on pip cache and PyPI latency. If the analyzer prerequisite above is not met and `analyzer` is included in the extras, it fails fast here with the "no matching distribution" error — which is what you want.
 
 ## Versioning a snapshot
 

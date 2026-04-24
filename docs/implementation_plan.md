@@ -421,12 +421,7 @@ Week 6:    Buffer / bug fixes from TCK runs
    - Teardown: `curl DELETE` for both FileManager versions and the ACP instance.
    - Troubleshooting section for the common failure modes (build fails → deps not pinned; deploy fails → token scope; container won't start → port or env mismatch).
 
-2. **Packaging smoke test** — new test file `tests/integration/test_packaging_smoke.py`, gated behind `RUN_PACKAGING=1`, that:
-   - Builds the sdist via `uv build --sdist`.
-   - Creates a fresh virtualenv in a temp directory.
-   - Runs `uv sync` against the built sdist with the `[service,analyzer]` extras enabled.
-   - Asserts `python -c "import arango_cypher.service"` succeeds inside that venv.
-   This catches dependency-graph regressions that would break deployment without requiring a live platform.
+2. **Packaging smoke test** — **done 2026-04-28.** Test file [`tests/integration/test_packaging_smoke.py`](../tests/integration/test_packaging_smoke.py) with two cases: (a) a standing `pyproject.toml` pin-guard (unconditional, no gate — refuses `file:` / `./` / git / hg / svn / ` @ `-direct-reference entries in any extra, failing fast if a dev accidentally leaks an editable-install into the manifest); and (b) the canonical end-to-end gated behind `RUN_PACKAGING=1` — builds the sdist via `python -m build --sdist`, creates a fresh venv via `python -m venv`, installs with `pip install '<sdist>[service,analyzer]'`, and asserts `import arango_cypher.service` succeeds. Uses the portable stdlib toolchain (`build` + `venv` + `pip`) rather than `uv` so the smoke test has no non-stdlib prerequisites; `uv build` / `uv sync` are equivalent for a dev running the flow locally. Runtime 25–90 s end-to-end depending on PyPI cache. Intended CI invocation: nightly cron, not every-PR fast lane.
 
 3. **`pyproject.toml` cleanup** — **done 2026-04-24 (PR #8).** `arangodb-schema-analyzer` is pinned as `>=0.6.1,<0.7` in `[analyzer]`, `[service]`, and `[dev]`. Three places because each extra is independently resolvable; a DRY refactor is tracked as a paper-cut item in the post-Wave-6a code-quality audit (§5 in the audit; separate from WP-19).
 
@@ -449,11 +444,11 @@ Week 6:    Buffer / bug fixes from TCK runs
 
 **Acceptance criteria:**
 
-1. The runbook document exists and a human following it end-to-end can deploy this repo to a staging Arango Platform without consulting external sources.
-2. `RUN_PACKAGING=1 pytest tests/integration/test_packaging_smoke.py` passes on a clean checkout. (Upstream publication dependency resolved 2026-04-23.)
-3. `pyproject.toml`'s `[analyzer]` extra pins a published version with no local-path or git references. *Done — pinned to `>=0.6.1,<0.7` as of 2026-04-24.*
+1. The runbook document exists and a human following it end-to-end can deploy this repo to a staging Arango Platform without consulting external sources. *Runbook landed 2026-04-27; end-to-end staging verification is the one outstanding human-in-the-loop step.*
+2. `RUN_PACKAGING=1 pytest tests/integration/test_packaging_smoke.py` passes on a clean checkout. (Upstream publication dependency resolved 2026-04-23.) *Done 2026-04-28 — passes in 25 s locally; see test file for the two cases.*
+3. `pyproject.toml`'s `[analyzer]` extra pins a published version with no local-path or git references. *Done — pinned to `>=0.6.1,<0.7` as of 2026-04-24; guarded by the unconditional pin-guard test shipped 2026-04-28.*
 
-**Estimate:** 2-3 days in this repo. Runbook ~1 day (done 2026-04-27 — see `docs/arango_packaging_service/deployment_runbook.md`), smoke test ~1 day (outstanding), pyproject cleanup ~0.5 day (done 2026-04-24 via PR #8).
+**Estimate:** 2-3 days in this repo. Runbook ~1 day (done 2026-04-27 — see `docs/arango_packaging_service/deployment_runbook.md`), smoke test ~1 day (done 2026-04-28), pyproject cleanup ~0.5 day (done 2026-04-24 via PR #8). Only remaining item is the staging-deploy walk-through of acceptance criterion #1.
 
 **Dependencies:**
 
@@ -935,7 +930,7 @@ Update this table as work packages are completed:
 | WP-16 | Datasets expansion | v0.3 | **Done** | 2026-04-13 |
 | WP-17 | NL-to-Cypher pipeline | v0.3 | **Done** | 2026-04-13 |
 | WP-18 | Index-aware transpilation | v0.3 | **Done** | 2026-04-13 |
-| WP-19 | Arango Platform deployment enablement | v0.4 | **Ready** (upstream dependency resolved 2026-04-23) | WP body above. Runbook landed 2026-04-27. Remaining: `tests/integration/test_packaging_smoke.py` (behind `RUN_PACKAGING=1`) and an end-to-end staging deploy to close acceptance criterion #1. |
+| WP-19 | Arango Platform deployment enablement | v0.4 | **In progress** (2/3 acceptance criteria met) | WP body above. Runbook landed 2026-04-27; packaging smoke test landed 2026-04-28 (`tests/integration/test_packaging_smoke.py`; pin-guard runs every `pytest`, end-to-end behind `RUN_PACKAGING=1`, 25 s locally). Remaining: end-to-end staging deploy to close acceptance criterion #1 (human-in-the-loop). |
 | WP-20 | Filter pushdown into traversals | v0.4 | **Done** | 2026-04-15 (WS-F/G sprint — PRUNE for variable-length, conservative rules). |
 | WP-26 | Translation caching (LRU, 256 entries) | v0.4 | **Done** | 2026-04-13. Originally tracked as WP-19; renumbered 2026-04-17 when WP-19 was reassigned to Arango Platform deployment enablement (PRD §15). |
 | WP-21 | List + pattern comprehensions | v0.4 | **Done** | 2026-04-13 |
