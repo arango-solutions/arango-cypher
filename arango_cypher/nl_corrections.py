@@ -80,20 +80,24 @@ def _mapping_hash(mapping: dict[str, Any] | Any) -> str:
 
     Mirrors :func:`arango_cypher.corrections._mapping_hash` so the two
     stores share a single canonical fingerprint — a correction on the
-    same mapping is keyed identically regardless of which layer saved it.
+    same mapping is keyed identically regardless of which layer saved it
+    or which key spelling (snake_case vs. camelCase) the caller used.
     """
+    cs: Any
+    pm: Any
     if hasattr(mapping, "conceptual_schema"):
-        raw = {
-            "cs": mapping.conceptual_schema,
-            "pm": mapping.physical_mapping,
-        }
+        cs = mapping.conceptual_schema
+        pm = mapping.physical_mapping
     elif isinstance(mapping, dict):
-        raw = {
-            "cs": mapping.get("conceptual_schema", {}),
-            "pm": mapping.get("physical_mapping", {}),
-        }
+        cs = mapping.get("conceptual_schema")
+        if cs is None:
+            cs = mapping.get("conceptualSchema", {})
+        pm = mapping.get("physical_mapping")
+        if pm is None:
+            pm = mapping.get("physicalMapping", {})
     else:
-        raw = {}
+        cs, pm = {}, {}
+    raw = {"cs": cs, "pm": pm}
     blob = json.dumps(raw, sort_keys=True, default=str).encode()
     return hashlib.sha256(blob).hexdigest()[:16]
 
@@ -213,9 +217,7 @@ def delete(correction_id: int) -> bool:
     """Delete a correction by id. Returns True if it existed."""
     with _lock:
         conn = _get_conn()
-        cur = conn.execute(
-            "DELETE FROM nl_corrections WHERE id = ?", (correction_id,)
-        )
+        cur = conn.execute("DELETE FROM nl_corrections WHERE id = ?", (correction_id,))
         conn.commit()
         existed = cur.rowcount > 0
     if existed:

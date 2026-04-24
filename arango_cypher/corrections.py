@@ -51,19 +51,33 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def _mapping_hash(mapping: dict[str, Any] | Any) -> str:
-    """Deterministic hash of the mapping for fingerprinting."""
+    """Deterministic hash of the mapping for fingerprinting.
+
+    Both snake_case (``conceptual_schema`` / ``physical_mapping``) and
+    camelCase (``conceptualSchema`` / ``physicalMapping``) key shapes are
+    accepted on the wire — the FastAPI endpoints normalise from camelCase
+    on POST and the python API uses snake_case. Hashing the *first* shape
+    we see would silently bucket "the same mapping" under two different
+    hashes depending on caller, so :func:`lookup` would miss corrections
+    saved by the alternative caller. We resolve to a canonical
+    snake_case form here before hashing so the fingerprint is the
+    contract, not the spelling.
+    """
+    cs: Any
+    pm: Any
     if hasattr(mapping, "conceptual_schema"):
-        raw = {
-            "cs": mapping.conceptual_schema,
-            "pm": mapping.physical_mapping,
-        }
+        cs = mapping.conceptual_schema
+        pm = mapping.physical_mapping
     elif isinstance(mapping, dict):
-        raw = {
-            "cs": mapping.get("conceptual_schema", {}),
-            "pm": mapping.get("physical_mapping", {}),
-        }
+        cs = mapping.get("conceptual_schema")
+        if cs is None:
+            cs = mapping.get("conceptualSchema", {})
+        pm = mapping.get("physical_mapping")
+        if pm is None:
+            pm = mapping.get("physicalMapping", {})
     else:
-        raw = {}
+        cs, pm = {}, {}
+    raw = {"cs": cs, "pm": pm}
     blob = json.dumps(raw, sort_keys=True, default=str).encode()
     return hashlib.sha256(blob).hexdigest()[:16]
 
@@ -98,9 +112,15 @@ def lookup(cypher: str, mapping: dict[str, Any] | Any) -> Correction | None:
     if row is None:
         return None
     return Correction(
-        id=row[0], cypher=row[1], mapping_hash=row[2], database=row[3],
-        original_aql=row[4], corrected_aql=row[5],
-        bind_vars=json.loads(row[6]), created_at=row[7], note=row[8],
+        id=row[0],
+        cypher=row[1],
+        mapping_hash=row[2],
+        database=row[3],
+        original_aql=row[4],
+        corrected_aql=row[5],
+        bind_vars=json.loads(row[6]),
+        created_at=row[7],
+        note=row[8],
     )
 
 
@@ -145,9 +165,15 @@ def list_all(limit: int = 100) -> list[Correction]:
         ).fetchall()
     return [
         Correction(
-            id=r[0], cypher=r[1], mapping_hash=r[2], database=r[3],
-            original_aql=r[4], corrected_aql=r[5],
-            bind_vars=json.loads(r[6]), created_at=r[7], note=r[8],
+            id=r[0],
+            cypher=r[1],
+            mapping_hash=r[2],
+            database=r[3],
+            original_aql=r[4],
+            corrected_aql=r[5],
+            bind_vars=json.loads(r[6]),
+            created_at=r[7],
+            note=r[8],
         )
         for r in rows
     ]
@@ -157,9 +183,7 @@ def delete(correction_id: int) -> bool:
     """Delete a correction by id. Returns True if it existed."""
     with _lock:
         conn = _get_conn()
-        cur = conn.execute(
-            "DELETE FROM aql_corrections WHERE id = ?", (correction_id,)
-        )
+        cur = conn.execute("DELETE FROM aql_corrections WHERE id = ?", (correction_id,))
         conn.commit()
         return cur.rowcount > 0
 
