@@ -16,6 +16,8 @@ from rich.table import Table
 
 from arango_query_core import CoreError, MappingBundle, MappingSource, mapping_from_wire_dict
 
+from ._env import read_arango_password
+
 app = typer.Typer(
     name="arango-cypher-py",
     help="Cypher → AQL transpiler for ArangoDB",
@@ -88,7 +90,7 @@ def _connect(
     p = port or int(os.getenv("ARANGO_PORT", "8529"))
     d = db or os.getenv("ARANGO_DB", "_system")
     u = user or os.getenv("ARANGO_USER", "root")
-    pw = password if password is not None else os.getenv("ARANGO_PASSWORD", "")
+    pw = password if password is not None else read_arango_password(caller="arango_cypher.cli")
     client = ArangoClient(hosts=f"http://{h}:{p}")
     return client.db(d, username=u, password=pw)
 

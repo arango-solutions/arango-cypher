@@ -244,6 +244,38 @@ cases above plus a round-trip property (`mapping_hash(mapping_from_wire_dict(d))
 
 ## 5. No `@field_validator` on request models — **L**
 
+> **Status: CLOSED — 2026-05-01 (audit-v2 batch 3).** Every
+> user-facing request model in `arango_cypher/service.py` now carries
+> stricter-than-type bounds derived from a small set of module-level
+> constants (`_MAX_CYPHER_LENGTH = 100_000`, `_MAX_AQL_LENGTH = 100_000`,
+> `_MAX_NL_QUESTION_LENGTH = 4_000`, `_MAX_RETRY_HINT_LENGTH = 8_000`,
+> `_MAX_TURTLE_LENGTH = 1_000_000`, `_MAX_NOTE_LENGTH = 4_000`,
+> `_MAX_FIELD_LENGTH = 256`). Concretely:
+> `TranslateRequest.cypher` / `ExecuteRequest.cypher` /
+> `ValidateRequest.cypher` / `ExecuteAqlRequest.aql` /
+> `CorrectionRequest.{cypher,original_aql,corrected_aql}` use the
+> Cypher/AQL envelopes; `NL2CypherRequest.question` /
+> `NL2AqlRequest.question` / `NLCorrectionRequest.question` use the
+> NL envelope; `NL2CypherRequest.retry_context` uses the larger
+> retry-hint envelope (parser/EXPLAIN error blobs); `OwlImportRequest.turtle`
+> uses the 1 MB turtle cap; `ConnectRequest.{url,database,username,password}`,
+> `TenantContextPayload.{property,value,display}`,
+> `ToolCallRequest.name`, `*Request.database`, `*Request.session_token`,
+> `CorrectionRequest.note` / `NLCorrectionRequest.note` use the
+> small-field / note caps. `ConnectRequest.url` additionally carries a
+> `@field_validator` that requires the value to start with `http://` or
+> `https://` (defence in depth in front of the SSRF guard added in
+> PR #7 — the validator catches the cheaper, more obviously-broken
+> cases at request-validation time so the caller gets a clear 422
+> instead of a deeper 4xx/5xx after the connect machinery has spun
+> up). Side-fix to the `_sanitize_pydantic_errors` handler: stringify
+> any `BaseException` instance left in `ctx[...]` before serialising,
+> otherwise the raw `ValueError` from the URL validator crashed the
+> 422 encoder. New `tests/test_request_model_validators.py` (12
+> cases) pins the at-limit-passes / one-byte-over-rejects contract
+> for `/translate`, `/execute-aql`, `/nl2cypher`, `/corrections`,
+> and `/connect`.
+
 **Where:** every `BaseModel` subclass in `arango_cypher/service.py`
 (\`ConnectRequest\`, \`TranslateRequest\`, \`ExecuteRequest\`,
 \`NL2CypherRequest\`, etc.).
@@ -297,6 +329,28 @@ hole just prevents certain kinds of production diagnostics.
 ---
 
 ## 7. `ARANGO_PASS` vs `ARANGO_PASSWORD` — **L**
+
+> **Status: CLOSED — 2026-05-01 (audit-v2 batch 3).** New shared
+> helper `arango_cypher/_env.py::read_arango_password(*, caller)`
+> resolves the split. Contract: `ARANGO_PASSWORD` (canonical, matches
+> the Postgres / Redis / MongoDB / MySQL / Cassandra `*_PASSWORD`
+> convention) wins when set; `ARANGO_PASS` is accepted as a
+> deprecated fallback and emits exactly one
+> `DeprecationWarning` + `logging.WARNING` per (caller, fallback-name)
+> pair so a long-running service that calls the helper per-request
+> doesn't spam its log; neither set returns `""` (preserves the prior
+> default); `ARANGO_PASSWORD=""` is treated as an intentional value
+> (auth-less local dev) and does *not* fall through to the legacy
+> name. Both call sites flipped: `arango_cypher/service.py` (the
+> `/connect/defaults` body assembler) and `arango_cypher/cli.py`
+> (the `_connect` factory). `.env.example` rewritten to flip the
+> canonical / legacy labels and to document the deprecation timeline
+> (legacy name removed at 1.0). New `tests/test_env_password.py`
+> (8 cases) pins the contract: canonical wins, legacy warns once per
+> caller, distinct callers each get their own warning, empty
+> canonical short-circuits, and `_reset_warning_state_for_tests()`
+> re-arms for tests that need to exercise the fallback path more
+> than once.
 
 **Where:** `arango_cypher/service.py:798` reads `ARANGO_PASS`;
 `arango_cypher/cli.py:90` reads `ARANGO_PASSWORD`. Documented at

@@ -35,7 +35,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from arango_query_core import (
     CoreError,
@@ -47,6 +47,7 @@ from arango_query_core import (
     mapping_from_wire_dict,
 )
 
+from ._env import read_arango_password
 from .api import get_cypher_profile, translate, validate_cypher_profile
 from .extensions import register_all_extensions
 
@@ -173,6 +174,15 @@ def _sanitize_pydantic_errors(errors: list[dict[str, Any]]) -> list[dict[str, An
             new["input"] = _redact_value(new["input"])
         if "msg" in new and isinstance(new["msg"], str):
             new["msg"] = _sanitize_error(new["msg"])
+        # Pydantic v2 attaches the raw ``Exception`` instance under
+        # ``ctx['error']`` whenever a ``@field_validator`` raises (the
+        # ``value_error`` family). The bare instance is not JSON-
+        # serialisable — left in place it crashes the response encoder
+        # before the 422 ever reaches the client. Stringify it (the
+        # ``msg`` field already carries the human-readable form, so we
+        # only need to keep ``ctx`` JSON-safe).
+        if "ctx" in new and isinstance(new["ctx"], dict):
+            new["ctx"] = {k: (str(v) if isinstance(v, BaseException) else v) for k, v in new["ctx"].items()}
         cleaned.append(new)
     return cleaned
 
@@ -192,8 +202,8 @@ def _redact_value(val: Any) -> Any:
 async def _validation_error_handler(request: Request, exc: RequestValidationError):
     # Body fragments help diagnose UI ↔ service contract drift but they
     # routinely contain credentials (saved-correction payloads echo
-    # ``ARANGO_PASS``, ``Authorization`` headers leak via
-    # ``X-Arango-Session`` typos, etc.). Always run the same redaction
+    # ``ARANGO_PASSWORD`` / ``ARANGO_PASS``, ``Authorization`` headers
+    # leak via ``X-Arango-Session`` typos, etc.). Always run the same redaction
     # the error-translator uses, and skip body logging entirely in
     # public mode where the operator has signalled a hostile audience.
     safe_errors = _sanitize_pydantic_errors(exc.errors())
@@ -380,12 +390,44 @@ _default_registry = _build_registry()
 # Request/Response models
 # ---------------------------------------------------------------------------
 
+# Stricter-than-type field bounds for the user-controlled string fields on
+# every request model below. Closes audit-v2 finding #5 — without these,
+# a single 10 MB POST body can wedge the ANTLR parser thread, push novel-
+# length prompts at an LLM, or balloon the corrections SQLite store.
+# These constants are intentionally generous (a real Cypher query is
+# almost never above ~10 KB) so they bound an attack rather than restrict
+# normal use, and they live as module-level constants so an operator who
+# needs to raise one for a specific deployment can grep + monkeypatch.
+_MAX_CYPHER_LENGTH = 100_000  # ~100 KB; a real interactive query is < 10 KB
+_MAX_AQL_LENGTH = 100_000  # raw AQL on /execute-aql; same envelope
+_MAX_NL_QUESTION_LENGTH = 4_000  # bounds LLM context-window cost
+_MAX_RETRY_HINT_LENGTH = 8_000  # WP-29 retry context (parser/EXPLAIN error blob)
+_MAX_TURTLE_LENGTH = 1_000_000  # OWL ontologies can be sizeable; 1 MB cap
+_MAX_NOTE_LENGTH = 4_000  # correction notes — keep them human-readable
+_MAX_FIELD_LENGTH = 256  # urls, usernames, db names, tool names, tenant fields
+
 
 class ConnectRequest(BaseModel):
-    url: str = Field(default="http://localhost:8529")
-    database: str = Field(default="_system")
-    username: str = Field(default="root")
-    password: str = Field(default="")
+    url: str = Field(default="http://localhost:8529", max_length=_MAX_FIELD_LENGTH)
+    database: str = Field(default="_system", max_length=_MAX_FIELD_LENGTH)
+    username: str = Field(default="root", max_length=_MAX_FIELD_LENGTH)
+    password: str = Field(default="", max_length=_MAX_FIELD_LENGTH)
+
+    @field_validator("url")
+    @classmethod
+    def _url_shape(cls, v: str) -> str:
+        # Defensive shape-check before the SSRF guard at /connect runs.
+        # The /connect endpoint already rejects bad targets at runtime via
+        # the SSRF allowlist (PR #7); this validator catches the cheaper,
+        # more obviously-broken cases at request-validation time so the
+        # caller gets a 422 with a clear "url is malformed" hint instead
+        # of a deeper 4xx/5xx after the connect machinery has spun up.
+        if not v:
+            return v
+        lowered = v.lower()
+        if not (lowered.startswith("http://") or lowered.startswith("https://")):
+            raise ValueError("url must start with http:// or https://")
+        return v
 
 
 class ConnectResponse(BaseModel):
@@ -394,7 +436,7 @@ class ConnectResponse(BaseModel):
 
 
 class TranslateRequest(BaseModel):
-    cypher: str
+    cypher: str = Field(..., max_length=_MAX_CYPHER_LENGTH)
     mapping: dict[str, Any] | None = None
     params: dict[str, Any] | None = None
     extensions_enabled: bool = True
@@ -408,7 +450,7 @@ class TranslateResponse(BaseModel):
 
 
 class ExecuteRequest(BaseModel):
-    cypher: str
+    cypher: str = Field(..., max_length=_MAX_CYPHER_LENGTH)
     mapping: dict[str, Any] | None = None
     params: dict[str, Any] | None = None
     extensions_enabled: bool = True
@@ -428,7 +470,7 @@ class ExecuteResponse(BaseModel):
 
 
 class ValidateRequest(BaseModel):
-    cypher: str
+    cypher: str = Field(..., max_length=_MAX_CYPHER_LENGTH)
     mapping: dict[str, Any] | None = None
     params: dict[str, Any] | None = None
 
@@ -805,10 +847,13 @@ def connect_defaults():
     password is omitted from the response by default — the field is
     still present (the UI's connect dialog binds against it) but the
     value is the empty string so a curious anonymous caller can't
-    pull ``ARANGO_PASS`` out of the .env on a single-user dev box.
+    pull the credential out of the .env on a single-user dev box.
     Operators who want the legacy "auto-fill the password" convenience
     on a trusted laptop can set ``ARANGO_CYPHER_EXPOSE_DEFAULTS_PASSWORD``
-    to ``1``.
+    to ``1``. The password value itself is read via
+    :func:`arango_cypher._env.read_arango_password`, which prefers
+    ``ARANGO_PASSWORD`` (canonical) over ``ARANGO_PASS`` (deprecated
+    fallback).
     """
     if _PUBLIC_MODE:
         raise HTTPException(status_code=404, detail="Not available in public mode")
@@ -829,7 +874,7 @@ def connect_defaults():
         "url": arango_url.rstrip("/"),
         "database": os.getenv("ARANGO_DB", "_system"),
         "username": os.getenv("ARANGO_USER", "root"),
-        "password": os.getenv("ARANGO_PASS", "") if expose_pw else "",
+        "password": (read_arango_password(caller="arango_cypher.service") if expose_pw else ""),
     }
 
 
@@ -947,7 +992,7 @@ def execute_endpoint(
 
 
 class ExecuteAqlRequest(BaseModel):
-    aql: str
+    aql: str = Field(..., max_length=_MAX_AQL_LENGTH)
     bind_vars: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -1448,7 +1493,7 @@ def tools_schemas():
 
 
 class ToolCallRequest(BaseModel):
-    name: str
+    name: str = Field(..., max_length=_MAX_FIELD_LENGTH)
     arguments: dict[str, Any] = {}
 
 
@@ -1492,24 +1537,26 @@ class TenantContextPayload(BaseModel):
 
     property: str = Field(
         ...,
+        max_length=_MAX_FIELD_LENGTH,
         description=(
             "Physical property name on the Tenant entity (e.g. 'TENANT_HEX_ID', 'NAME', 'SUBDOMAIN')."
         ),
     )
-    value: str = Field(..., description="Exact value to match.")
+    value: str = Field(..., max_length=_MAX_FIELD_LENGTH, description="Exact value to match.")
     display: str | None = Field(
         default=None,
+        max_length=_MAX_FIELD_LENGTH,
         description="Optional human-readable label for prompts / UI.",
     )
 
 
 class NL2CypherRequest(BaseModel):
-    question: str
+    question: str = Field(..., max_length=_MAX_NL_QUESTION_LENGTH)
     mapping: dict[str, Any] | None = None
     use_llm: bool = True
     use_fewshot: bool = True
     use_entity_resolution: bool = True
-    session_token: str | None = None
+    session_token: str | None = Field(default=None, max_length=_MAX_FIELD_LENGTH)
     tenant_context: TenantContextPayload | None = None
     # WP-29 Part 4: WP-30 hand-off contract. When supplied, the NL
     # retry loop seeds ``PromptBuilder.retry_context`` on the very
@@ -1519,7 +1566,7 @@ class NL2CypherRequest(BaseModel):
     # button; without a caller it stays ``None`` and the prompt is
     # byte-identical to the pre-WP-29 shape for zero-shot bare-name
     # schemas.
-    retry_context: str | None = None
+    retry_context: str | None = Field(default=None, max_length=_MAX_RETRY_HINT_LENGTH)
 
 
 @app.post("/nl2cypher")
@@ -1621,7 +1668,7 @@ def nl_samples_endpoint(
 
 
 class NL2AqlRequest(BaseModel):
-    question: str
+    question: str = Field(..., max_length=_MAX_NL_QUESTION_LENGTH)
     mapping: dict[str, Any] | None = None
     tenant_context: TenantContextPayload | None = None
 
@@ -1779,7 +1826,7 @@ class OwlExportRequest(BaseModel):
 
 
 class OwlImportRequest(BaseModel):
-    turtle: str
+    turtle: str = Field(..., max_length=_MAX_TURTLE_LENGTH)
 
 
 @app.post("/mapping/export-owl")
@@ -1820,13 +1867,13 @@ from . import corrections as _corrections  # noqa: E402
 
 
 class CorrectionRequest(BaseModel):
-    cypher: str
+    cypher: str = Field(..., max_length=_MAX_CYPHER_LENGTH)
     mapping: dict[str, Any] = Field(default_factory=dict)
-    database: str = ""
-    original_aql: str
-    corrected_aql: str
+    database: str = Field(default="", max_length=_MAX_FIELD_LENGTH)
+    original_aql: str = Field(..., max_length=_MAX_AQL_LENGTH)
+    corrected_aql: str = Field(..., max_length=_MAX_AQL_LENGTH)
     bind_vars: dict[str, Any] = Field(default_factory=dict)
-    note: str = ""
+    note: str = Field(default="", max_length=_MAX_NOTE_LENGTH)
 
 
 @app.post("/corrections")
@@ -1908,11 +1955,11 @@ from . import nl_corrections as _nl_corrections  # noqa: E402
 
 
 class NLCorrectionRequest(BaseModel):
-    question: str
-    cypher: str
+    question: str = Field(..., max_length=_MAX_NL_QUESTION_LENGTH)
+    cypher: str = Field(..., max_length=_MAX_CYPHER_LENGTH)
     mapping: dict[str, Any] = Field(default_factory=dict)
-    database: str = ""
-    note: str = ""
+    database: str = Field(default="", max_length=_MAX_FIELD_LENGTH)
+    note: str = Field(default="", max_length=_MAX_NOTE_LENGTH)
 
 
 @app.post("/nl-corrections")
