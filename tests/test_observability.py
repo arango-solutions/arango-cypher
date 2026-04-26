@@ -48,7 +48,9 @@ from arango_cypher.service.observability import (
     log_llm_call,
 )
 
-UUID4_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+UUID4_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 
 
 @pytest.fixture
@@ -163,8 +165,12 @@ class TestCorrelationIdLogFilter:
         # HTTPException, but the log record fires first.
         assert resp.status_code in (200, 400, 422)
         assert resp.headers.get("x-request-id") == "test-cid-xyz"
-        request_records = [r for r in captured_records if r.correlation_id == "test-cid-xyz"]
-        assert request_records, "Expected at least one record carrying the test correlation id"
+        request_records = [
+            r for r in captured_records if r.correlation_id == "test-cid-xyz"
+        ]
+        assert (
+            request_records
+        ), "Expected at least one record carrying the test correlation id"
 
 
 # ---------------------------------------------------------------------------
@@ -190,11 +196,16 @@ class TestLogEndpointTiming:
             note="connect failed against http://root:secret@db.internal:8529",
         )
         rec = next(
-            r for r in captured_records
-            if r.getMessage() == "endpoint_timing" and getattr(r, "endpoint", "") == "/foo"
+            r
+            for r in captured_records
+            if r.getMessage() == "endpoint_timing"
+            and getattr(r, "endpoint", "") == "/foo"
         )
         assert "secret" not in rec.note
-        assert "db.internal" not in rec.note or rec.note == "connect failed against http://root:secret@db.internal:8529"
+        assert (
+            "db.internal" not in rec.note
+            or rec.note == "connect failed against http://root:secret@db.internal:8529"
+        )
         # Whichever redaction shape the helper applies, the credential
         # token must not survive.
         assert "secret" not in rec.note
@@ -230,8 +241,10 @@ class TestLogLlmCall:
             completion_tokens=500,
         )
         rec = next(
-            r for r in captured_records
-            if r.getMessage() == "llm_call" and getattr(r, "model", "") == "gpt-99-nonexistent"
+            r
+            for r in captured_records
+            if r.getMessage() == "llm_call"
+            and getattr(r, "model", "") == "gpt-99-nonexistent"
         )
         assert rec.cost_usd == 0.0
 
@@ -248,7 +261,8 @@ class TestLogLlmCall:
             method="rule_based",
         )
         rec = next(
-            r for r in captured_records
+            r
+            for r in captured_records
             if r.getMessage() == "llm_call" and getattr(r, "method", "") == "rule_based"
         )
         assert rec.provider == "-"
@@ -313,14 +327,20 @@ class TestConfigureObservability:
         # one CorrelationIdLogFilter — both on the logger and on its
         # handler (the helper double-installs intentionally; see the
         # comment in ``configure_observability``).
-        stream_handlers = [h for h in root.handlers if isinstance(h, logging.StreamHandler)]
-        correlation_filters = [f for f in root.filters if isinstance(f, CorrelationIdLogFilter)]
+        stream_handlers = [
+            h for h in root.handlers if isinstance(h, logging.StreamHandler)
+        ]
+        correlation_filters = [
+            f for f in root.filters if isinstance(f, CorrelationIdLogFilter)
+        ]
         assert len(stream_handlers) == 1
         assert len(correlation_filters) == 1
         # Handler also carries the filter — propagated records from
         # ``arango_cypher.service.*`` rely on the handler-level filter.
         handler_filters = [
-            f for f in stream_handlers[0].filters if isinstance(f, CorrelationIdLogFilter)
+            f
+            for f in stream_handlers[0].filters
+            if isinstance(f, CorrelationIdLogFilter)
         ]
         assert len(handler_filters) == 1
 

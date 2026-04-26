@@ -113,7 +113,9 @@ class CorrelationIdMiddleware:
     def __init__(self, app: Callable[..., Awaitable[None]]):
         self.app = app
 
-    async def __call__(self, scope: dict[str, Any], receive: Callable, send: Callable) -> None:
+    async def __call__(
+        self, scope: dict[str, Any], receive: Callable, send: Callable
+    ) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -184,11 +186,30 @@ class _KeyValueFormatter(logging.Formatter):
         # ``logging`` module (3.11 baseline) — anything new on a future
         # Python release just shows up as an extra and we live with it.
         {
-            "args", "asctime", "created", "exc_info", "exc_text", "filename",
-            "funcName", "levelname", "levelno", "lineno", "message", "module",
-            "msecs", "msg", "name", "pathname", "process", "processName",
-            "relativeCreated", "stack_info", "thread", "threadName",
-            "taskName", "correlation_id",
+            "args",
+            "asctime",
+            "created",
+            "exc_info",
+            "exc_text",
+            "filename",
+            "funcName",
+            "levelname",
+            "levelno",
+            "lineno",
+            "message",
+            "module",
+            "msecs",
+            "msg",
+            "name",
+            "pathname",
+            "process",
+            "processName",
+            "relativeCreated",
+            "stack_info",
+            "thread",
+            "threadName",
+            "taskName",
+            "correlation_id",
         }
     )
 
@@ -197,9 +218,12 @@ class _KeyValueFormatter(logging.Formatter):
         ts = f"{ts}.{int(record.msecs):03d}Z"
         cid = getattr(record, "correlation_id", "-")
         msg = record.getMessage()
-        prefix = f"{ts} {record.levelname} {record.name} correlation_id={cid} msg={msg!r}"
+        prefix = (
+            f"{ts} {record.levelname} {record.name} correlation_id={cid} msg={msg!r}"
+        )
         extras = {
-            k: v for k, v in record.__dict__.items()
+            k: v
+            for k, v in record.__dict__.items()
             if k not in self._RESERVED and not k.startswith("_")
         }
         if not extras:
@@ -317,7 +341,9 @@ def configure_observability(*, force: bool = False) -> None:
     root.addFilter(correlation_filter)
 
     json_mode = os.getenv("ARANGO_CYPHER_LOG_JSON", "").lower() in ("1", "true", "yes")
-    formatter: logging.Formatter = _JsonFormatter() if json_mode else _KeyValueFormatter()
+    formatter: logging.Formatter = (
+        _JsonFormatter() if json_mode else _KeyValueFormatter()
+    )
 
     handler = logging.StreamHandler()
     handler.setFormatter(formatter)
@@ -472,7 +498,8 @@ def estimate_llm_cost_usd(
         return 0.0
     input_rate, output_rate = _PRICING_PER_1K_TOKENS[key]
     return round(
-        (prompt_tokens / 1000.0) * input_rate + (completion_tokens / 1000.0) * output_rate,
+        (prompt_tokens / 1000.0) * input_rate
+        + (completion_tokens / 1000.0) * output_rate,
         6,
     )
 
@@ -587,7 +614,9 @@ class _EndpointTimer:
         if exc_type is not None:
             self.status = "error"
             self.extras.setdefault("error_type", exc_type.__name__)
-        log_endpoint_timing(self.endpoint, elapsed_ms, status=self.status, **self.extras)
+        log_endpoint_timing(
+            self.endpoint, elapsed_ms, status=self.status, **self.extras
+        )
 
     def add(self, **extras: Any) -> None:
         """Attach extras inside the ``with`` block (e.g. ``timer.add(rows=42)``).
