@@ -97,6 +97,15 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["E402", "F401", "F841"]
 "scripts/**/*.py" = ["E402"]
+# Audit-v2 #8 split: ``arango_cypher/service/__init__.py`` is a re-export
+# shim — every ``from .submodule import _X`` is intentional surface that
+# preserves the pre-split ``from arango_cypher.service import _X`` contract
+# for tests / scripts / external callers. Adding every underscore name to
+# ``__all__`` would be misleading (these are not "public API"; they're
+# re-exported only for backward compat) so we ignore F401 instead. E402
+# covers the deliberate ordering: the ``sys.modules`` purge has to run
+# *before* the submodule imports or it would invalidate them.
+"arango_cypher/service/__init__.py" = ["F401", "E402"]
 
 [project.scripts]
 arango-cypher-py = "arango_cypher.cli:app"

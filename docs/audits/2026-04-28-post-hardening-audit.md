@@ -29,7 +29,7 @@ defense-in-depth.
 | 5 | L | No `@field_validator` declarations on any `service.py` `BaseModel` request type — stricter-than-type validation (length, enum, URL shape) is absent | service |
 | 6 | L | Structured logging is effectively absent in `service.py` — 4 log calls in 2016 LOC; no request-correlation ID, no per-endpoint timing log line | service |
 | 7 | L | `ARANGO_PASS` / `ARANGO_PASSWORD` split between service and CLI is *documented* (`.env.example:9-15`) but still an operational footgun — both names should resolve to one | service + cli |
-| 8 | L | `arango_cypher/translate_v0.py` at 5063 LOC and `arango_cypher/service.py` at 2016 LOC are splittable monoliths (not urgent — pre-existing, grew organically) | refactor |
+| 8 | L | ~~`arango_cypher/service.py` at 2016 LOC~~ split 2026-05-02 (audit-v2 batch 4) — `service.py` is now `arango_cypher/service/` with 8 focused submodules + a routes subpackage. `arango_cypher/translate_v0.py` at 5063 LOC still pending. | refactor |
 | 9 | L | `ruff format --check` is intentionally skipped in CI (see the comment at `.github/workflows/ci.yml:19-21`) — follow-up tracked but never scheduled | ops |
 
 Severity legend:
@@ -374,7 +374,19 @@ dating the legacy name's removal at the next major.
 
 ## 8. `translate_v0.py` 5063 LOC, `service.py` 2016 LOC — **L**
 
-**Where:** `arango_cypher/translate_v0.py`, `arango_cypher/service.py`.
+> **Status: PARTIALLY CLOSED — 2026-05-02 (audit-v2 batch 4).**
+> `arango_cypher/service.py` (2232 LOC at split time) refactored into
+> the `arango_cypher/service/` package per the layout proposed below.
+> Zero behaviour change: the full unit suite (1097 tests) passes
+> byte-for-byte across the rename, and `from arango_cypher.service
+> import _X` keeps working for every previously-importable symbol via
+> the `__init__.py` re-export shim. Two-commit shape (rename → symbol
+> moves) so review is mechanical. `arango_cypher/translate_v0.py`
+> still pending — tracked separately because the AST-level split
+> needs golden re-baselines per slice and is at least a week of
+> careful work, not the half-day this batch budgeted.
+
+**Where:** `arango_cypher/translate_v0.py`, ~~`arango_cypher/service.py`~~ → `arango_cypher/service/{__init__,app,security,models,mapping,registry,ui}.py` + `arango_cypher/service/routes/{health,connect,cypher,schema,tools,nl,owl,corrections}.py`.
 
 **What:**
 
