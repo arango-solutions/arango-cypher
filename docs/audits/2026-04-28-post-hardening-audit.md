@@ -27,7 +27,7 @@ defense-in-depth.
 | 3 | **M** | CI `packaging` job path drift silently masked 0-test-collected runs from 2026-04-24 → 2026-04-28 (fixed in PR #12 amend, but category-level risk remains) | ops |
 | 4 | L | `mapping_from_wire_dict` / `mapping_hash` (new public helpers from PR #10) have only indirect test coverage — no dedicated unit tests in `tests/test_arango_query_core_*.py` | tests |
 | 5 | L | No `@field_validator` declarations on any `service.py` `BaseModel` request type — stricter-than-type validation (length, enum, URL shape) is absent | service |
-| 6 | L | Structured logging is effectively absent in `service.py` — 4 log calls in 2016 LOC; no request-correlation ID, no per-endpoint timing log line | service |
+| 6 | L | ~~Structured logging is effectively absent in `service.py` — 4 log calls in 2016 LOC; no request-correlation ID, no per-endpoint timing log line~~ closed 2026-05-03 (audit-v2 batch 5) — new `service/observability.py` adds `CorrelationIdMiddleware`, `log_endpoint_timing` wired into all 35 endpoints, `log_llm_call` on NL endpoints, JSON formatter via `ARANGO_CYPHER_LOG_JSON=1`. | service |
 | 7 | L | `ARANGO_PASS` / `ARANGO_PASSWORD` split between service and CLI is *documented* (`.env.example:9-15`) but still an operational footgun — both names should resolve to one | service + cli |
 | 8 | L | ~~`arango_cypher/service.py` at 2016 LOC~~ split 2026-05-02 (audit-v2 batch 4) — `service.py` is now `arango_cypher/service/` with 8 focused submodules + a routes subpackage. `arango_cypher/translate_v0.py` at 5063 LOC still pending. | refactor |
 | 9 | L | `ruff format --check` is intentionally skipped in CI (see the comment at `.github/workflows/ci.yml:19-21`) — follow-up tracked but never scheduled | ops |
@@ -299,6 +299,48 @@ a 422 on overlong input.
 ---
 
 ## 6. Structured logging is effectively absent — **L**
+
+> **Status: CLOSED — 2026-05-03 (audit-v2 batch 5).** New module
+> `arango_cypher/service/observability.py` adds:
+> (a) `CorrelationIdMiddleware` — an ASGI middleware that mints a
+> UUID4 on absent `X-Request-Id`, accepts safe inbound values
+> (`[A-Za-z0-9-]{1,128}`, anything else falls through to a fresh
+> UUID), echoes the chosen value back on the response, and propagates
+> via `correlation_id_var: ContextVar[str]` so every `logging.*` call
+> in any downstream module picks it up without signature changes;
+> (b) `CorrelationIdLogFilter` attached to the StreamHandler so
+> records propagated up from `arango_cypher.service.*` /
+> `arango_cypher.nl2cypher.*` carry the contextvar value;
+> (c) `log_endpoint_timing(endpoint, elapsed_ms, *, status="ok",
+> **extras)` — wired into **all 35** endpoints (12 that already
+> computed `elapsed_ms` for the response body, 23 that previously
+> hit the log stream zero times); string extras run through
+> `_sanitize_error` before emit so a stray URL / credential can't
+> leak via the new surface;
+> (d) `log_llm_call(...)` — emitted on `/nl2cypher` and `/nl2aql`
+> after every translation with `(provider, model, prompt_tokens,
+> completion_tokens, cached_tokens, cost_usd, elapsed_ms, method)`;
+> cost lookup is best-effort against a manually-maintained pricing
+> table (`_PRICING_PER_1K_TOKENS`); unknown `(provider, model)`
+> returns `0.0` (treat as "unpriced", not free).
+> (e) Default formatter is `key=value` for `tail -f`; flip to
+> single-line JSON via `ARANGO_CYPHER_LOG_JSON=1` for Datadog /
+> Loki / Splunk pipelines. Log level set by
+> `ARANGO_CYPHER_LOG_LEVEL` (default `INFO`).
+> New `tests/test_observability.py` (20 cases) pins the contract:
+> middleware mints + echoes + rejects unsafe inbound, contextvar
+> resets between requests, the log filter injects `correlation_id`
+> on records emitted from child loggers, `log_endpoint_timing`
+> redacts string extras, `log_llm_call` zeroes the cost on unknown
+> models without raising, and `configure_observability` is
+> idempotent. Total: 20 new tests, +1118 / -1097 in the unit-test
+> count.
+>
+> **Excluded by design:** `/health` is not instrumented — container
+> orchestrators poll it every few seconds and the operational signal
+> from logging it is zero. The endpoint still carries
+> `X-Request-Id` (the middleware doesn't discriminate) but emits
+> no log line.
 
 **Where:** `arango_cypher/service.py` has **4** `logging.*` /
 `logger.*` / `log.*` calls total in 2016 LOC. 3 of them are in

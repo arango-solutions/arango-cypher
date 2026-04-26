@@ -14,6 +14,7 @@ from arango_query_core import MappingResolver
 from ..app import app
 from ..mapping import _mapping_from_dict
 from ..models import TranslateRequest
+from ..observability import log_endpoint_timing
 from ..security import (
     _check_compute_rate_limit,
     _get_session,
@@ -123,6 +124,7 @@ def schema_introspect(
     which is non-discoverable. Forwarding ``force_refresh=True`` to
     ``get_mapping`` makes the flag do what its name says.
     """
+    t0 = time.perf_counter()
     db = session.db
     from ...schema_acquire import get_mapping as _get_mapping
 
@@ -150,6 +152,15 @@ def schema_introspect(
             rel["range"] = col_to_label.get(to_col, to_col)
 
     result["warnings"] = (bundle.metadata or {}).get("warnings") or []
+    log_endpoint_timing(
+        "/schema/introspect",
+        round((time.perf_counter() - t0) * 1000, 1),
+        force=force,
+        entities=len(result.get("entities") or []),
+        relationships=len(result.get("relationships") or []),
+        warnings=len(result["warnings"]),
+        source=(bundle.source.kind if bundle.source is not None else "unknown"),
+    )
     return result
 
 
@@ -160,7 +171,15 @@ def schema_properties(
     session: _Session = Depends(_get_session),
 ):
     """Infer properties for a specific collection by sampling documents."""
+    t0 = time.perf_counter()
     props = _sample_properties(session.db, collection, sample)
+    log_endpoint_timing(
+        "/schema/properties",
+        round((time.perf_counter() - t0) * 1000, 1),
+        collection=collection,
+        sample_size=sample,
+        properties=len(props),
+    )
     return {"collection": collection, "sample_size": sample, "properties": props}
 
 
@@ -170,11 +189,19 @@ def schema_summary(
     _: None = Depends(_check_compute_rate_limit),
 ):
     """Return a structured summary of the mapping for the visual graph editor."""
+    t0 = time.perf_counter()
     mapping = _mapping_from_dict(req.mapping)
     if mapping is None:
         raise HTTPException(status_code=400, detail="mapping is required")
     resolver = MappingResolver(mapping)
-    return resolver.schema_summary()
+    summary = resolver.schema_summary()
+    log_endpoint_timing(
+        "/schema/summary",
+        round((time.perf_counter() - t0) * 1000, 1),
+        entities=len(summary.get("entities") or []),
+        relationships=len(summary.get("relationships") or []),
+    )
+    return summary
 
 
 @app.get("/schema/statistics")
@@ -194,6 +221,11 @@ def schema_statistics(
     bundle = _get_mapping(session.db)
     stats = _compute_stats(session.db, bundle)
     elapsed = round(time.perf_counter() - t0, 3)
+    log_endpoint_timing(
+        "/schema/statistics",
+        round(elapsed * 1000, 1),
+        elapsed_seconds=elapsed,
+    )
     return {"statistics": stats, "elapsed_seconds": elapsed}
 
 
@@ -235,10 +267,17 @@ def schema_status(
         describe_schema_change as _describe,
     )
 
+    t0 = time.perf_counter()
     report = _describe(
         session.db,
         cache_collection=cache_collection or DEFAULT_CACHE_COLLECTION,
         cache_key=cache_key or DEFAULT_CACHE_KEY,
+    )
+    log_endpoint_timing(
+        "/schema/status",
+        round((time.perf_counter() - t0) * 1000, 1),
+        report_status=report.status,
+        unchanged=bool(report.unchanged),
     )
     return {
         "status": report.status,
@@ -287,10 +326,16 @@ def schema_invalidate_cache(
         invalidate_cache as _invalidate,
     )
 
+    t0 = time.perf_counter()
     _invalidate(
         session.db,
         cache_collection=(cache_collection or DEFAULT_CACHE_COLLECTION) if persistent else None,
         cache_key=cache_key or DEFAULT_CACHE_KEY,
+    )
+    log_endpoint_timing(
+        "/schema/invalidate-cache",
+        round((time.perf_counter() - t0) * 1000, 1),
+        persistent=persistent,
     )
     return {"invalidated": True, "persistent": persistent}
 
@@ -313,9 +358,16 @@ def schema_force_reacquire(
     """
     from ...schema_acquire import get_mapping as _get_mapping
 
+    t0 = time.perf_counter()
     try:
         bundle = _get_mapping(session.db, force_refresh=True, strategy="analyzer")
     except ImportError as exc:
+        log_endpoint_timing(
+            "/schema/force-reacquire",
+            round((time.perf_counter() - t0) * 1000, 1),
+            status="error",
+            error_type="ImportError",
+        )
         raise HTTPException(
             status_code=503,
             detail=(
@@ -330,12 +382,21 @@ def schema_force_reacquire(
     source_kind = bundle.source.kind if bundle.source is not None else None
     source_notes = bundle.source.notes if bundle.source is not None else None
     warnings = (bundle.metadata or {}).get("warnings") or []
-    return {
+    payload = {
         "source": {"kind": source_kind, "notes": source_notes},
         "warnings": warnings,
         "entity_count": len(bundle.conceptual_schema.get("entities") or []),
         "relationship_count": len(bundle.conceptual_schema.get("relationships") or []),
     }
+    log_endpoint_timing(
+        "/schema/force-reacquire",
+        round((time.perf_counter() - t0) * 1000, 1),
+        source=source_kind or "unknown",
+        entities=payload["entity_count"],
+        relationships=payload["relationship_count"],
+        warnings=len(warnings),
+    )
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -356,9 +417,16 @@ def sample_queries(dataset: str | None = None):
     """
     import yaml
 
+    t0 = time.perf_counter()
     corpora: list[dict[str, Any]] = []
     datasets_dir = _FIXTURES_DIR / "datasets"
     if not datasets_dir.is_dir():
+        log_endpoint_timing(
+            "/sample-queries",
+            round((time.perf_counter() - t0) * 1000, 1),
+            queries=0,
+            datasets_dir_missing=True,
+        )
         return {"queries": []}
 
     for corpus_file in sorted(datasets_dir.rglob("query-corpus.yml")):
@@ -374,4 +442,10 @@ def sample_queries(dataset: str | None = None):
                 entry["dataset"] = ds_name
                 corpora.append(entry)
 
+    log_endpoint_timing(
+        "/sample-queries",
+        round((time.perf_counter() - t0) * 1000, 1),
+        queries=len(corpora),
+        dataset_filter=dataset or "",
+    )
     return {"queries": corpora}

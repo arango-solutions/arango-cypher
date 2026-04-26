@@ -13,12 +13,15 @@ different callers.
 
 from __future__ import annotations
 
+import time
+
 from fastapi import Depends, HTTPException
 
 from ... import corrections as _corrections
 from ... import nl_corrections as _nl_corrections
 from ..app import app
 from ..models import CorrectionRequest, NLCorrectionRequest
+from ..observability import log_endpoint_timing
 from ..security import _require_session_in_public_mode, _Session
 
 
@@ -28,6 +31,7 @@ def save_correction(
     _auth: _Session | None = Depends(_require_session_in_public_mode),
 ):
     """Save a user-corrected AQL query for future reuse."""
+    t0 = time.perf_counter()
     row_id = _corrections.save(
         cypher=req.cypher,
         mapping=req.mapping,
@@ -36,6 +40,12 @@ def save_correction(
         corrected_aql=req.corrected_aql,
         bind_vars=req.bind_vars,
         note=req.note,
+    )
+    log_endpoint_timing(
+        "/corrections",
+        round((time.perf_counter() - t0) * 1000, 1),
+        action="save",
+        correction_id=row_id,
     )
     return {"id": row_id, "status": "saved"}
 
@@ -46,7 +56,15 @@ def list_corrections(
     _auth: _Session | None = Depends(_require_session_in_public_mode),
 ):
     """List stored corrections, most recent first."""
+    t0 = time.perf_counter()
     items = _corrections.list_all(limit=limit)
+    log_endpoint_timing(
+        "/corrections",
+        round((time.perf_counter() - t0) * 1000, 1),
+        action="list",
+        items=len(items),
+        limit=limit,
+    )
     return {
         "corrections": [
             {
@@ -71,7 +89,15 @@ def delete_correction(
     _auth: _Session | None = Depends(_require_session_in_public_mode),
 ):
     """Delete a single correction."""
+    t0 = time.perf_counter()
     found = _corrections.delete(correction_id)
+    log_endpoint_timing(
+        "/corrections/{id}",
+        round((time.perf_counter() - t0) * 1000, 1),
+        action="delete",
+        correction_id=correction_id,
+        found=bool(found),
+    )
     if not found:
         raise HTTPException(status_code=404, detail="Correction not found")
     return {"status": "deleted"}
@@ -82,7 +108,14 @@ def delete_all_corrections(
     _auth: _Session | None = Depends(_require_session_in_public_mode),
 ):
     """Delete all corrections."""
+    t0 = time.perf_counter()
     count = _corrections.delete_all()
+    log_endpoint_timing(
+        "/corrections",
+        round((time.perf_counter() - t0) * 1000, 1),
+        action="delete_all",
+        deleted=count,
+    )
     return {"status": "deleted", "count": count}
 
 
@@ -99,6 +132,7 @@ def save_nl_correction(
     synchronously before this endpoint returns, so the improvement takes
     effect on the very next translation request.
     """
+    t0 = time.perf_counter()
     try:
         row_id = _nl_corrections.save(
             question=req.question,
@@ -108,7 +142,20 @@ def save_nl_correction(
             note=req.note,
         )
     except ValueError as exc:
+        log_endpoint_timing(
+            "/nl-corrections",
+            round((time.perf_counter() - t0) * 1000, 1),
+            action="save",
+            status="error",
+            error_type="ValueError",
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_endpoint_timing(
+        "/nl-corrections",
+        round((time.perf_counter() - t0) * 1000, 1),
+        action="save",
+        correction_id=row_id,
+    )
     return {"id": row_id, "status": "saved"}
 
 
@@ -118,7 +165,15 @@ def list_nl_corrections(
     _auth: _Session | None = Depends(_require_session_in_public_mode),
 ):
     """List stored NL corrections, most recent first."""
+    t0 = time.perf_counter()
     items = _nl_corrections.list_all(limit=limit)
+    log_endpoint_timing(
+        "/nl-corrections",
+        round((time.perf_counter() - t0) * 1000, 1),
+        action="list",
+        items=len(items),
+        limit=limit,
+    )
     return {
         "corrections": [
             {
@@ -141,7 +196,15 @@ def delete_nl_correction(
     _auth: _Session | None = Depends(_require_session_in_public_mode),
 ):
     """Delete a single NL correction."""
+    t0 = time.perf_counter()
     found = _nl_corrections.delete(correction_id)
+    log_endpoint_timing(
+        "/nl-corrections/{id}",
+        round((time.perf_counter() - t0) * 1000, 1),
+        action="delete",
+        correction_id=correction_id,
+        found=bool(found),
+    )
     if not found:
         raise HTTPException(status_code=404, detail="NL correction not found")
     return {"status": "deleted"}
@@ -152,5 +215,12 @@ def delete_all_nl_corrections(
     _auth: _Session | None = Depends(_require_session_in_public_mode),
 ):
     """Delete all NL corrections."""
+    t0 = time.perf_counter()
     count = _nl_corrections.delete_all()
+    log_endpoint_timing(
+        "/nl-corrections",
+        round((time.perf_counter() - t0) * 1000, 1),
+        action="delete_all",
+        deleted=count,
+    )
     return {"status": "deleted", "count": count}

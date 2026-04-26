@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import secrets
+import time
 
 from fastapi import Depends, HTTPException
 
@@ -13,6 +14,7 @@ from ..._env import read_arango_password
 from ...api import get_cypher_profile
 from ..app import _PUBLIC_MODE, _svc_logger, app
 from ..models import ConnectRequest, ConnectResponse
+from ..observability import log_endpoint_timing
 from ..security import (
     _check_connect_target,
     _describe_connect_error,
@@ -36,6 +38,7 @@ def connect(req: ConnectRequest):
     # at module-import time and bypass the monkeypatch.
     from arango_cypher import service as _svc
 
+    t0 = time.perf_counter()
     _check_connect_target(req.url)
     try:
         url = req.url.rstrip("/")
@@ -49,6 +52,13 @@ def connect(req: ConnectRequest):
             req.database,
             req.username,
             detail,
+        )
+        log_endpoint_timing(
+            "/connect",
+            round((time.perf_counter() - t0) * 1000, 1),
+            status="error",
+            database=req.database,
+            error_type=type(e).__name__,
         )
         raise HTTPException(
             status_code=400,
@@ -66,22 +76,34 @@ def connect(req: ConnectRequest):
     except Exception:
         databases = [req.database]
 
+    log_endpoint_timing(
+        "/connect",
+        round((time.perf_counter() - t0) * 1000, 1),
+        database=req.database,
+        databases_visible=len(databases),
+    )
     return ConnectResponse(token=token, databases=databases)
 
 
 @app.post("/disconnect")
 def disconnect(session: _Session = Depends(_get_session)):
     """Tear down session and release the python-arango client."""
+    t0 = time.perf_counter()
     _sessions.pop(session.token, None)
     session.client.close()
+    log_endpoint_timing(
+        "/disconnect",
+        round((time.perf_counter() - t0) * 1000, 1),
+    )
     return {"status": "disconnected"}
 
 
 @app.get("/connections")
 def list_connections(_auth: _Session | None = Depends(_require_session_in_public_mode)):
     """List active sessions (admin/debug). Requires auth in public mode."""
+    t0 = time.perf_counter()
     _prune_expired()
-    return {
+    payload = {
         "active": len(_sessions),
         "sessions": [
             {
@@ -93,6 +115,12 @@ def list_connections(_auth: _Session | None = Depends(_require_session_in_public
             for s in _sessions.values()
         ],
     }
+    log_endpoint_timing(
+        "/connections",
+        round((time.perf_counter() - t0) * 1000, 1),
+        active=payload["active"],
+    )
+    return payload
 
 
 @app.get("/connect/defaults")
@@ -117,6 +145,7 @@ def connect_defaults():
     if _PUBLIC_MODE:
         raise HTTPException(status_code=404, detail="Not available in public mode")
 
+    t0 = time.perf_counter()
     arango_url = os.getenv("ARANGO_URL", "")
     if not arango_url:
         host = os.getenv("ARANGO_HOST", "localhost")
@@ -129,15 +158,27 @@ def connect_defaults():
         "true",
         "yes",
     )
-    return {
+    payload = {
         "url": arango_url.rstrip("/"),
         "database": os.getenv("ARANGO_DB", "_system"),
         "username": os.getenv("ARANGO_USER", "root"),
         "password": (read_arango_password(caller="arango_cypher.service") if expose_pw else ""),
     }
+    log_endpoint_timing(
+        "/connect/defaults",
+        round((time.perf_counter() - t0) * 1000, 1),
+        expose_pw=expose_pw,
+    )
+    return payload
 
 
 @app.get("/cypher-profile")
 def cypher_profile():
     """Return the Arango Cypher profile manifest."""
-    return get_cypher_profile()
+    t0 = time.perf_counter()
+    profile = get_cypher_profile()
+    log_endpoint_timing(
+        "/cypher-profile",
+        round((time.perf_counter() - t0) * 1000, 1),
+    )
+    return profile

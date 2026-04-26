@@ -24,6 +24,7 @@ from ..models import (
     ValidateRequest,
     ValidateResponse,
 )
+from ..observability import log_endpoint_timing
 from ..registry import _default_registry
 from ..security import (
     _check_compute_rate_limit,
@@ -73,6 +74,14 @@ def translate_endpoint(
 
     correction = _corrections.lookup(req.cypher, req.mapping)
     if correction:
+        log_endpoint_timing(
+            "/translate",
+            elapsed_ms,
+            cypher_len=len(req.cypher or ""),
+            aql_len=len(correction.corrected_aql or ""),
+            correction_id=correction.id,
+            extensions_enabled=req.extensions_enabled,
+        )
         return TranslateResponse(
             aql=correction.corrected_aql,
             bind_vars=correction.bind_vars or result.bind_vars,
@@ -81,6 +90,14 @@ def translate_endpoint(
             elapsed_ms=elapsed_ms,
         )
 
+    log_endpoint_timing(
+        "/translate",
+        elapsed_ms,
+        cypher_len=len(req.cypher or ""),
+        aql_len=len(result.aql or ""),
+        warnings=len(result.warnings or []),
+        extensions_enabled=req.extensions_enabled,
+    )
     return TranslateResponse(
         aql=result.aql,
         bind_vars=result.bind_vars,
@@ -129,6 +146,16 @@ def execute_endpoint(
         results = list(cursor)
         exec_ms = round((time.perf_counter() - t_exec) * 1000, 1)
 
+    log_endpoint_timing(
+        "/execute",
+        round(translate_ms + exec_ms, 1),
+        translate_ms=translate_ms,
+        exec_ms=exec_ms,
+        rows=len(results),
+        cypher_len=len(req.cypher or ""),
+        aql_len=len(run_aql or ""),
+        used_correction=bool(correction),
+    )
     return ExecuteResponse(
         results=results,
         aql=run_aql,
@@ -152,6 +179,12 @@ def execute_aql_endpoint(
         results = list(cursor)
         exec_ms = round((time.perf_counter() - t_exec) * 1000, 1)
 
+    log_endpoint_timing(
+        "/execute-aql",
+        exec_ms,
+        rows=len(results),
+        aql_len=len(req.aql or ""),
+    )
     return ExecuteResponse(
         results=results,
         aql=req.aql,
@@ -167,11 +200,20 @@ def validate_endpoint(
     _: None = Depends(_check_compute_rate_limit),
 ):
     """Validate Cypher against the translator profile."""
+    t0 = time.perf_counter()
     mapping = _mapping_from_dict(req.mapping)
     result = validate_cypher_profile(
         req.cypher,
         mapping=mapping,
         params=req.params,
+    )
+    elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+    log_endpoint_timing(
+        "/validate",
+        elapsed_ms,
+        ok=bool(result.ok),
+        error_count=len(result.errors or []),
+        cypher_len=len(req.cypher or ""),
     )
     return ValidateResponse(
         ok=result.ok,
@@ -206,9 +248,19 @@ def explain_endpoint(
             detail={"error": _sanitize_error(str(e)), "code": e.code},
         ) from e
 
+    t_explain = time.perf_counter()
     with _translate_errors("AQL EXPLAIN failed"):
         plan = session.db.aql.explain(transpiled.aql, bind_vars=transpiled.bind_vars)
+    explain_ms = round((time.perf_counter() - t_explain) * 1000, 1)
 
+    log_endpoint_timing(
+        "/explain",
+        round(translate_ms + explain_ms, 1),
+        translate_ms=translate_ms,
+        explain_ms=explain_ms,
+        cypher_len=len(req.cypher or ""),
+        aql_len=len(transpiled.aql or ""),
+    )
     return {
         "aql": transpiled.aql,
         "bind_vars": transpiled.bind_vars,
@@ -244,6 +296,7 @@ def aql_profile_endpoint(
             detail={"error": _sanitize_error(str(e)), "code": e.code},
         ) from e
 
+    t_exec = time.perf_counter()
     with _translate_errors("AQL profiled execution failed"):
         cursor = session.db.aql.execute(
             transpiled.aql,
@@ -253,7 +306,17 @@ def aql_profile_endpoint(
         results = list(cursor)
         stats = cursor.statistics()
         profile_data = cursor.profile() if hasattr(cursor, "profile") else None
+    exec_ms = round((time.perf_counter() - t_exec) * 1000, 1)
 
+    log_endpoint_timing(
+        "/aql-profile",
+        round(translate_ms + exec_ms, 1),
+        translate_ms=translate_ms,
+        exec_ms=exec_ms,
+        rows=len(results),
+        cypher_len=len(req.cypher or ""),
+        aql_len=len(transpiled.aql or ""),
+    )
     return {
         "aql": transpiled.aql,
         "bind_vars": transpiled.bind_vars,

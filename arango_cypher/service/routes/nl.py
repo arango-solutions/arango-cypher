@@ -10,6 +10,11 @@ from fastapi import Depends, HTTPException
 
 from ..app import _PUBLIC_MODE, app
 from ..models import NL2AqlRequest, NL2CypherRequest, NLSuggestRequest
+from ..observability import (
+    current_llm_provider_and_model,
+    log_endpoint_timing,
+    log_llm_call,
+)
 from ..security import (
     _COLLECTION_NAME_RE,
     _check_nl_rate_limit,
@@ -76,6 +81,30 @@ def nl2cypher_endpoint(
         retry_context=req.retry_context,
     )
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+    provider, model = current_llm_provider_and_model()
+    log_llm_call(
+        endpoint="/nl2cypher",
+        provider=provider,
+        model=model,
+        prompt_tokens=result.prompt_tokens or 0,
+        completion_tokens=result.completion_tokens or 0,
+        cached_tokens=result.cached_tokens or 0,
+        elapsed_ms=elapsed_ms,
+        method=result.method,
+        retries=result.retries or 0,
+        confidence=result.confidence,
+    )
+    log_endpoint_timing(
+        "/nl2cypher",
+        elapsed_ms,
+        method=result.method,
+        confidence=result.confidence,
+        cypher_len=len(result.cypher or ""),
+        question_len=len(req.question or ""),
+        used_entity_resolution=bool(req.use_entity_resolution and db is not None),
+        retries=result.retries or 0,
+    )
     return {
         "cypher": result.cypher,
         "explanation": result.explanation,
@@ -110,6 +139,12 @@ def nl_samples_endpoint(
         use_llm=req.use_llm,
     )
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+    log_endpoint_timing(
+        "/nl-samples",
+        elapsed_ms,
+        count=len(queries),
+        use_llm=bool(req.use_llm),
+    )
     return {"queries": queries, "elapsed_ms": elapsed_ms}
 
 
@@ -138,6 +173,27 @@ def nl2aql_endpoint(
         tenant_context=tenant_ctx,
     )
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
+
+    provider, model = current_llm_provider_and_model()
+    log_llm_call(
+        endpoint="/nl2aql",
+        provider=provider,
+        model=model,
+        prompt_tokens=result.prompt_tokens or 0,
+        completion_tokens=result.completion_tokens or 0,
+        cached_tokens=result.cached_tokens or 0,
+        elapsed_ms=elapsed_ms,
+        method=result.method,
+        confidence=result.confidence,
+    )
+    log_endpoint_timing(
+        "/nl2aql",
+        elapsed_ms,
+        method=result.method,
+        confidence=result.confidence,
+        aql_len=len(result.aql or ""),
+        question_len=len(req.question or ""),
+    )
     return {
         "aql": result.aql,
         "bind_vars": result.bind_vars,
@@ -192,6 +248,7 @@ def tenants_endpoint(
     the name, ``"heuristic"`` when we fell back to ``"Tenant"``)
     so the UI can show *why* detection succeeded or failed.
     """
+    t0 = time.perf_counter()
     db = session.db
     if collection:
         resolved, source = collection, "client"
@@ -218,6 +275,13 @@ def tenants_endpoint(
         has_collection = db.has_collection(resolved)
 
     if not has_collection:
+        log_endpoint_timing(
+            "/tenants",
+            round((time.perf_counter() - t0) * 1000, 1),
+            detected=False,
+            tenants=0,
+            source=source,
+        )
         return {
             "detected": False,
             "tenants": [],
@@ -248,6 +312,13 @@ def tenants_endpoint(
         cursor = db.aql.execute(aql)
         tenants = list(cursor)
 
+    log_endpoint_timing(
+        "/tenants",
+        round((time.perf_counter() - t0) * 1000, 1),
+        detected=True,
+        tenants=len(tenants),
+        source=source,
+    )
     return {
         "detected": True,
         "tenants": tenants,

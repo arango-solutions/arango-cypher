@@ -126,6 +126,24 @@ from .models import (
     ValidateResponse,
 )
 
+# 8) Observability surface (audit-v2 #6). Re-exported so tests can do
+#    ``from arango_cypher.service import log_endpoint_timing, correlation_id_var``
+#    without reaching into the submodule. Note these are tail-end imports —
+#    ``service.app`` already called :func:`configure_observability` and
+#    installed :class:`CorrelationIdMiddleware` at app-construction time;
+#    these re-exports are the consumer-facing surface only.
+from .observability import (
+    CorrelationIdLogFilter,
+    CorrelationIdMiddleware,
+    configure_observability,
+    correlation_id_var,
+    current_llm_provider_and_model,
+    estimate_llm_cost_usd,
+    log_endpoint_timing,
+    log_llm_call,
+    time_endpoint,
+)
+
 # 5) Process-wide ExtensionRegistry singleton (built at import time so the
 #    translate / execute / explain endpoints share one instance).
 from .registry import _build_registry, _default_registry

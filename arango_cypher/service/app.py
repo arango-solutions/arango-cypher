@@ -134,3 +134,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Audit-v2 #6 — observability spine. Imported here (rather than from the
+# package init) so the middleware install happens at app-construction time,
+# alongside CORS, and the logging filter / handler attachment runs before any
+# route module's import-time logger.* calls. The helper is idempotent so
+# tests that reload the package re-trigger setup safely.
+#
+# Middleware order matters: ``CorrelationIdMiddleware`` is added *after*
+# ``CORSMiddleware`` above, which means it runs *first* on the inbound path
+# (Starlette wraps middlewares LIFO). That's deliberate — we want the
+# correlation ID minted before the CORS preflight handler emits its log
+# line, not after, so even rejected preflights carry an X-Request-Id in the
+# log trail for cross-referencing client / server traces.
+from .observability import CorrelationIdMiddleware, configure_observability  # noqa: E402
+
+configure_observability()
+app.add_middleware(CorrelationIdMiddleware)
