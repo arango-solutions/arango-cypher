@@ -29,7 +29,7 @@ defense-in-depth.
 | 5 | L | No `@field_validator` declarations on any `service.py` `BaseModel` request type — stricter-than-type validation (length, enum, URL shape) is absent | service |
 | 6 | L | ~~Structured logging is effectively absent in `service.py` — 4 log calls in 2016 LOC; no request-correlation ID, no per-endpoint timing log line~~ closed 2026-05-03 (audit-v2 batch 5) — new `service/observability.py` adds `CorrelationIdMiddleware`, `log_endpoint_timing` wired into all 35 endpoints, `log_llm_call` on NL endpoints, JSON formatter via `ARANGO_CYPHER_LOG_JSON=1`. | service |
 | 7 | L | `ARANGO_PASS` / `ARANGO_PASSWORD` split between service and CLI is *documented* (`.env.example:9-15`) but still an operational footgun — both names should resolve to one | service + cli |
-| 8 | L | ~~`arango_cypher/service.py` at 2016 LOC~~ split 2026-05-02 (audit-v2 batch 4) — `service.py` is now `arango_cypher/service/` with 8 focused submodules + a routes subpackage. `arango_cypher/translate_v0.py` at 5063 LOC still pending. | refactor |
+| 8 | L | ~~`arango_cypher/service.py` at 2016 LOC~~ split 2026-05-02 (audit-v2 batch 4) and ~~`arango_cypher/translate_v0.py` at 5063 LOC~~ split 2026-05-04 (audit-v2 batch 6). The public files are now compatibility shims; implementation lives behind focused packages. | refactor |
 | 9 | L | `ruff format --check` is intentionally skipped in CI (see the comment at `.github/workflows/ci.yml:19-21`) — follow-up tracked but never scheduled | ops |
 
 Severity legend:
@@ -416,17 +416,26 @@ dating the legacy name's removal at the next major.
 
 ## 8. `translate_v0.py` 5063 LOC, `service.py` 2016 LOC — **L**
 
-> **Status: PARTIALLY CLOSED — 2026-05-02 (audit-v2 batch 4).**
+> **Status: CLOSED — 2026-05-04 (audit-v2 batch 6).**
 > `arango_cypher/service.py` (2232 LOC at split time) refactored into
 > the `arango_cypher/service/` package per the layout proposed below.
 > Zero behaviour change: the full unit suite (1097 tests) passes
 > byte-for-byte across the rename, and `from arango_cypher.service
 > import _X` keeps working for every previously-importable symbol via
-> the `__init__.py` re-export shim. Two-commit shape (rename → symbol
-> moves) so review is mechanical. `arango_cypher/translate_v0.py`
-> still pending — tracked separately because the AST-level split
-> needs golden re-baselines per slice and is at least a week of
-> careful work, not the half-day this batch budgeted.
+> the `__init__.py` re-export shim. The remaining half landed in
+> audit-v2 batch 6: `arango_cypher/translate_v0.py` is now a stable
+> compatibility shim over the private `arango_cypher/_translate_v0/`
+> package. The implementation is split into `core.py` (top-level
+> dispatch plus the still-tightly-coupled MATCH/expression pipeline),
+> `state.py` (contextvars, `_HopMeta`, `TranslateOptions`),
+> `formatting.py` (`WITH` injection and AQL reindent),
+> `hints.py` (VCI/index-hint and warning helpers), `naming.py`
+> (fresh variable/bind-key/label normalization helpers), `literals.py`
+> (literal/type helpers), `calls.py` (standalone and in-query CALL),
+> `unwind.py`, and `writes.py` (CREATE/MERGE/SET/DELETE/REMOVE/FOREACH).
+> Existing direct imports from `arango_cypher.translate_v0` continue to
+> work for `TranslateOptions`, `translate_v0`, and the helper internals
+> pinned by tests.
 
 **Where:** `arango_cypher/translate_v0.py`, ~~`arango_cypher/service.py`~~ → `arango_cypher/service/{__init__,app,security,models,mapping,registry,ui}.py` + `arango_cypher/service/routes/{health,connect,cypher,schema,tools,nl,owl,corrections}.py`.
 
