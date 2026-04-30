@@ -14,9 +14,11 @@ are caught in CI instead of in a support thread.
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+from arango import ArangoClient
 from fastapi.testclient import TestClient
 
 from arango_cypher import service
@@ -25,6 +27,7 @@ from arango_cypher.service import (
     _walk_cause_chain,
     app,
 )
+from arango_cypher.service.routes import connect as connect_routes
 
 
 class TestWalkCauseChain:
@@ -142,6 +145,24 @@ class TestDescribeConnectError:
 
 class TestConnectEndpointSurfaces:
     """End-to-end: POST /connect must include the root cause + proxy hint."""
+
+    def test_client_resolution_prefers_patched_service_candidate(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        class _FakeClient:
+            pass
+
+        monkeypatch.setattr(
+            connect_routes,
+            "_service_pkg_candidates",
+            lambda: [
+                SimpleNamespace(ArangoClient=ArangoClient),
+                SimpleNamespace(ArangoClient=_FakeClient),
+            ],
+        )
+
+        assert connect_routes._resolve_arango_client() is _FakeClient
 
     def test_proxy_failure_returns_actionable_detail(self, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("HTTPS_PROXY", "http://corp-proxy.example.invalid:3128")

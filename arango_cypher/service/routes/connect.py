@@ -22,27 +22,36 @@ from ..security import (
     _get_session,
     _prune_expired,
     _require_session_in_public_mode,
+    _service_pkg_candidates,
     _Session,
     _sessions,
 )
 
 
+def _resolve_arango_client():
+    """Return the currently patched service-level ArangoClient, if any."""
+    from arango import ArangoClient as _DefaultArangoClient
+
+    fallback = None
+    for pkg in _service_pkg_candidates():
+        client_cls = getattr(pkg, "ArangoClient", None)
+        if client_cls is None:
+            continue
+        if client_cls is not _DefaultArangoClient:
+            return client_cls
+        fallback = client_cls
+
+    return fallback or _DefaultArangoClient
+
+
 @app.post("/connect", response_model=ConnectResponse)
 def connect(req: ConnectRequest):
     """Authenticate to ArangoDB; returns a session token."""
-    # ``ArangoClient`` is read off the package init at call time so the
-    # ``monkeypatch.setattr("arango_cypher.service.ArangoClient", _FakeClient)``
-    # pattern in tests/test_service_hardening.py keeps flowing through to
-    # this endpoint after the audit-v2 #8 split. A direct
-    # ``from arango import ArangoClient`` here would capture a snapshot
-    # at module-import time and bypass the monkeypatch.
-    from arango_cypher import service as _svc
-
     t0 = time.perf_counter()
     _check_connect_target(req.url)
     try:
         url = req.url.rstrip("/")
-        client = _svc.ArangoClient(hosts=url)
+        client = _resolve_arango_client()(hosts=url)
         db = client.db(req.database, username=req.username, password=req.password)
         db.version()
     except Exception as e:

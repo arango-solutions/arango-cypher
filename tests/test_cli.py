@@ -9,6 +9,7 @@ import pytest
 try:
     from typer.testing import CliRunner
 
+    import arango_cypher.cli as cli
     from arango_cypher.cli import app
 
     HAS_TYPER = True
@@ -40,6 +41,10 @@ def _write_mapping(tmp_path, data=None):
     mf = tmp_path / "mapping.json"
     mf.write_text(json.dumps(data or _SIMPLE_MAPPING))
     return mf
+
+
+def _raise_no_db(*_args, **_kwargs):
+    raise RuntimeError("no db")
 
 
 # ---------------------------------------------------------------------------
@@ -134,13 +139,15 @@ def test_translate_bad_params():
 # ---------------------------------------------------------------------------
 
 
-def test_doctor_no_connection():
+def test_doctor_no_connection(monkeypatch):
+    monkeypatch.setattr(cli, "_connect", _raise_no_db)
     result = runner.invoke(app, ["doctor", "--host", "127.0.0.1", "--port", "19876"])
     assert result.exit_code in (0, 1)
     assert "ArangoDB connection" in result.output
 
 
-def test_doctor_defaults():
+def test_doctor_defaults(monkeypatch):
+    monkeypatch.setattr(cli, "_connect", _raise_no_db)
     result = runner.invoke(app, ["doctor", "--host", "127.0.0.1", "--port", "19877"])
     assert result.exit_code in (0, 1)
     assert "Target:" in result.output
@@ -151,7 +158,8 @@ def test_doctor_defaults():
 # ---------------------------------------------------------------------------
 
 
-def test_run_no_db():
+def test_run_no_db(monkeypatch):
+    monkeypatch.setattr(cli, "_connect", _raise_no_db)
     result = runner.invoke(
         app,
         ["run", "MATCH (n) RETURN n", "--host", "127.0.0.1", "--port", "19878"],
@@ -159,7 +167,8 @@ def test_run_no_db():
     assert result.exit_code != 0
 
 
-def test_mapping_no_db():
+def test_mapping_no_db(monkeypatch):
+    monkeypatch.setattr(cli, "_connect", _raise_no_db)
     result = runner.invoke(
         app,
         ["mapping", "--host", "127.0.0.1", "--port", "19879"],

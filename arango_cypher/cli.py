@@ -91,7 +91,8 @@ def _connect(
     d = db or os.getenv("ARANGO_DB", "_system")
     u = user or os.getenv("ARANGO_USER", "root")
     pw = password if password is not None else read_arango_password(caller="arango_cypher.cli")
-    client = ArangoClient(hosts=f"http://{h}:{p}")
+    request_timeout = float(os.getenv("ARANGO_REQUEST_TIMEOUT", "3"))
+    client = ArangoClient(hosts=f"http://{h}:{p}", request_timeout=request_timeout)
     return client.db(d, username=u, password=pw)
 
 
