@@ -14,10 +14,33 @@ export interface ConnectionState {
 
 export type ResultTab = "table" | "json" | "graph" | "explain" | "profile";
 
+// History entries may carry a snapshot of the result rows the query
+// produced, so the user can re-open a prior result *without* re-running
+// the query against the live database. Snapshots are bounded
+// (``MAX_ROWS_PER_ENTRY``) and the whole history payload is bounded
+// (``MAX_PERSIST_BYTES``) so we never blow the localStorage quota.
+//
+// ``rowCount`` is the *true* number of rows the query returned, even if
+// ``results`` was row-truncated or dropped entirely to fit storage. The
+// UI uses (rowCount, results) to render badges:
+//   results === undefined && rowCount === undefined  →  no snapshot (legacy entry / translate-only)
+//   results !== undefined && truncated  →  "N rows (showing first K)"
+//   results === undefined && rowCount !== undefined  →  "N rows (snapshot dropped to fit storage)"
+//   results !== undefined && !truncated  →  "N rows"
 export interface HistoryEntry {
   cypher: string;
   timestamp: number;
   aqlPreview: string;
+  // Snapshot fields — all optional so entries written by older UI
+  // bundles continue to deserialize without migration.
+  aql?: string;
+  bindVars?: Record<string, unknown>;
+  results?: unknown[];
+  rowCount?: number;
+  truncated?: boolean;
+  execMs?: number | null;
+  connectionUrl?: string;
+  connectionDatabase?: string;
 }
 
 export interface AppState {
@@ -66,6 +89,68 @@ const STORAGE_KEY = "cypher-workbench";
 
 const MAX_HISTORY = 50;
 
+// Per-entry row cap. Snapshots beyond this are row-truncated and flagged
+// ``truncated: true``. 1000 rows keeps a useful sample for replay while
+// holding a single entry under ~1 MB for typical document shapes.
+export const MAX_ROWS_PER_ENTRY = 1000;
+
+// Total persistence cap. localStorage in most browsers caps the origin
+// at ~5 MB; we leave headroom for the user's other localStorage keys
+// (``nl_history``, ``auto_translate``, tenant context, etc.).
+export const MAX_PERSIST_BYTES = 4_500_000;
+
+// Cap a single snapshot's rows. Pure function so the reducer can call
+// it deterministically. Mutates nothing — returns a (possibly fresh)
+// HistoryEntry plus a flag indicating whether truncation happened.
+export function truncateEntrySnapshot(entry: HistoryEntry): HistoryEntry {
+  if (!entry.results) return entry;
+  const rowCount = entry.rowCount ?? entry.results.length;
+  if (entry.results.length <= MAX_ROWS_PER_ENTRY) {
+    return { ...entry, rowCount, truncated: entry.truncated ?? false };
+  }
+  return {
+    ...entry,
+    results: entry.results.slice(0, MAX_ROWS_PER_ENTRY),
+    rowCount,
+    truncated: true,
+  };
+}
+
+function buildPersistPayload(state: AppState, history: HistoryEntry[]): string {
+  return JSON.stringify({
+    cypher: state.cypher,
+    mapping: state.mapping,
+    params: state.params,
+    history,
+  });
+}
+
+// Progressively drop result snapshots from the oldest entries until the
+// serialized payload fits ``maxBytes``. We keep cypher + aqlPreview +
+// rowCount on every entry so the panel can still tell the user there
+// *was* a result, just not its rows. Returns a fresh array (caller
+// shouldn't observe mutation).
+export function trimHistoryForPersistence(
+  state: AppState,
+  history: HistoryEntry[],
+  maxBytes: number,
+): HistoryEntry[] {
+  const working = history.slice(0, MAX_HISTORY).map((h) => ({ ...h }));
+  if (buildPersistPayload(state, working).length <= maxBytes) return working;
+  // Walk oldest → newest, stripping ``results`` (and ``bindVars`` —
+  // they can be large for queries with $documents bind vars) until the
+  // payload fits. ``rowCount`` is preserved so the UI can still render
+  // an honest "snapshot dropped to fit storage" indicator.
+  for (let i = working.length - 1; i >= 0; i--) {
+    if (working[i].results) {
+      delete working[i].results;
+      delete working[i].bindVars;
+      if (buildPersistPayload(state, working).length <= maxBytes) return working;
+    }
+  }
+  return working;
+}
+
 function loadSavedState(): Partial<AppState> {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -83,18 +168,35 @@ function loadSavedState(): Partial<AppState> {
 }
 
 function saveState(state: AppState) {
+  // Two-pass write: try the full payload first; if it exceeds our soft
+  // cap *or* the browser throws QuotaExceededError, retry with the
+  // result snapshots progressively stripped. The cypher / mapping /
+  // params slice always persists — those are tiny and the user expects
+  // them to survive a reload.
+  const history = state.history.slice(0, MAX_HISTORY);
+  const fullPayload = buildPersistPayload(state, history);
   try {
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        cypher: state.cypher,
-        mapping: state.mapping,
-        params: state.params,
-        history: state.history.slice(0, MAX_HISTORY),
-      }),
-    );
+    if (fullPayload.length <= MAX_PERSIST_BYTES) {
+      localStorage.setItem(STORAGE_KEY, fullPayload);
+      return;
+    }
+    const trimmed = trimHistoryForPersistence(state, history, MAX_PERSIST_BYTES);
+    localStorage.setItem(STORAGE_KEY, buildPersistPayload(state, trimmed));
   } catch {
-    // localStorage may be unavailable
+    // QuotaExceededError or localStorage disabled. Try the most
+    // aggressive trim: every snapshot dropped. If even that fails the
+    // browser is fundamentally refusing writes — there's nothing useful
+    // we can do.
+    try {
+      const minimal = history.map((h) => {
+        const { results: _r, bindVars: _b, ...rest } = h;
+        void _r; void _b;
+        return rest;
+      });
+      localStorage.setItem(STORAGE_KEY, buildPersistPayload(state, minimal));
+    } catch {
+      // localStorage unavailable — silently degrade
+    }
   }
 }
 
@@ -205,6 +307,11 @@ export type Action =
   | { type: "SET_PARAMS"; params: Record<string, unknown> }
   | { type: "ADD_HISTORY"; entry: HistoryEntry }
   | { type: "CLEAR_HISTORY" }
+  // Restore a prior history entry into the live workbench state — the
+  // editor's Cypher, the AQL pane, bind vars, and (if the entry carries
+  // a snapshot) the Results pane. Used when the user clicks an entry in
+  // the QueryHistory panel; far cheaper than re-running the query.
+  | { type: "RESTORE_FROM_HISTORY"; entry: HistoryEntry }
   | { type: "SET_ACTIVE_STATEMENT"; index: number };
 
 function reducer(state: AppState, action: Action): AppState {
@@ -375,14 +482,70 @@ function reducer(state: AppState, action: Action): AppState {
     case "SET_PARAMS":
       return { ...state, params: action.params };
     case "ADD_HISTORY": {
-      const exists = state.history.some((h) => h.cypher === action.entry.cypher);
-      const updated = exists
-        ? [action.entry, ...state.history.filter((h) => h.cypher !== action.entry.cypher)]
-        : [action.entry, ...state.history];
+      // Deduplicate by cypher (case-sensitive — whitespace was already
+      // trimmed by the caller). When the new entry lacks a result
+      // snapshot but the prior entry had one, *carry the snapshot
+      // forward* — this is what makes the translate-after-execute
+      // sequence non-destructive. Without this, hitting "Translate"
+      // after a successful "Run" would silently wipe the cached rows.
+      const existingIdx = state.history.findIndex(
+        (h) => h.cypher === action.entry.cypher,
+      );
+      let merged = truncateEntrySnapshot(action.entry);
+      if (existingIdx >= 0) {
+        const prior = state.history[existingIdx];
+        if (merged.results === undefined && prior.results !== undefined) {
+          merged = {
+            ...merged,
+            results: prior.results,
+            rowCount: prior.rowCount ?? prior.results.length,
+            truncated: prior.truncated,
+            execMs: merged.execMs ?? prior.execMs,
+            bindVars: merged.bindVars ?? prior.bindVars,
+            aql: merged.aql ?? prior.aql,
+          };
+        }
+      }
+      const updated =
+        existingIdx >= 0
+          ? [
+              merged,
+              ...state.history.slice(0, existingIdx),
+              ...state.history.slice(existingIdx + 1),
+            ]
+          : [merged, ...state.history];
       return { ...state, history: updated.slice(0, MAX_HISTORY) };
     }
     case "CLEAR_HISTORY":
       return { ...state, history: [] };
+    case "RESTORE_FROM_HISTORY": {
+      // History replay is a deliberate user action — flip provenance
+      // back to "user" so the WP-30 regenerate-from-NL button stays
+      // hidden (we don't know if the original Cypher came from NL, and
+      // ``lastNlQuestion`` is not stored on history entries).
+      const entry = action.entry;
+      const hasSnapshot = entry.results !== undefined;
+      return {
+        ...state,
+        cypher: entry.cypher,
+        aql: entry.aql ?? "",
+        bindVars: entry.bindVars ?? {},
+        results: hasSnapshot ? entry.results ?? null : null,
+        // Only flip the active tab to "table" when we actually have
+        // rows to show. Otherwise keep whatever the user was on so the
+        // restore doesn't yank them away from an Explain plan they
+        // were inspecting.
+        activeResultTab: hasSnapshot ? "table" : state.activeResultTab,
+        execMs: entry.execMs ?? null,
+        // Restore clears any pending error and explain/profile state —
+        // those weren't snapshotted and would be stale relative to the
+        // restored Cypher.
+        error: null,
+        explainPlan: null,
+        profileData: null,
+        editorCypherSource: "user",
+      };
+    }
     case "SET_ACTIVE_STATEMENT":
       return { ...state, activeStatement: action.index };
     default:
@@ -402,7 +565,7 @@ export function useAppState() {
 
   const PERSIST_ACTIONS = new Set([
     "SET_CYPHER", "NL_SUCCESS", "SET_MAPPING", "SET_PARAMS",
-    "ADD_HISTORY", "CLEAR_HISTORY",
+    "ADD_HISTORY", "CLEAR_HISTORY", "RESTORE_FROM_HISTORY",
   ]);
 
   const persistAndDispatch = useCallback(

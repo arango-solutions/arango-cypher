@@ -44,12 +44,13 @@ Baselines are committed at [`tests/nl2cypher/eval/baseline.json`](tests/nl2cyphe
 
 ## Status
 
-> **Early development (v0.0.x).**
+> **Active development (v0.1.x).**
 >
-> - **Cypher → AQL transpiler** — handles core `MATCH` / `WHERE` / `RETURN` / `WITH` / `ORDER BY` / `LIMIT` patterns across PG, LPG, and hybrid mappings. See [Supported Cypher subset](#supported-cypher-subset) for details.
-> - **NL → Cypher pipeline** — WP-25 closed 2026-04-20. All five sub-packages (dynamic few-shot, pre-flight entity resolution with fuzzy matching, execution-grounded validation, prompt caching across OpenAI/Anthropic, and the eval harness + regression gate) shipped on `main`. Live nightly CI matrix gates both providers against committed baselines.
+> - **Cypher → AQL transpiler** — broad read/write subset across PG, LPG, and hybrid mappings (see [Supported Cypher subset](#supported-cypher-subset)). Neo4j cross-validation and openCypher TCK harness in CI; translation-only TCK pass rate ~66% on the clause-focused subset.
+> - **NL → Cypher pipeline** — WP-25 closed 2026-04-20. Dynamic few-shot, entity resolution, EXPLAIN-grounded retry, prompt caching, eval harness + nightly regression gate. NL corrections feed back into few-shot retrieval (Wave 4o).
+> - **Multi-tenant safety** — Phase 1 shipped (Wave 7): session-bound tenant on connect, EXPLAIN-plan validator, `safe_execute` on execute paths. Algorithmic Cypher/AQL tenant injection (Layers 3–4) remains planned — see [`docs/multitenant_prd.md`](docs/multitenant_prd.md).
 
-**Roadmap:** Broader Cypher coverage, compiler architecture (normalized AST / IR and logical plan), phased openCypher compliance, and **NL → Cypher → AQL** positioning (Arango Cypher profile, `arango.*` extensions) are described in [`docs/python_prd.md`](docs/python_prd.md) (§2A, §7A, §10A). Post-WP-25 follow-ups tracked in the same doc.
+**Roadmap:** Compiler architecture (normalized AST / logical plan), broader openCypher compliance, and remaining multi-tenant layers are described in [`docs/python_prd.md`](docs/python_prd.md) and [`docs/implementation_plan.md`](docs/implementation_plan.md). Project assessment: [`docs/2026-05-26-project-assessment.md`](docs/2026-05-26-project-assessment.md).
 
 ## Supported Cypher subset
 
@@ -80,7 +81,15 @@ The v0 translator supports:
 
 - Embedded relationships — mapping-driven `EMBEDDED` style lowers `(u:User)-[:HAS_ADDRESS]->(a:Address)` to `LET a = u.address` (object) or `FOR t IN TO_ARRAY(u.tags)` (array), no edge collection needed
 
-**Not yet supported:** multiple relationship types in one hop (`[:A|B]`), list/map comprehensions, write clauses (`CREATE`/`MERGE`/`SET`/`DELETE`).
+- Write clauses — `CREATE`, `SET`, `DELETE` / `DETACH DELETE`, `MERGE` (nodes and relationships, with `ON CREATE` / `ON MATCH SET`)
+
+- List and pattern comprehensions — `[x IN list WHERE filter | expr]`; `[(a)-[:R]->(b) | expr]`
+
+- Named paths and path functions — `p = (a)-[:R]->(b)`, `length(p)`, `nodes(p)`, `relationships(p)`
+
+- `EXISTS { }` subqueries, regex `=~`, `FOREACH`, `COUNT { }` subqueries
+
+**Not yet supported:** multiple relationship types in one hop (`[:A|B]`), typeless relationships `-[r]-`, leading clauses other than `MATCH` at query start (blocks many TCK scenarios).
 
 ## Quick start
 
@@ -386,6 +395,7 @@ Features:
 - **Results panel** — Table, JSON, Explain tree, Profile stats tabs
 - **Connection dialog** — connect to any ArangoDB instance, pre-filled from `.env` defaults
 - **Mapping editor** — JSON editor for the conceptual-to-physical mapping
+- **Query history** — searchable history with optional result snapshots (restore Cypher, AQL, bind vars, and cached rows without re-running), per-connection filtering, and bounded `localStorage` persistence
 
 ## Project layout
 

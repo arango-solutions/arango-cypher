@@ -251,15 +251,36 @@ export default function App() {
     };
   }
 
-  function addToHistory(aql: string) {
+  // ``addToHistory`` accepts an optional snapshot bundle so callers
+  // that have just executed the query (Run / Profile / direct-AQL) can
+  // persist the rows. Translate-only and Explain-only callers pass no
+  // snapshot — the reducer's ADD_HISTORY case is responsible for
+  // carrying any *existing* snapshot forward so those calls don't wipe
+  // cached rows.
+  function addToHistory(
+    aql: string,
+    snapshot?: {
+      results?: unknown[];
+      bindVars?: Record<string, unknown>;
+      execMs?: number | null;
+    },
+  ) {
     const cypher = cypherRef.current.trim();
     if (!cypher) return;
+    const conn = state.connection;
     dispatch({
       type: "ADD_HISTORY",
       entry: {
         cypher,
         timestamp: Date.now(),
         aqlPreview: aql.slice(0, 120),
+        aql,
+        bindVars: snapshot?.bindVars,
+        results: snapshot?.results,
+        rowCount: snapshot?.results?.length,
+        execMs: snapshot?.execMs ?? null,
+        connectionUrl: conn.url,
+        connectionDatabase: conn.database,
       },
     });
   }
@@ -311,7 +332,11 @@ export default function App() {
       if (directAqlRef.current && state.aql) {
         const resp = await executeAql(state.aql, state.bindVars, state.connection.token);
         dispatch({ type: "EXECUTE_SUCCESS", results: resp.results, warnings: resp.warnings, execMs: resp.exec_ms });
-        addToHistory(resp.aql);
+        addToHistory(resp.aql, {
+          results: resp.results,
+          bindVars: state.bindVars,
+          execMs: resp.exec_ms,
+        });
       } else {
         if (!cypherRef.current.trim()) return;
         const resp = await executeCypher(makeRequest(), state.connection.token);
@@ -323,7 +348,11 @@ export default function App() {
           translateMs: resp.translate_ms,
         });
         dispatch({ type: "EXECUTE_SUCCESS", results: resp.results, warnings: resp.warnings, execMs: resp.exec_ms });
-        addToHistory(resp.aql);
+        addToHistory(resp.aql, {
+          results: resp.results,
+          bindVars: resp.bind_vars,
+          execMs: resp.exec_ms,
+        });
       }
     } catch (err) {
       dispatch({
@@ -375,7 +404,17 @@ export default function App() {
         statistics: resp.statistics,
         profile: resp.profile,
       });
-      addToHistory(resp.aql);
+      // Profile carries execution rows but the response shape lacks a
+      // dedicated ``exec_ms`` — the profile statistics block has its
+      // own timing fields. Persist the rows + bind vars so a history
+      // restore replays the Results pane; statistics/profile are not
+      // snapshotted (the analytical view is regenerated only when the
+      // user explicitly profiles again).
+      addToHistory(resp.aql, {
+        results: resp.results,
+        bindVars: resp.bind_vars,
+        execMs: null,
+      });
     } catch (err) {
       dispatch({
         type: "PROFILE_ERROR",
@@ -1368,7 +1407,11 @@ export default function App() {
       {showHistory && (
         <QueryHistory
           history={state.history}
-          onSelect={(cypher) => dispatch({ type: "SET_CYPHER", cypher })}
+          currentConnection={{
+            url: state.connection.url,
+            database: state.connection.database,
+          }}
+          onSelect={(entry) => dispatch({ type: "RESTORE_FROM_HISTORY", entry })}
           onClear={() => dispatch({ type: "CLEAR_HISTORY" })}
           onClose={() => setShowHistory(false)}
         />
