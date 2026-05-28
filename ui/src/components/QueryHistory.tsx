@@ -3,7 +3,13 @@ import type { HistoryEntry } from "../api/store";
 
 interface Props {
   history: HistoryEntry[];
-  onSelect: (cypher: string) => void;
+  // The currently connected (url, database). When supplied, the panel
+  // defaults to "current connection only" so the user doesn't have to
+  // scroll past queries they ran against other databases. The toggle
+  // is reachable in the header; ``null`` (no connection) disables
+  // filtering entirely.
+  currentConnection: { url: string; database: string } | null;
+  onSelect: (entry: HistoryEntry) => void;
   onClear: () => void;
   onClose: () => void;
 }
@@ -27,18 +33,81 @@ function formatTime(ts: number): string {
   });
 }
 
-export default function QueryHistory({ history, onSelect, onClear, onClose }: Props) {
+function entryMatchesConnection(
+  entry: HistoryEntry,
+  conn: { url: string; database: string } | null,
+): boolean {
+  if (!conn) return true;
+  // Entries written by older UI bundles lack connection metadata.
+  // Treat them as matching everything so the user can still see them
+  // — better to show too much than to silently hide history that
+  // pre-dates the snapshot feature.
+  if (!entry.connectionUrl && !entry.connectionDatabase) return true;
+  return (
+    entry.connectionUrl === conn.url && entry.connectionDatabase === conn.database
+  );
+}
+
+// Compact "27 rows" / "27 rows · cached" / "no snapshot" badge text.
+function snapshotBadge(entry: HistoryEntry): { label: string; tone: "ok" | "muted" | "warn" } {
+  const hasRows = entry.results !== undefined;
+  const rowCount = entry.rowCount;
+  if (hasRows && rowCount !== undefined) {
+    if (entry.truncated) {
+      return {
+        label: `${rowCount.toLocaleString()} rows (first ${entry.results!.length.toLocaleString()} cached)`,
+        tone: "warn",
+      };
+    }
+    return { label: `${rowCount.toLocaleString()} rows cached`, tone: "ok" };
+  }
+  if (!hasRows && rowCount !== undefined) {
+    return {
+      label: `${rowCount.toLocaleString()} rows (snapshot dropped to fit storage)`,
+      tone: "warn",
+    };
+  }
+  return { label: "no snapshot — click re-runs the query", tone: "muted" };
+}
+
+export default function QueryHistory({
+  history,
+  currentConnection,
+  onSelect,
+  onClear,
+  onClose,
+}: Props) {
   const [search, setSearch] = useState("");
+  // Default the connection filter on iff we actually have a current
+  // connection — that's the most common case and matches what users
+  // intuitively want ("show me what I ran against *this* DB").
+  const [currentOnly, setCurrentOnly] = useState<boolean>(currentConnection !== null);
 
   const filtered = useMemo(() => {
-    if (!search.trim()) return history;
+    let list = history;
+    if (currentOnly) {
+      list = list.filter((h) => entryMatchesConnection(h, currentConnection));
+    }
+    if (!search.trim()) return list;
     const lower = search.toLowerCase();
-    return history.filter(
+    return list.filter(
       (h) =>
         h.cypher.toLowerCase().includes(lower) ||
         h.aqlPreview.toLowerCase().includes(lower),
     );
-  }, [history, search]);
+  }, [history, search, currentOnly, currentConnection]);
+
+  // Show the toggle only when there's something to toggle. If every
+  // entry is from the current connection (or no connection metadata
+  // exists), the toggle is noise.
+  const hasOffConnectionEntries = useMemo(() => {
+    if (!currentConnection) return false;
+    return history.some(
+      (h) =>
+        (h.connectionUrl || h.connectionDatabase) &&
+        !entryMatchesConnection(h, currentConnection),
+    );
+  }, [history, currentConnection]);
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
@@ -64,7 +133,7 @@ export default function QueryHistory({ history, onSelect, onClear, onClose }: Pr
           </div>
         </div>
 
-        <div className="px-4 py-2 border-b border-gray-800">
+        <div className="px-4 py-2 border-b border-gray-800 space-y-2">
           <input
             type="text"
             value={search}
@@ -72,47 +141,95 @@ export default function QueryHistory({ history, onSelect, onClear, onClose }: Pr
             placeholder="Search queries..."
             className="w-full px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-sm text-gray-200 placeholder-gray-500 focus:border-indigo-500 focus:outline-none"
           />
+          {hasOffConnectionEntries && currentConnection && (
+            <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={currentOnly}
+                onChange={(e) => setCurrentOnly(e.target.checked)}
+                className="rounded border-gray-600 bg-gray-800 accent-indigo-500"
+              />
+              <span>
+                Show only{" "}
+                <span className="font-mono text-gray-300">
+                  {currentConnection.database}
+                </span>{" "}
+                queries
+              </span>
+            </label>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto">
           {filtered.length === 0 ? (
             <div className="flex items-center justify-center h-32">
               <p className="text-gray-600 text-sm">
-                {history.length === 0 ? "No queries yet." : "No matches found."}
+                {history.length === 0
+                  ? "No queries yet."
+                  : currentOnly
+                    ? "No queries against this database yet."
+                    : "No matches found."}
               </p>
             </div>
           ) : (
             <div className="divide-y divide-gray-800/50">
-              {filtered.map((entry, i) => (
-                <button
-                  key={`${entry.timestamp}-${i}`}
-                  onClick={() => {
-                    onSelect(entry.cypher);
-                    onClose();
-                  }}
-                  className="w-full text-left px-4 py-3 hover:bg-gray-800/60 transition-colors group"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <pre className="text-xs text-gray-200 font-mono whitespace-pre-wrap break-all line-clamp-3 flex-1">
-                      {entry.cypher}
-                    </pre>
-                    <span className="text-xs text-gray-600 flex-shrink-0 mt-0.5">
-                      {formatTime(entry.timestamp)}
-                    </span>
-                  </div>
-                  {entry.aqlPreview && (
-                    <p className="text-xs text-gray-500 mt-1 truncate font-mono">
-                      → {entry.aqlPreview}
-                    </p>
-                  )}
-                </button>
-              ))}
+              {filtered.map((entry, i) => {
+                const badge = snapshotBadge(entry);
+                const toneClass =
+                  badge.tone === "ok"
+                    ? "text-emerald-400/80"
+                    : badge.tone === "warn"
+                      ? "text-amber-400/80"
+                      : "text-gray-600";
+                return (
+                  <button
+                    key={`${entry.timestamp}-${i}`}
+                    onClick={() => {
+                      onSelect(entry);
+                      onClose();
+                    }}
+                    className="w-full text-left px-4 py-3 hover:bg-gray-800/60 transition-colors group"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <pre className="text-xs text-gray-200 font-mono whitespace-pre-wrap break-all line-clamp-3 flex-1">
+                        {entry.cypher}
+                      </pre>
+                      <span className="text-xs text-gray-600 flex-shrink-0 mt-0.5">
+                        {formatTime(entry.timestamp)}
+                      </span>
+                    </div>
+                    {entry.aqlPreview && (
+                      <p className="text-xs text-gray-500 mt-1 truncate font-mono">
+                        → {entry.aqlPreview}
+                      </p>
+                    )}
+                    <div className="mt-1.5 flex items-center gap-2 text-[10px]">
+                      <span className={toneClass}>{badge.label}</span>
+                      {entry.execMs != null && (
+                        <span className="text-sky-400/70 tabular-nums">
+                          · {entry.execMs}ms
+                        </span>
+                      )}
+                      {entry.connectionDatabase && (
+                        <span
+                          className="ml-auto text-gray-500 font-mono"
+                          title={entry.connectionUrl || ""}
+                        >
+                          {entry.connectionDatabase}
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
 
         <div className="px-4 py-2 border-t border-gray-800 text-xs text-gray-600">
-          {history.length} {history.length === 1 ? "entry" : "entries"}
+          {filtered.length === history.length
+            ? `${history.length} ${history.length === 1 ? "entry" : "entries"}`
+            : `${filtered.length} of ${history.length} ${history.length === 1 ? "entry" : "entries"}`}
         </div>
       </div>
     </div>

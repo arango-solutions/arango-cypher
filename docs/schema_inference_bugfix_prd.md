@@ -3,7 +3,7 @@
 Date: 2026-04-22
 Workspace: `arango-cypher-py`
 Related: [`python_prd.md`](./python_prd.md) §5 (schema detection & mapping), §1.2 (NL→Cypher pipeline)
-Status: Proposed — not yet implemented
+Status: **Implementation complete (WP-27..WP-30 merged 2026-04-23..24).** Manual §11.4 E2E closeout on `ic-knowledge-graph-temporal` remains open.
 
 ---
 
@@ -11,6 +11,7 @@ Status: Proposed — not yet implemented
 
 | Date | Changes |
 |------|---------|
+| 2026-05-26 | Status flipped from Proposed → implementation complete. All four WPs merged; only the §11.4 pilot walkthrough and operational `POST /schema/force-reacquire` on poisoned caches remain. |
 | 2026-04-22 | Initial draft. Consolidates six discrete defects surfaced by a translate-time failure on a hybrid (GraphRAG + PG) database in the pilot environment. Written as a self-contained PRD so it can be scheduled against a single wave without re-opening the whole of §5 in `python_prd.md`. |
 
 ---

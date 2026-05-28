@@ -1,5 +1,7 @@
 # Multi-Subagent Task Decomposition: Remaining Work
 
+> **Archived (2026-05-26).** This document predates the v0.3/v0.4 waves. Most workstreams here (named paths, EXISTS, regex, write clauses, NL hardening, visual mapping editor, etc.) are **shipped**. For current status use [`implementation_plan.md`](./implementation_plan.md), [`python_prd.md`](./python_prd.md), and [`2026-05-26-project-assessment.md`](./2026-05-26-project-assessment.md). Active follow-ups: Wave 8+ multi-tenant (MT-2..MT-8), Wave 11 transpiler polish, WP-19 staging deploy.
+
 ## Dependency Analysis
 
 The remaining work decomposes into **6 independent workstreams** that can execute in parallel, plus a final integration pass. Each workstream touches distinct files with minimal overlap.

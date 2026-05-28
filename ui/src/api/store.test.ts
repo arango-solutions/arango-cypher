@@ -15,7 +15,11 @@ import { describe, expect, it } from "vitest";
 import {
   type Action,
   type AppState,
+  type HistoryEntry,
+  MAX_ROWS_PER_ENTRY,
   initialState,
+  trimHistoryForPersistence,
+  truncateEntrySnapshot,
 } from "./store";
 
 // Re-derive the reducer from ``useAppState``'s public observation:
@@ -169,6 +173,228 @@ describe("reducer: WP-30 regenerate-button gating invariants", () => {
     const canRegenerate =
       s.editorCypherSource === "nl_pipeline" && s.lastNlQuestion !== null;
     expect(canRegenerate).toBe(false);
+  });
+});
+
+describe("reducer: history result snapshots (HRS)", () => {
+  function entry(
+    cypher: string,
+    overrides: Partial<HistoryEntry> = {},
+  ): HistoryEntry {
+    return {
+      cypher,
+      timestamp: 1_700_000_000_000,
+      aqlPreview: "FOR n IN ...",
+      ...overrides,
+    };
+  }
+
+  it("ADD_HISTORY stores a snapshot when one is supplied", () => {
+    const e = entry("MATCH (p:Person) RETURN p", {
+      aql: "FOR p IN Person RETURN p",
+      bindVars: {},
+      results: [{ name: "Alice" }, { name: "Bob" }],
+      rowCount: 2,
+      execMs: 12,
+      connectionUrl: "https://prod.example",
+      connectionDatabase: "addtech",
+    });
+    const next = apply(initialState, { type: "ADD_HISTORY", entry: e });
+    expect(next.history).toHaveLength(1);
+    expect(next.history[0].results).toEqual([{ name: "Alice" }, { name: "Bob" }]);
+    expect(next.history[0].rowCount).toBe(2);
+    expect(next.history[0].connectionDatabase).toBe("addtech");
+  });
+
+  it("ADD_HISTORY carries snapshot forward when re-adding the same Cypher without one", () => {
+    // Simulates the translate-after-execute path: Run cached rows,
+    // then the user hits Translate again (which dispatches ADD_HISTORY
+    // without a ``results`` field). Without merge logic the second
+    // call would wipe the cache.
+    const withResults = entry("MATCH (p:Person) RETURN p", {
+      aql: "FOR p IN Person RETURN p",
+      results: [{ name: "Alice" }],
+      rowCount: 1,
+    });
+    const withoutResults = entry("MATCH (p:Person) RETURN p", {
+      aql: "FOR p IN Person RETURN p",
+      timestamp: 1_700_000_001_000,
+    });
+    const next = apply(
+      initialState,
+      { type: "ADD_HISTORY", entry: withResults },
+      { type: "ADD_HISTORY", entry: withoutResults },
+    );
+    expect(next.history).toHaveLength(1);
+    expect(next.history[0].results).toEqual([{ name: "Alice" }]);
+    expect(next.history[0].rowCount).toBe(1);
+    expect(next.history[0].timestamp).toBe(1_700_000_001_000);
+  });
+
+  it("ADD_HISTORY replaces a stale snapshot with a fresh one", () => {
+    const old = entry("MATCH (p) RETURN p", { results: [{ a: 1 }], rowCount: 1 });
+    const fresh = entry("MATCH (p) RETURN p", {
+      results: [{ a: 1 }, { a: 2 }],
+      rowCount: 2,
+      timestamp: 1_700_000_002_000,
+    });
+    const next = apply(
+      initialState,
+      { type: "ADD_HISTORY", entry: old },
+      { type: "ADD_HISTORY", entry: fresh },
+    );
+    expect(next.history).toHaveLength(1);
+    expect(next.history[0].results).toEqual([{ a: 1 }, { a: 2 }]);
+    expect(next.history[0].rowCount).toBe(2);
+  });
+
+  it("truncateEntrySnapshot caps results at MAX_ROWS_PER_ENTRY and flags truncation", () => {
+    const big = Array.from({ length: MAX_ROWS_PER_ENTRY + 50 }, (_, i) => ({ i }));
+    const t = truncateEntrySnapshot(entry("c", { results: big }));
+    expect(t.results).toHaveLength(MAX_ROWS_PER_ENTRY);
+    expect(t.rowCount).toBe(MAX_ROWS_PER_ENTRY + 50);
+    expect(t.truncated).toBe(true);
+  });
+
+  it("truncateEntrySnapshot leaves small snapshots intact (truncated=false)", () => {
+    const small = [{ a: 1 }];
+    const t = truncateEntrySnapshot(entry("c", { results: small }));
+    expect(t.results).toBe(small);
+    expect(t.rowCount).toBe(1);
+    expect(t.truncated).toBe(false);
+  });
+
+  it("ADD_HISTORY auto-truncates oversized snapshots via truncateEntrySnapshot", () => {
+    const big = Array.from({ length: MAX_ROWS_PER_ENTRY + 100 }, (_, i) => ({ i }));
+    const next = apply(initialState, {
+      type: "ADD_HISTORY",
+      entry: entry("c", { results: big }),
+    });
+    expect(next.history[0].results).toHaveLength(MAX_ROWS_PER_ENTRY);
+    expect(next.history[0].rowCount).toBe(MAX_ROWS_PER_ENTRY + 100);
+    expect(next.history[0].truncated).toBe(true);
+  });
+
+  it("RESTORE_FROM_HISTORY repopulates cypher, aql, bindVars, and results", () => {
+    const e = entry("MATCH (p:Person) RETURN p", {
+      aql: "FOR p IN Person RETURN p",
+      bindVars: { tenantId: "t1" },
+      results: [{ name: "Alice" }],
+      rowCount: 1,
+      execMs: 42,
+    });
+    const next = apply(initialState, { type: "RESTORE_FROM_HISTORY", entry: e });
+    expect(next.cypher).toBe("MATCH (p:Person) RETURN p");
+    expect(next.aql).toBe("FOR p IN Person RETURN p");
+    expect(next.bindVars).toEqual({ tenantId: "t1" });
+    expect(next.results).toEqual([{ name: "Alice" }]);
+    expect(next.activeResultTab).toBe("table");
+    expect(next.execMs).toBe(42);
+    // Restore flips provenance to "user" — we don't carry the NL
+    // origin across history entries, so the WP-30 regenerate button
+    // must stay hidden.
+    expect(next.editorCypherSource).toBe("user");
+  });
+
+  it("RESTORE_FROM_HISTORY without a snapshot keeps the active tab and nulls results", () => {
+    // Simulates restoring a translate-only entry (no Run yet) or one
+    // whose snapshot was dropped to fit storage. The caller is on the
+    // Explain tab; restore must not yank them away.
+    const explainTabState: AppState = {
+      ...initialState,
+      activeResultTab: "explain",
+      results: [{ stale: true }],
+    };
+    const e = entry("MATCH (p) RETURN p", {
+      aql: "FOR p IN Person RETURN p",
+      rowCount: 100,
+    });
+    const next = apply(explainTabState, { type: "RESTORE_FROM_HISTORY", entry: e });
+    expect(next.cypher).toBe("MATCH (p) RETURN p");
+    expect(next.results).toBeNull();
+    expect(next.activeResultTab).toBe("explain");
+  });
+
+  it("RESTORE_FROM_HISTORY clears stale explain/profile/error state", () => {
+    const dirtyState: AppState = {
+      ...initialState,
+      explainPlan: { foo: "bar" },
+      profileData: { statistics: {}, profile: null },
+      error: "stale error",
+    };
+    const e = entry("MATCH (p) RETURN p");
+    const next = apply(dirtyState, { type: "RESTORE_FROM_HISTORY", entry: e });
+    expect(next.explainPlan).toBeNull();
+    expect(next.profileData).toBeNull();
+    expect(next.error).toBeNull();
+  });
+
+  it("CLEAR_HISTORY wipes everything including snapshots", () => {
+    const next = apply(
+      initialState,
+      {
+        type: "ADD_HISTORY",
+        entry: entry("c", { results: [{ a: 1 }], rowCount: 1 }),
+      },
+      { type: "CLEAR_HISTORY" },
+    );
+    expect(next.history).toHaveLength(0);
+  });
+});
+
+describe("trimHistoryForPersistence: storage-quota defense (HRS)", () => {
+  function bigEntry(idx: number, rowSize: number): HistoryEntry {
+    // Pad each row with a long string so the serialized payload is
+    // measurable in bytes, not just rows.
+    const rows = Array.from({ length: rowSize }, (_, i) => ({
+      idx,
+      i,
+      pad: "x".repeat(200),
+    }));
+    return {
+      cypher: `MATCH (n${idx}) RETURN n${idx}`,
+      timestamp: 1_700_000_000_000 + idx,
+      aqlPreview: `FOR n IN c${idx}`,
+      aql: `FOR n IN c${idx} RETURN n`,
+      results: rows,
+      rowCount: rowSize,
+    };
+  }
+
+  it("returns the history unchanged when payload already fits", () => {
+    const history = [bigEntry(0, 10)];
+    const trimmed = trimHistoryForPersistence(initialState, history, 5_000_000);
+    expect(trimmed).toHaveLength(1);
+    expect(trimmed[0].results).toBeDefined();
+  });
+
+  it("drops the oldest snapshot first when payload exceeds the cap", () => {
+    // 3 entries × 100 rows × ~200 bytes ≈ 60 KB+ — comfortably above
+    // a 5 KB cap. The trimmer should drop snapshots starting from the
+    // oldest (last in array, since newest is index 0).
+    const history = [bigEntry(2, 100), bigEntry(1, 100), bigEntry(0, 100)];
+    const trimmed = trimHistoryForPersistence(initialState, history, 5_000);
+    expect(trimmed).toHaveLength(3);
+    // Oldest had its snapshot dropped.
+    expect(trimmed[2].results).toBeUndefined();
+    expect(trimmed[2].rowCount).toBe(100);
+    // Newest retains its snapshot for as long as the cap allows.
+    // (Could be that ALL three were dropped if even one didn't fit;
+    // assert the ordering invariant rather than which specific ones.)
+    if (trimmed[0].results === undefined) {
+      // All dropped — middle must also be dropped.
+      expect(trimmed[1].results).toBeUndefined();
+    }
+  });
+
+  it("preserves cypher + aqlPreview + rowCount on every entry even when snapshots are dropped", () => {
+    const history = [bigEntry(2, 200), bigEntry(1, 200), bigEntry(0, 200)];
+    const trimmed = trimHistoryForPersistence(initialState, history, 1_000);
+    for (const e of trimmed) {
+      expect(e.cypher).toBeTruthy();
+      expect(e.aqlPreview).toBeTruthy();
+      expect(e.rowCount).toBe(200);
+    }
   });
 });
 

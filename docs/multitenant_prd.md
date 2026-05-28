@@ -24,13 +24,13 @@ This PRD specifies a six-layer defense-in-depth architecture that makes cross-te
 
 | # | Layer | Mechanism | Status |
 |---|---|---|---|
-| 0 | Storage | Disjoint SmartGraphs (per-tenant shard key) + satellite collections (tenant-independent reference data) | Schema supports; mapper does not yet expose layout |
-| 1 | Session | Server-bound `@tenantId`, injected from authenticated session; never trusted from the request body | Not implemented |
+| 0 | Storage | Disjoint SmartGraphs (per-tenant shard key) + satellite collections (tenant-independent reference data) | **Partial** — `metadata.shardingProfile` / `multitenancy` / `shardFamilies` adopted from analyzer ≥0.5.0 (see §3) |
+| 1 | Session | Server-bound `@tenantId`, injected from authenticated session; never trusted from the request body | **Done** (Wave 7, MT-1) — `POST /connect` validates and stores tenant; body tenant ignored in tenant-user mode |
 | 2 | LLM | Manifest-aware prompt + few-shot + regex postcheck + retry | **Done** (Wave 4r, 2026-04-20) |
-| 3 | Cypher AST | Algorithmic tenant-predicate injection on the parsed Cypher, before transpilation | Not implemented |
-| 4 | AQL AST | Tenant-predicate injection on the transpiled AQL; covers the NL→AQL direct path and `/execute-aql` | Not implemented |
-| 5 | Pre-execute | EXPLAIN-plan validator that refuses any plan scanning a tenant-scoped collection without a bind-var tenant predicate | Not implemented |
-| 6 | Execute | `db.aql.execute(query, bind_vars={**client, "tenantId": session.tenant_id})` (session value wins) | Not implemented |
+| 3 | Cypher AST | Algorithmic tenant-predicate injection on the parsed Cypher, before transpilation | Not implemented (MT-3, Wave 8) |
+| 4 | AQL AST | Tenant-predicate injection on the transpiled AQL; covers the NL→AQL direct path and `/execute-aql` | Not implemented (MT-4, Wave 8) |
+| 5 | Pre-execute | EXPLAIN-plan validator that refuses any plan scanning a tenant-scoped collection without a bind-var tenant predicate | **Done** (Wave 7, MT-5) — `tenant_plan_validator.py`; wired on `/execute`, `/execute-aql`, `/aql-profile` |
+| 6 | Execute | `db.aql.execute(query, bind_vars={**client, "tenantId": session.tenant_id})` (session value wins) | **Done** (Wave 7, MT-5) — `safe_execute` in `arango_query_core/exec.py` + service adapter |
 
 **Key decisions:**
 
