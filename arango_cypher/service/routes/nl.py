@@ -10,6 +10,8 @@ import time
 
 from fastapi import Depends, HTTPException
 
+from ...tenant_ast_aql import AqlRewriteError
+from ...tenant_plan_validator import TenantScopeViolation
 from ..app import _PUBLIC_MODE, app
 from ..models import NL2AqlRequest, NL2CypherRequest, NLSuggestRequest
 from ..observability import (
@@ -17,6 +19,7 @@ from ..observability import (
     log_endpoint_timing,
     log_llm_call,
 )
+from ..safe_exec import apply_layer4_rewrite
 from ..security import (
     _COLLECTION_NAME_RE,
     _check_nl_rate_limit,
@@ -257,6 +260,66 @@ def nl2aql_endpoint(
     )
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
 
+    # Layer 4 (Wave 8a / MT-4) — the *only* tenant-scope defence on
+    # the NL→AQL direct path (Layer 3 / Cypher AST never runs because
+    # no Cypher is generated). Rewrite every unscoped tenant-scoped
+    # read before returning the AQL to the caller; the same AQL will
+    # be re-validated by Layer 5 when the caller submits it via
+    # `/execute-aql`.
+    #
+    # The rewriter requires a mapping bundle to know which collections
+    # are tenant-scoped. ``/nl2aql`` historically accepts requests
+    # without a mapping (the UI calls it before the user has loaded
+    # a schema; the prompt-only flow doesn't need one), so we skip
+    # Layer 4 in that case. Layer 5 / Layer 4-at-/execute-aql remain
+    # the security boundaries — they refuse fail-closed when the
+    # tenant-bound session submits raw AQL without a mapping.
+    layer4_aql = result.aql
+    layer4_bind = dict(result.bind_vars or {})
+    layer4_changes: list[str] = []
+    rewrite_session = auth_session or bound_session
+    if (
+        rewrite_session is not None
+        and getattr(rewrite_session, "tenant_id", None)
+        and result.aql
+        and req.mapping  # see comment above re: mapping-optional contract
+    ):
+        try:
+            layer4_aql, layer4_bind, layer4_changes = apply_layer4_rewrite(
+                db=rewrite_session.db,
+                aql=result.aql,
+                bind_vars=result.bind_vars,
+                session=rewrite_session,
+                mapping_dict=req.mapping,
+            )
+        except AqlRewriteError as exc:
+            # AMBIGUITY: NL output that the rewriter cannot safely
+            # constrain is a translation-quality issue; we surface
+            # 403 (same shape as a Layer-5 violation) so the UI
+            # treats it as a tenant-safety refusal rather than a
+            # transient retry candidate. A future MT-4.1 may route
+            # this back into the NL retry loop with the violation
+            # code as a hint, but doing so today would change the
+            # response shape and require the UI to learn a new code.
+            status = 403 if exc.code == "UNCONSTRAINED_COLLECTION_ACCESS" else 422
+            raise HTTPException(
+                status_code=status,
+                detail={
+                    "error": "aql_rewrite_failed",
+                    "code": exc.code,
+                    "message": exc.message,
+                },
+            ) from exc
+        except TenantScopeViolation as exc:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "tenant_scope_violation",
+                    "code": exc.code,
+                    "message": exc.message,
+                },
+            ) from exc
+
     provider, model = current_llm_provider_and_model()
     log_llm_call(
         endpoint="/nl2aql",
@@ -274,12 +337,13 @@ def nl2aql_endpoint(
         elapsed_ms,
         method=result.method,
         confidence=result.confidence,
-        aql_len=len(result.aql or ""),
+        aql_len=len(layer4_aql or ""),
         question_len=len(req.question or ""),
+        tenant_rewrites=len(layer4_changes),
     )
     return {
-        "aql": result.aql,
-        "bind_vars": result.bind_vars,
+        "aql": layer4_aql,
+        "bind_vars": layer4_bind,
         "explanation": result.explanation,
         "confidence": result.confidence,
         "method": result.method,
@@ -288,6 +352,7 @@ def nl2aql_endpoint(
         "completion_tokens": result.completion_tokens,
         "total_tokens": result.total_tokens,
         "cached_tokens": result.cached_tokens,
+        "tenantRewritesAql": layer4_changes,
     }
 
 

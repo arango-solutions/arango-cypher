@@ -35,6 +35,10 @@ from ..nl2cypher.tenant_scope import (
     TenantScopeManifest,
     analyze_tenant_scope,
 )
+from ..tenant_ast_aql import (
+    AqlRewriteError,
+    inject_tenant_scope,
+)
 from ..tenant_plan_validator import (
     TenantScopeViolation,
     validate_plan,
@@ -173,4 +177,69 @@ def safe_execute_aql(
     )
 
 
-__all__ = ["safe_execute_aql"]
+def apply_layer4_rewrite(
+    *,
+    db: Any,
+    aql: str,
+    bind_vars: dict[str, Any] | None,
+    session: _Session,
+    mapping_dict: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any], list[str]]:
+    """Layer 4 (AQL AST tenant-injection) wrapper used by every route
+    that produces or accepts AQL before handing it to Layer 5 +
+    Layer 6.
+
+    Returns ``(rewritten_aql, augmented_bind_vars, changes)``. When
+    the rewrite is a structural no-op (no mapping, no tenant entity,
+    session not tenant-bound), returns the inputs unchanged and an
+    empty changes list.
+
+    The route adapter centralises the manifest / sharding-profile
+    derivation so the routes stay slim and so the rewriter call
+    contract is identical at every site (defence in depth — one
+    integration bug to fix, not three). Mirrors the
+    :func:`safe_execute_aql` adapter for Layer 5.
+
+    Tenant-unbound sessions (workbench / single-tenant) bypass the
+    rewriter entirely: there is no session tenant to scope against,
+    and Layer 5 already accepts global / satellite-only queries
+    without a tenant bind. This matches the same "tenant-bound or
+    bypass" gating Layer 6 already implements.
+    """
+    tenant_id = getattr(session, "tenant_id", None)
+    tenant_key = getattr(session, "tenant_key", None) or tenant_id or ""
+    if not tenant_id:
+        # Workbench / unbound — Layer 4 is a structural no-op.
+        return aql, dict(bind_vars or {}), []
+
+    manifest, sharding_profile, coll_to_entity = _build_validator_inputs(mapping_dict)
+    if manifest is None:
+        # No mapping in tenant-bound mode. We honour the same fail-
+        # closed posture as Layer 6: refuse — the rewriter cannot
+        # tell which collections are tenant-scoped, and silently
+        # passing through would expose every read.
+        raise TenantScopeViolation(
+            code="NO_MAPPING_FOR_VALIDATION",
+            message=(
+                "tenant-bound session requires a mapping bundle so "
+                "Layer 4 (AQL AST tenant-injection) can scope the "
+                "query against the schema — refusing fail-closed"
+            ),
+        )
+    return inject_tenant_scope(
+        db=db,
+        aql=aql,
+        bind_vars=bind_vars,
+        manifest=manifest,
+        sharding_profile=sharding_profile,
+        tenant_id=tenant_id,
+        tenant_key=tenant_key,
+        collection_to_entity=coll_to_entity,
+    )
+
+
+__all__ = [
+    "AqlRewriteError",
+    "apply_layer4_rewrite",
+    "safe_execute_aql",
+]
