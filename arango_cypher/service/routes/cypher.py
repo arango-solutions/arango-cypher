@@ -13,6 +13,7 @@ from arango_query_core import CoreError
 
 from ... import corrections as _corrections
 from ...api import translate, validate_cypher_profile
+from ...tenant_ast_aql import AqlRewriteError
 from ...tenant_plan_validator import TenantScopeViolation
 from ..app import app
 from ..mapping import _mapping_from_dict
@@ -27,22 +28,62 @@ from ..models import (
 )
 from ..observability import log_endpoint_timing
 from ..registry import _default_registry
-from ..safe_exec import safe_execute_aql
+from ..safe_exec import apply_layer4_rewrite, safe_execute_aql
 from ..security import (
     _check_compute_rate_limit,
     _get_session,
+    _optional_session,
     _sanitize_error,
     _Session,
     _translate_errors,
 )
 
 
+def _layer4_error_response(exc: AqlRewriteError) -> HTTPException:
+    """Translate a Layer-4 refusal into an HTTP 422 / 403 response.
+
+    ``UNCONSTRAINED_COLLECTION_ACCESS`` is a tenant-safety refusal
+    (HTTP 403, same surface as Layer 5 violations); the other codes
+    indicate a translator / EXPLAIN-side bug and map to HTTP 422 so
+    the caller knows the request can't be retried as-is.
+    """
+    if exc.code in {"UNCONSTRAINED_COLLECTION_ACCESS"}:
+        status = 403
+        error_kind = "tenant_scope_violation"
+    else:
+        status = 422
+        error_kind = "aql_rewrite_failed"
+    return HTTPException(
+        status_code=status,
+        detail={
+            "error": error_kind,
+            "code": exc.code,
+            "message": exc.message,
+        },
+    )
+
+
 @app.post("/translate", response_model=TranslateResponse)
 def translate_endpoint(
     req: TranslateRequest,
     _: None = Depends(_check_compute_rate_limit),
+    session: _Session | None = Depends(_optional_session),
 ):
-    """Translate Cypher to AQL."""
+    """Translate Cypher to AQL.
+
+    When the request carries a session header (``X-Arango-Session``)
+    and the session is tenant-bound, Layer 4 (AQL AST tenant-injection,
+    Wave 8a / MT-4) runs on the transpiled AQL before the response is
+    returned. Sessions without a tenant binding (workbench mode,
+    single-tenant deployments) bypass the rewriter; the response's
+    ``tenantRewritesAql`` field stays empty.
+
+    Layer 4 needs a live DB handle for the EXPLAIN round-trip; when
+    no session is attached we cannot run it, so the transpiled AQL
+    is returned unchanged. This is safe because ``/translate`` never
+    executes anything — the rewriter would have run inside
+    ``/execute`` regardless.
+    """
     _log.getLogger("arango_cypher.service").info(
         "translate request: cypher=%r, mapping_keys=%s",
         req.cypher[:80] if req.cypher else "(empty)",
@@ -84,28 +125,91 @@ def translate_endpoint(
             correction_id=correction.id,
             extensions_enabled=req.extensions_enabled,
         )
-        return TranslateResponse(
+        # Layer 4 over the corrected AQL is a no-op when the
+        # correction itself was the answer the human gave; we still
+        # run it so a stale correction that doesn't carry the tenant
+        # predicate gets re-scoped on the way out (defence in depth).
+        corrected_aql, corrected_bind, layer4_changes = _maybe_apply_layer4(
+            session=session,
+            mapping_dict=req.mapping,
             aql=correction.corrected_aql,
             bind_vars=correction.bind_vars or result.bind_vars,
+        )
+        return TranslateResponse(
+            aql=corrected_aql,
+            bind_vars=corrected_bind,
             warnings=[{"message": f"Using learned correction #{correction.id}"}]
             + list(result.warnings or []),
             elapsed_ms=elapsed_ms,
+            tenantRewritesAql=layer4_changes,
         )
+
+    rewritten_aql, rewritten_bind, layer4_changes = _maybe_apply_layer4(
+        session=session,
+        mapping_dict=req.mapping,
+        aql=result.aql,
+        bind_vars=result.bind_vars,
+    )
 
     log_endpoint_timing(
         "/translate",
         elapsed_ms,
         cypher_len=len(req.cypher or ""),
-        aql_len=len(result.aql or ""),
+        aql_len=len(rewritten_aql or ""),
         warnings=len(result.warnings or []),
         extensions_enabled=req.extensions_enabled,
+        tenant_rewrites=len(layer4_changes),
     )
     return TranslateResponse(
-        aql=result.aql,
-        bind_vars=result.bind_vars,
+        aql=rewritten_aql,
+        bind_vars=rewritten_bind,
         warnings=result.warnings,
         elapsed_ms=elapsed_ms,
+        tenantRewritesAql=layer4_changes,
     )
+
+
+def _maybe_apply_layer4(
+    *,
+    session: _Session | None,
+    mapping_dict: dict[str, object] | None,
+    aql: str,
+    bind_vars: dict[str, object],
+) -> tuple[str, dict[str, object], list[str]]:
+    """Run Layer 4 if a tenant-bound session is available.
+
+    Returns ``(rewritten_aql, augmented_bind_vars, changes)``. When
+    no session is attached or the session lacks a tenant binding,
+    returns the inputs unchanged with an empty changes list — this
+    is the workbench / single-tenant pass-through path.
+
+    Translates :class:`AqlRewriteError` into an :class:`HTTPException`
+    so the route handler can raise it without an extra try/except.
+    """
+    if session is None or not getattr(session, "tenant_id", None):
+        return aql, dict(bind_vars or {}), []
+    try:
+        return apply_layer4_rewrite(
+            db=session.db,
+            aql=aql,
+            bind_vars=bind_vars,
+            session=session,
+            mapping_dict=mapping_dict,
+        )
+    except AqlRewriteError as exc:
+        raise _layer4_error_response(exc) from exc
+    except TenantScopeViolation as exc:
+        # Layer-6 / Layer-4 adapter raises this when mapping is
+        # missing in tenant-bound mode. Re-raise as the canonical
+        # 403 response so the UI surfaces it identically.
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "tenant_scope_violation",
+                "code": exc.code,
+                "message": exc.message,
+            },
+        ) from exc
 
 
 @app.post("/execute", response_model=ExecuteResponse)
@@ -142,6 +246,17 @@ def execute_endpoint(
     if correction:
         warnings.insert(0, {"message": f"Using learned correction #{correction.id}"})
 
+    # Layer 4 (AQL AST tenant-injection) before Layer 5 sees the AQL.
+    # On tenant-bound sessions this rewrites every unscoped read; on
+    # workbench / unbound sessions it's a structural no-op. Refusals
+    # surface as HTTPException via `_maybe_apply_layer4`.
+    run_aql, run_bind, layer4_changes = _maybe_apply_layer4(
+        session=session,
+        mapping_dict=req.mapping,
+        aql=run_aql,
+        bind_vars=run_bind,
+    )
+
     try:
         with _translate_errors("AQL execution failed"):
             t_exec = time.perf_counter()
@@ -175,6 +290,7 @@ def execute_endpoint(
         cypher_len=len(req.cypher or ""),
         aql_len=len(run_aql or ""),
         used_correction=bool(correction),
+        tenant_rewrites=len(layer4_changes),
     )
     return ExecuteResponse(
         results=results,
@@ -183,6 +299,7 @@ def execute_endpoint(
         warnings=warnings,
         exec_ms=exec_ms,
         translate_ms=translate_ms,
+        tenantRewritesAql=layer4_changes,
     )
 
 
@@ -201,13 +318,26 @@ def execute_aql_endpoint(
     direct execute and a WARN audit log.
     """
     final_bind = req.bind_vars
+    # Layer 4 — the *only* tenant-scope defence on raw-AQL submissions.
+    # When the session is tenant-bound and no mapping was supplied the
+    # adapter raises TenantScopeViolation(NO_MAPPING_FOR_VALIDATION),
+    # which `_maybe_apply_layer4` translates to a 403. The same
+    # condition is checked by Layer 6 (safe_execute_aql) downstream;
+    # checking here too means we refuse early without wasting an
+    # EXPLAIN round-trip.
+    run_aql, final_bind, layer4_changes = _maybe_apply_layer4(
+        session=session,
+        mapping_dict=req.mapping,
+        aql=req.aql,
+        bind_vars=req.bind_vars,
+    )
     try:
         with _translate_errors("AQL execution failed"):
             t_exec = time.perf_counter()
             cursor, final_bind = safe_execute_aql(
                 db=session.db,
-                aql=req.aql,
-                bind_vars=req.bind_vars,
+                aql=run_aql,
+                bind_vars=final_bind,
                 session=session,
                 mapping_dict=req.mapping,
             )
@@ -229,14 +359,16 @@ def execute_aql_endpoint(
         "/execute-aql",
         exec_ms,
         rows=len(results),
-        aql_len=len(req.aql or ""),
+        aql_len=len(run_aql or ""),
+        tenant_rewrites=len(layer4_changes),
     )
     return ExecuteResponse(
         results=results,
-        aql=req.aql,
+        aql=run_aql,
         bind_vars=final_bind,
         warnings=[],
         exec_ms=exec_ms,
+        tenantRewritesAql=layer4_changes,
     )
 
 
@@ -342,14 +474,21 @@ def aql_profile_endpoint(
             detail={"error": _sanitize_error(str(e)), "code": e.code},
         ) from e
 
-    final_bind = transpiled.bind_vars
+    # Layer 4 over the transpiled AQL before the profiled execute.
+    run_aql, run_bind, layer4_changes = _maybe_apply_layer4(
+        session=session,
+        mapping_dict=req.mapping,
+        aql=transpiled.aql,
+        bind_vars=transpiled.bind_vars,
+    )
+    final_bind = run_bind
     try:
         t_exec = time.perf_counter()
         with _translate_errors("AQL profiled execution failed"):
             cursor, final_bind = safe_execute_aql(
                 db=session.db,
-                aql=transpiled.aql,
-                bind_vars=transpiled.bind_vars,
+                aql=run_aql,
+                bind_vars=run_bind,
                 session=session,
                 mapping_dict=req.mapping,
                 execute_kwargs={"profile": True},
@@ -377,13 +516,15 @@ def aql_profile_endpoint(
         exec_ms=exec_ms,
         rows=len(results),
         cypher_len=len(req.cypher or ""),
-        aql_len=len(transpiled.aql or ""),
+        aql_len=len(run_aql or ""),
+        tenant_rewrites=len(layer4_changes),
     )
     return {
-        "aql": transpiled.aql,
+        "aql": run_aql,
         "bind_vars": final_bind,
         "results": results,
         "statistics": stats,
         "profile": profile_data,
         "translate_ms": translate_ms,
+        "tenantRewritesAql": layer4_changes,
     }

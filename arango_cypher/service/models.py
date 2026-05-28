@@ -92,6 +92,16 @@ class TranslateResponse(BaseModel):
     bind_vars: dict[str, Any]
     warnings: list[dict[str, Any]]
     elapsed_ms: float | None = None
+    # Wave 8a / MT-4 — Layer 4 (AQL AST tenant-injection) audit trail.
+    # One human-readable string per rewrite site (e.g. "Added FILTER
+    # e.TENANT_HEX_ID == @tenantId after FOR e IN Employee"). The UI
+    # renders the list as an annotation strip above the AQL editor
+    # so the user can see *what* Layer 4 changed and *why*. Empty
+    # list when no rewrites were needed (satellite-only or already-
+    # constrained query); absent / null on pre-Wave-8a service builds
+    # so older UI bundles handle it gracefully (UI treats `null` and
+    # `[]` identically — no strip rendered).
+    tenantRewritesAql: list[str] = []
 
 
 class ExecuteRequest(BaseModel):
@@ -112,6 +122,8 @@ class ExecuteResponse(BaseModel):
     # both badges side-by-side after a Run; otherwise users lose
     # visibility into translation cost the moment they execute.
     translate_ms: float | None = None
+    # Wave 8a / MT-4 — see TranslateResponse.tenantRewritesAql.
+    tenantRewritesAql: list[str] = []
 
 
 class ValidateRequest(BaseModel):

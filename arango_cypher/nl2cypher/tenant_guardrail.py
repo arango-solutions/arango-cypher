@@ -51,10 +51,38 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from .tenant_ast_common import (
+    TENANT_ID_BIND,
+    TENANT_KEY_BIND,
+    is_bindvar_reference,
+    is_literal_tenant_value,
+)
 from .tenant_scope import (
     EntityTenantRole,
     TenantScopeManifest,
 )
+
+# ---------------------------------------------------------------------------
+# Violation codes (single source of truth so callers can branch on the
+# machine-readable shape rather than substring-grepping ``reason``).
+# ---------------------------------------------------------------------------
+
+#: Existing pre-MT-2 violation: the Cypher binds no ``:Tenant`` and
+#: does not filter a tenant-scoped entity by its denormalised tenant
+#: field at all. Default code on a :class:`TenantScopeViolation`.
+CODE_NO_TENANT_BINDING = "NO_TENANT_BINDING"
+
+#: Wave 8a / MT-2 violation: the Cypher contains a denormalised
+#: tenant predicate whose right-hand side is a literal tenant value
+#: (or, under the fail-closed branch when ``manifest.known_tenant_keys``
+#: is unset, *any* string literal). Bind-variable references to
+#: :data:`tenant_ast_common.TENANT_ID_BIND` /
+#: :data:`tenant_ast_common.TENANT_KEY_BIND` are the only accepted
+#: proof of scope after this code lands. Layer 3 (MT-3) mechanically
+#: rewrites legitimate denorm filters into the bind-var form, so a
+#: literal that survives Layer 3 is evidence of a T2-class injection
+#: probe at the LLM layer (PRD §5.2 enhancement #1).
+CODE_LITERAL_TENANT_PREDICATE = "LITERAL_TENANT_PREDICATE"
 
 # Match `:Tenant` as a standalone label; explicitly reject
 # `:TenantUser`, `:TenantCVE`, `:TenantAppVersion`, etc.
@@ -109,6 +137,25 @@ class TenantContext:
 class TenantScopeViolation:
     """Diagnostic for a translation that dropped the tenant constraint.
 
+    ``code`` is the machine-actionable shape of the violation. Today
+    two codes exist:
+
+    * :data:`CODE_NO_TENANT_BINDING` — the original Wave-4r contract:
+      no ``:Tenant`` binding and no denormalised tenant predicate.
+      The LLM dropped scoping entirely.
+    * :data:`CODE_LITERAL_TENANT_PREDICATE` — Wave 8a / MT-2 (PRD
+      §5.2 enhancement #1): the LLM wrote a denormalised tenant
+      predicate using a string literal RHS. Always rejected — the
+      session-bound bind variable
+      (:data:`tenant_ast_common.TENANT_ID_BIND` /
+      :data:`tenant_ast_common.TENANT_KEY_BIND`) is the only
+      accepted shape so Layer 3's mechanical rewrite remains
+      lossless and a hostile prompt cannot inject a tenant
+      identifier as user-controlled data.
+
+    Defaults to :data:`CODE_NO_TENANT_BINDING` to preserve the
+    pre-MT-2 caller contract for the existing rejection path.
+
     ``physical_enforcement`` carries forward
     ``metadata.multitenancy.physicalEnforcement`` from the analyzer
     (>=0.6, upstream PRD §6.2 bullet 4). When ``True`` the underlying
@@ -127,6 +174,7 @@ class TenantScopeViolation:
     reason: str
     suggested_hint: str
     physical_enforcement: bool | None = None
+    code: str = CODE_NO_TENANT_BINDING
 
 
 # ---------------------------------------------------------------------------
@@ -215,39 +263,105 @@ def cypher_referenced_labels(cypher: str) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def _denorm_filter_satisfied(
+# Canonical tenant bind-variable names accepted as scope proof on the
+# RHS of a denormalised tenant predicate. Imported from the shared
+# Wave-8-pre vocabulary so the three rewriters (Layer 2 / 3 / 4)
+# never disagree on what a tenant bind-var is named — see
+# ``tenant_ast_common`` for the rationale.
+_ACCEPTED_TENANT_BIND_NAMES: frozenset[str] = frozenset({TENANT_ID_BIND, TENANT_KEY_BIND})
+
+
+@dataclass(frozen=True)
+class _DenormPredicateScan:
+    """Outcome of scanning a Cypher string for predicates against a
+    single denormalised tenant field.
+
+    Attributes
+    ----------
+    bind_var_satisfied:
+        ``True`` when the Cypher contains at least one predicate of
+        the form ``x.<field> = $<bind_name>`` (or the inline
+        property-map equivalent ``{<field>: $<bind_name>}``) whose
+        bind name is one of the canonical tenant binds. This is the
+        only acceptable proof of scope after MT-2.
+    literal_values:
+        Every literal RHS observed for the same field, in source
+        order. The caller hands each one to
+        :func:`tenant_ast_common.is_literal_tenant_value` to decide
+        whether it constitutes a T2-class injection probe.
+    """
+
+    bind_var_satisfied: bool
+    literal_values: tuple[str, ...]
+
+
+def _scan_denorm_predicates(
     cypher: str,
     *,
     field_name: str,
-    tenant_value: str,
-) -> bool:
-    """Return ``True`` if the Cypher contains a filter equating
-    ``field_name`` to ``tenant_value``.
+) -> _DenormPredicateScan:
+    """Inspect ``cypher`` for predicates against ``field_name``.
 
-    Accepts the common shapes the LLM emits:
+    Recognises the same syntactic shapes the LLM emits today —
+    ``WHERE x.<field> = <rhs>``, ``WHERE x.<field> == <rhs>``, and the
+    inline node-property form ``MATCH (x:Label {<field>: <rhs>})`` —
+    where ``<rhs>`` is either a single/double-quoted string literal
+    OR a Cypher bind-variable reference (``$<name>``). Quote style
+    and whitespace are tolerated. Backticked field names are NOT
+    matched (consistent with the pre-MT-2 helper this replaces; the
+    schema analyzer never emits backtickable tenant field names in
+    the field set Layer 2 sees).
 
-    * ``WHERE x.TENANT_ID = '<value>'``
-    * ``WHERE x.TENANT_ID == '<value>'``
-    * ``MATCH (x:Device {TENANT_ID: '<value>'})``
-    * ``WHERE x.TENANT_ID IN ['<value>']`` (degenerate single-value form)
-
-    Quote style (single vs double) and whitespace are tolerated.
+    The scanner is deliberately permissive on the LHS (any
+    ``identifier.<field>``) and strict on the RHS — the literal-vs-
+    bind-var dichotomy is exactly the contract MT-2 ratchets up.
+    The result is a structural classification, not a satisfaction
+    verdict; the caller (:func:`check_tenant_scope`) decides what to
+    do with literal RHSes by delegating to
+    :func:`tenant_ast_common.is_literal_tenant_value`.
     """
-    if not cypher or not field_name or not tenant_value:
-        return False
+    if not cypher or not field_name:
+        return _DenormPredicateScan(bind_var_satisfied=False, literal_values=())
+
     f = re.escape(field_name)
-    v = re.escape(tenant_value)
-    # Equality: x.<field> = '<value>' or x.<field> == '<value>'
-    eq = re.compile(
-        rf"\.\s*{f}\s*={{1,2}}\s*['\"]{v}['\"]",
+    # ``x.<field> = <rhs>`` / ``x.<field> == <rhs>`` — RHS is either a
+    # quoted literal (capture group 1 OR 2 depending on the quote
+    # style) or a bind-var reference ``$<name>`` (capture group 3).
+    eq_pattern = re.compile(
+        rf"\.\s*{f}\s*={{1,2}}\s*(?:'([^']*)'|\"([^\"]*)\"|\$([A-Za-z_][A-Za-z0-9_]*))",
     )
-    if eq.search(cypher):
-        return True
-    # Inline node properties: {<field>: '<value>'}
-    inline = re.compile(rf"\{{[^{{}}]*\b{f}\s*:\s*['\"]{v}['\"]")
-    if inline.search(cypher):
-        return True
-    return False
+    # ``{<field>: <rhs>}`` — same RHS shape as above.
+    inline_pattern = re.compile(
+        rf"\{{[^{{}}]*\b{f}\s*:\s*(?:'([^']*)'|\"([^\"]*)\"|\$([A-Za-z_][A-Za-z0-9_]*))",
+    )
+
+    bind_var_satisfied = False
+    literal_values: list[str] = []
+
+    for pattern in (eq_pattern, inline_pattern):
+        for m in pattern.finditer(cypher):
+            single, double, bindvar = m.group(1), m.group(2), m.group(3)
+            if bindvar is not None:
+                # Route through the shared bind-var matcher so a
+                # future wire-format change (e.g. ArangoDB
+                # introduces a new ``parameter`` node shape in
+                # EXPLAIN plans) is fixed in exactly one place.
+                synthetic_node = {"type": "parameter", "name": bindvar}
+                if any(is_bindvar_reference(synthetic_node, name=n) for n in _ACCEPTED_TENANT_BIND_NAMES):
+                    bind_var_satisfied = True
+                # A non-tenant bind-var (``$departmentId`` etc.) is
+                # not scope proof and not a literal — silently
+                # ignored, identical to the pre-MT-2 behaviour for
+                # an unrecognised RHS.
+                continue
+            literal = single if single is not None else double
+            if literal is not None:
+                literal_values.append(literal)
+
+    return _DenormPredicateScan(
+        bind_var_satisfied=bind_var_satisfied,
+        literal_values=tuple(literal_values),
+    )
 
 
 def check_tenant_scope(
@@ -271,12 +385,26 @@ def check_tenant_scope(
       scoped correctly by traversal.
     * ``manifest`` is provided, the Cypher touches at least one
       tenant-scoped entity that carries a denormalised tenant field,
-      AND the Cypher contains a filter equating that field to
-      ``tenant_context.value`` — the planner can satisfy the scope
-      with an indexed equality, no traversal needed.
+      AND the Cypher contains a predicate of the form
+      ``x.<denorm_field> = $<bind>`` (or the inline property-map
+      equivalent) where ``<bind>`` is one of the canonical tenant
+      bind variables (:data:`tenant_ast_common.TENANT_ID_BIND` /
+      :data:`tenant_ast_common.TENANT_KEY_BIND`). The planner
+      satisfies the scope with an indexed equality at execution
+      time, no traversal needed.
 
-    A violation is returned only when a tenant context is active AND
-    none of the above scope-satisfaction paths are present.
+    A violation is returned in two distinct shapes (machine-readable
+    on :attr:`TenantScopeViolation.code`):
+
+    * :data:`CODE_LITERAL_TENANT_PREDICATE` (Wave 8a / MT-2) — the
+      Cypher contains a denormalised tenant predicate whose RHS is
+      a literal tenant value. This check fires BEFORE the
+      ``:Tenant`` binding short-circuit because a literal tenant
+      value alongside a legitimate ``:Tenant`` binding is still a
+      T2-class injection probe; the binding does not absolve the
+      literal.
+    * :data:`CODE_NO_TENANT_BINDING` — the original Wave-4r
+      contract: no scope satisfaction path matched.
     """
     if tenant_context is None:
         return None
@@ -296,27 +424,92 @@ def check_tenant_scope(
                 # `MATCH (c:Cve) RETURN c`). Allow.
                 return None
 
-        if cypher_binds_tenant(cypher):
-            return None
-
-        # Accept a denorm-field filter as scope satisfaction. Look at
-        # every scoped entity referenced in the query and check
-        # whether the Cypher carries a filter on its denorm field
-        # using the active tenant value.
+        # Wave 8a / MT-2: walk every tenant-scoped label that carries
+        # a denormalised tenant column and inspect its predicates.
+        # Literal RHSes are rejected outright (T2 defence) BEFORE the
+        # ``:Tenant`` binding short-circuit, so a hostile prompt that
+        # smuggles in a literal alongside a legitimate ``:Tenant``
+        # binding still surfaces as ``LITERAL_TENANT_PREDICATE`` —
+        # otherwise the binding would mask the injection probe.
+        bind_var_satisfied = False
         for label in labels:
             field_name = manifest.denorm_field_of(label)
-            if field_name and _denorm_filter_satisfied(
-                cypher,
-                field_name=field_name,
-                tenant_value=tenant_context.value,
-            ):
-                return None
+            if not field_name:
+                continue
+            scan = _scan_denorm_predicates(cypher, field_name=field_name)
+            for literal in scan.literal_values:
+                if is_literal_tenant_value(literal, manifest):
+                    return _build_literal_tenant_violation(
+                        tenant_context=tenant_context,
+                        physical_enforcement=physical_enforcement,
+                        entity_label=label,
+                        field_name=field_name,
+                        literal_value=literal,
+                    )
+            if scan.bind_var_satisfied:
+                bind_var_satisfied = True
+
+        if bind_var_satisfied:
+            return None
+
+        if cypher_binds_tenant(cypher):
+            return None
     elif cypher_binds_tenant(cypher):
         # No manifest: fall back to the v1 contract — a `:Tenant`
         # binding is the only acceptance condition.
         return None
 
     return _build_violation(cypher, tenant_context, manifest, physical_enforcement)
+
+
+def _build_literal_tenant_violation(
+    *,
+    tenant_context: TenantContext,
+    physical_enforcement: bool | None,
+    entity_label: str,
+    field_name: str,
+    literal_value: str,
+) -> TenantScopeViolation:
+    """Render a :data:`CODE_LITERAL_TENANT_PREDICATE` violation.
+
+    The reason / hint pair is shaped so the LLM-retry loop in
+    :func:`arango_cypher.nl2cypher._core.nl_to_cypher` can feed it
+    straight back as ``builder.retry_context`` and the model can
+    correct itself in the next attempt — the bind-var spelling
+    (``$tenantId`` for Cypher) is the literal text the rewrite
+    target should adopt.
+
+    The offending entity label and field name are surfaced in both
+    ``reason`` (for human readers / audit logs) and ``suggested_hint``
+    (for the LLM) so the user understands *which* predicate was
+    refused. The literal value itself is included verbatim — these
+    strings come from the LLM's own output, never from the request
+    body, so reflecting them back is not an injection vector.
+    """
+    var = entity_label[0].lower() if entity_label else "x"
+    suggested_hint = (
+        f"Replace the literal `{var}.{field_name} = '{literal_value}'` "
+        f"with the session-bound bind variable `{var}.{field_name} = "
+        f"${TENANT_ID_BIND}`. Tenant identifiers are bind variables "
+        f"({TENANT_ID_BIND} / {TENANT_KEY_BIND}); never compare a "
+        "tenant column to a literal string."
+    )
+    return TenantScopeViolation(
+        tenant_property=tenant_context.property,
+        tenant_value=tenant_context.value,
+        reason=(
+            f"Tenant predicate on entity {entity_label!r} field "
+            f"{field_name!r} compares against the literal "
+            f"{literal_value!r} instead of a session-bound bind "
+            "variable. Literal tenant values in generated Cypher are "
+            "always rejected so a hostile prompt cannot smuggle in a "
+            "tenant identifier as user-controlled data and Layer 3's "
+            "AST rewrite remains lossless."
+        ),
+        suggested_hint=suggested_hint,
+        physical_enforcement=physical_enforcement,
+        code=CODE_LITERAL_TENANT_PREDICATE,
+    )
 
 
 def _build_violation(
@@ -515,6 +708,14 @@ def _manifest_prompt_body(
         "`_key` and then re-filter the target by some other tenant-ish "
         "field — pick one consistent identifier)."
     )
+    # Wave 8a / MT-2 (PRD §5.2 enhancement #1): the literal form is
+    # mechanically rejected by the postcheck — Layer 3 will rewrite
+    # the bind-var shape into the executable AQL, so the model must
+    # never compare a tenant column to a string literal. The two-line
+    # wrap matches the existing rule-line style; the test
+    # ``test_prompt_section_contains_literal_rule`` pins both lines.
+    lines.append("- Tenant identifiers are bind variables (@tenantId, @tenantKey).")
+    lines.append("  Never compare a tenant column to a literal string.")
     return "\n".join(lines)
 
 
@@ -545,6 +746,8 @@ def _legacy_prompt_body(
 
 
 __all__ = [
+    "CODE_LITERAL_TENANT_PREDICATE",
+    "CODE_NO_TENANT_BINDING",
     "TenantContext",
     "TenantScopeViolation",
     "check_tenant_scope",

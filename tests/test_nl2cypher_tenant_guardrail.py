@@ -24,7 +24,12 @@ from arango_cypher.nl2cypher import (
     has_tenant_entity,
     nl_to_cypher,
 )
-from arango_cypher.nl2cypher.tenant_guardrail import cypher_binds_tenant
+from arango_cypher.nl2cypher.tenant_guardrail import (
+    CODE_LITERAL_TENANT_PREDICATE,
+    CODE_NO_TENANT_BINDING,
+    cypher_binds_tenant,
+    prompt_section,
+)
 from arango_cypher.nl2cypher.tenant_scope import (
     EntityScope,
     EntityTenantRole,
@@ -206,10 +211,12 @@ class TestCheckTenantScope:
 
     def test_manifest_denorm_field_filter_satisfies_scope(self) -> None:
         # No :Tenant binding at all — but a direct filter on
-        # Device.TENANT_ID = '<key>' satisfies the scope because the
-        # planner can hit the indexed equality. This is the cheaper
-        # form the new prompt teaches the LLM to prefer.
-        cypher = "MATCH (d:Device) WHERE d.TENANT_ID = '001c463d-500d-47c7-bc32-c824eb42f064' RETURN d"
+        # Device.TENANT_ID = $tenantId satisfies the scope because
+        # the planner can hit the indexed equality and the bind-var
+        # is the only acceptable proof of scope after Wave 8a / MT-2
+        # (PRD §5.2 enhancement #1). The pre-MT-2 literal form is
+        # rejected — see ``test_literal_tenant_predicate_*`` below.
+        cypher = "MATCH (d:Device) WHERE d.TENANT_ID = $tenantId RETURN d"
         v = check_tenant_scope(
             cypher,
             tenant_context=TENANT_CTX_KEY,
@@ -221,10 +228,10 @@ class TestCheckTenantScope:
         self,
     ) -> None:
         # Inline node-property form of the denorm filter:
-        # `MATCH (d:Device {TENANT_ID: '<key>'})` is semantically
+        # `MATCH (d:Device {TENANT_ID: $tenantId})` is semantically
         # identical to the WHERE form and must also satisfy the
         # guardrail.
-        cypher = "MATCH (d:Device {TENANT_ID: '001c463d-500d-47c7-bc32-c824eb42f064'}) RETURN d"
+        cypher = "MATCH (d:Device {TENANT_ID: $tenantId}) RETURN d"
         v = check_tenant_scope(
             cypher,
             tenant_context=TENANT_CTX_KEY,
@@ -235,9 +242,12 @@ class TestCheckTenantScope:
     def test_manifest_denorm_field_filter_with_wrong_value_is_violation(
         self,
     ) -> None:
-        # Filtering by the wrong tenant value must NOT satisfy the
-        # scope — a hostile or buggy LLM that hardcodes another
-        # tenant's _key would otherwise sneak through.
+        # Filtering by a literal — any literal — must NOT satisfy
+        # the scope. After Wave 8a / MT-2 the violation code shifts
+        # from NO_TENANT_BINDING (pre-MT-2) to
+        # LITERAL_TENANT_PREDICATE (post-MT-2): even a value that
+        # doesn't match the active tenant is rejected on the
+        # literal-vs-bindvar contract, not just on value mismatch.
         cypher = "MATCH (d:Device) WHERE d.TENANT_ID = 'some-other-tenant-key' RETURN d"
         v = check_tenant_scope(
             cypher,
@@ -245,6 +255,7 @@ class TestCheckTenantScope:
             manifest=self._device_manifest(),
         )
         assert v is not None
+        assert v.code == "LITERAL_TENANT_PREDICATE"
 
     def test_manifest_violation_hint_mentions_denorm_field_when_available(
         self,
@@ -293,6 +304,160 @@ class TestCheckTenantScope:
         assert v is not None
         assert "TENANT_ID" not in v.suggested_hint
         assert "traverse" in v.suggested_hint.lower()
+
+
+# ---------------------------------------------------------------------------
+# Wave 8a / MT-2 — literal tenant predicates are always rejected.
+# ---------------------------------------------------------------------------
+
+
+class TestMT2LiteralTenantPredicate:
+    """PRD §5.2 enhancement #1: the LLM-output guardrail rejects every
+    literal tenant predicate so Layer 3 (Wave 8a / MT-3) only ever
+    has to rewrite the bind-var form, and a hostile prompt cannot
+    smuggle in a tenant identifier as user-controlled data.
+
+    See ``docs/multitenant_prd.md`` §5.2 and
+    ``docs/agent_prompts_multitenant.md`` MT-2 for the contract.
+    """
+
+    @staticmethod
+    def _employee_manifest(
+        *,
+        known_tenant_keys: frozenset[str] | None,
+    ) -> TenantScopeManifest:
+        # The fixture mirrors a tenant-scoped Employee table with a
+        # denormalised ``TENANT_HEX_ID`` column — the canonical shape
+        # MT-2 protects. ``known_tenant_keys`` is parameterised so a
+        # single helper covers both the sampled and the fail-closed
+        # branches of ``is_literal_tenant_value``.
+        return TenantScopeManifest(
+            tenant_entity="Tenant",
+            entities={
+                "Tenant": EntityScope(
+                    role=EntityTenantRole.TENANT_ROOT,
+                    reachable_from_tenant=True,
+                ),
+                "Employee": EntityScope(
+                    role=EntityTenantRole.TENANT_SCOPED,
+                    denorm_field="TENANT_HEX_ID",
+                    reachable_from_tenant=True,
+                ),
+            },
+            known_tenant_keys=known_tenant_keys,
+        )
+
+    def test_literal_tenant_predicate_rejected_even_when_value_matches(
+        self,
+    ) -> None:
+        # The pre-MT-2 contract accepted this Cypher because the literal
+        # *matched* the active tenant. The new contract rejects it
+        # outright: literals are forbidden on tenant predicates
+        # regardless of value, because Layer 3 (MT-3) rewrites every
+        # legitimate tenant predicate to the bind-var form, so a
+        # surviving literal — even a "harmless" one — is evidence the
+        # LLM is treating the tenant identifier as user-controlled
+        # data rather than a session-bound bind variable.
+        manifest = self._employee_manifest(
+            known_tenant_keys=frozenset({"tenant-A-uuid"}),
+        )
+        ctx = TenantContext(property="_key", value="tenant-A-uuid")
+        cypher = "MATCH (e:Employee) WHERE e.TENANT_HEX_ID = 'tenant-A-uuid' RETURN e"
+        v = check_tenant_scope(cypher, tenant_context=ctx, manifest=manifest)
+        assert isinstance(v, TenantScopeViolation)
+        assert v.code == CODE_LITERAL_TENANT_PREDICATE
+        # Reason / hint must include the offending entity label and
+        # field name so the LLM-retry loop and the user both know
+        # which predicate was refused.
+        assert "Employee" in v.reason
+        assert "TENANT_HEX_ID" in v.reason
+        assert "TENANT_HEX_ID" in v.suggested_hint
+        # And the hint must point at the bind-var spelling — that's
+        # the rewrite target the model has to adopt on the next
+        # attempt.
+        assert "$tenantId" in v.suggested_hint
+
+    def test_literal_tenant_predicate_rejected_when_value_unknown(
+        self,
+    ) -> None:
+        # The fail-closed branch of ``is_literal_tenant_value``:
+        # when the manifest does not carry ``known_tenant_keys``
+        # (the common case in tests, heuristic-mode mappings, and
+        # older bundles where the Tenant collection was not sampled
+        # at acquire time), every string literal on a tenant predicate
+        # is treated as suspect. Refusing here is strictly safer than
+        # the alternative ("can't tell, allow") which is the original
+        # T2 bug.
+        manifest = self._employee_manifest(known_tenant_keys=None)
+        ctx = TenantContext(property="_key", value="tenant-A-uuid")
+        cypher = "MATCH (e:Employee) WHERE e.TENANT_HEX_ID = 'whatever' RETURN e"
+        v = check_tenant_scope(cypher, tenant_context=ctx, manifest=manifest)
+        assert isinstance(v, TenantScopeViolation)
+        assert v.code == CODE_LITERAL_TENANT_PREDICATE
+        assert "Employee" in v.reason
+        assert "TENANT_HEX_ID" in v.reason
+
+    def test_bindvar_tenant_predicate_accepted(self) -> None:
+        # The bind-var form is the only acceptable proof of scope
+        # after MT-2. ``$tenantId`` is the canonical Cypher spelling
+        # of :data:`tenant_ast_common.TENANT_ID_BIND` — the rewriter
+        # in MT-3 will emit exactly this form, and Layer 1 will
+        # supply the actual value via the session-bound bind vars.
+        manifest = self._employee_manifest(
+            known_tenant_keys=frozenset({"tenant-A-uuid"}),
+        )
+        ctx = TenantContext(property="_key", value="tenant-A-uuid")
+        cypher = "MATCH (e:Employee) WHERE e.TENANT_HEX_ID = $tenantId RETURN e"
+        assert check_tenant_scope(cypher, tenant_context=ctx, manifest=manifest) is None
+
+    def test_bindvar_inline_property_form_accepted(self) -> None:
+        # Same contract for the inline property-map shape, which is
+        # what the MT-3 rewriter prefers when an existing property
+        # map is already on the node pattern. Pinned here so the
+        # two acceptable bind-var shapes (WHERE-eq and inline-map)
+        # don't drift apart in a future regex tweak.
+        manifest = self._employee_manifest(
+            known_tenant_keys=frozenset({"tenant-A-uuid"}),
+        )
+        ctx = TenantContext(property="_key", value="tenant-A-uuid")
+        cypher = "MATCH (e:Employee {TENANT_HEX_ID: $tenantId}) RETURN e"
+        assert check_tenant_scope(cypher, tenant_context=ctx, manifest=manifest) is None
+
+    def test_no_tenant_predicate_rejected_with_existing_code(self) -> None:
+        # The pre-MT-2 NO_TENANT_BINDING path is preserved verbatim
+        # for the case where the LLM emits no tenant predicate at
+        # all. The new ``LITERAL_TENANT_PREDICATE`` code is purely
+        # additive — it must not displace the existing rejection.
+        manifest = self._employee_manifest(
+            known_tenant_keys=frozenset({"tenant-A-uuid"}),
+        )
+        ctx = TenantContext(property="_key", value="tenant-A-uuid")
+        cypher = "MATCH (e:Employee) RETURN e"
+        v = check_tenant_scope(cypher, tenant_context=ctx, manifest=manifest)
+        assert isinstance(v, TenantScopeViolation)
+        assert v.code == CODE_NO_TENANT_BINDING
+
+    def test_prompt_section_contains_literal_rule(self) -> None:
+        # The new rule line must be present in the rendered prompt
+        # so the LLM is told exactly what shape to emit. The
+        # two-line wrap (header + clarifier) matches the existing
+        # rule-block style — pinned here so a future formatter pass
+        # doesn't silently flatten it. The existing rule lines stay
+        # in place; this test asserts both the new substrings AND
+        # the survival of an existing rule line ("Do NOT mix scope
+        # styles").
+        manifest = self._employee_manifest(
+            known_tenant_keys=frozenset({"tenant-A-uuid"}),
+        )
+        ctx = TenantContext(property="_key", value="tenant-A-uuid")
+        rendered = prompt_section(ctx, manifest)
+        assert "Tenant identifiers are bind variables" in rendered
+        assert "@tenantId" in rendered
+        assert "@tenantKey" in rendered
+        assert "Never compare a tenant column to a literal string" in rendered
+        # The pre-MT-2 rule line is preserved verbatim — MT-2 is
+        # additive, not a rewrite of the prompt block.
+        assert "Do NOT mix scope styles in a single MATCH" in rendered
 
 
 # ---------------------------------------------------------------------------
@@ -608,13 +773,18 @@ class TestNlToCypherFailClosed:
         multi_tenant_mapping,
     ) -> None:
         # End-to-end: when the LLM emits the canonical _key form with
-        # the denormalised TENANT_ID filter on the target collection,
-        # the guardrail must let it through unmodified. This is the
-        # shape the new prompt teaches the model to produce.
+        # the denormalised TENANT_ID filter on the target collection
+        # *as a bind-variable predicate*, the guardrail must let it
+        # through unmodified. After Wave 8a / MT-2 the literal form
+        # ``WHERE u.TENANT_ID = '<uuid>'`` is rejected with
+        # ``LITERAL_TENANT_PREDICATE``; only the bind-var form
+        # ``WHERE u.TENANT_ID = $tenantId`` is acceptable proof of
+        # scope. This is the shape the new prompt teaches the model
+        # to produce and the shape Layer 3 (MT-3) preserves.
         provider = _StubProvider(
             "MATCH (t:Tenant {_key:'001c463d-500d-47c7-bc32-c824eb42f064'}), "
             "(u:GSuiteUser) "
-            "WHERE u.TENANT_ID = '001c463d-500d-47c7-bc32-c824eb42f064' "
+            "WHERE u.TENANT_ID = $tenantId "
             "RETURN u.NAME"
         )
         result = nl_to_cypher(
@@ -629,6 +799,7 @@ class TestNlToCypherFailClosed:
         assert result.method == "llm"
         assert "_key" in result.cypher
         assert "TENANT_ID" in result.cypher
+        assert "$tenantId" in result.cypher
         assert provider.calls == 1
 
     def test_no_context_no_guardrail(self, multi_tenant_mapping) -> None:
