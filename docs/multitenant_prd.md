@@ -1,7 +1,7 @@
 # Disjoint SmartGraph Multi-Tenancy — PRD + Implementation Plan
 Date: 2026-04-21  
 Last updated: 2026-04-21  
-Status: **Draft — Phase 1 (MT-0 / MT-1 / MT-5) shipped in Wave 7** (standalone document; to be merged into `python_prd.md` — see §Merge notes)
+Status: **Draft — Phase 1 (MT-0 / MT-1 / MT-5) shipped in Wave 7; Phase 2 (MT-2 / MT-3a / MT-4) shipped in Wave 8 (2026-05-27, PR #30).** Phase 3 (MT-6 / MT-7) and MT-3 service wiring remain. Standalone document; to be merged into `python_prd.md` — see §Merge notes.
 
 ### Changelog
 | Date | Changes |
@@ -604,9 +604,9 @@ Admin users never issue ad-hoc NL queries against the cross-tenant dataset throu
 |---|---|---|---|
 | **MT-0** | Schema-mapper uplift: `physicalLayout` block + `scopingPathFromTenant` on manifest | **Done** — `physicalLayout` half superseded by `analyzer>=0.5.0` `metadata.shardingProfile` (PRD §6.2 bullet 3); `scopingPathFromTenant` shipped in Wave 7 (`compute_scoping_path` BFS in `arango_cypher/nl2cypher/tenant_scope.py`, surfaced on `EntityScope.scoping_path` + `TenantScopeManifest.scoping_path_of`). | n/a (`physicalLayout`); ~80 LOC + 15 tests (`scopingPathFromTenant`) |
 | **MT-1** | Session-bound `@tenantId`; strip body-supplied tenant in tenant-user mode | **Done** (Wave 7) — `_Session` carries `tenant_id`/`tenant_key`/`is_admin`; `/connect` validates tenant against `Tenant` collection; `/nl2cypher` + `/nl2aql` honor session tenant in tenant-user mode (workbench mode preserves body tenant). | ~150 LOC + 10 tests |
-| **MT-2** | Guardrail hardening: reject literal tenant predicates in LLM output | Not started | ~30 LOC + 4 tests |
-| **MT-3** | Cypher AST tenant injection pass | Not started | ~400 LOC + 20 tests |
-| **MT-4** | AQL AST tenant injection pass | Not started | ~500 LOC + 25 tests |
+| **MT-2** | Guardrail hardening: reject literal tenant predicates in LLM output | **Done** (Wave 8 Phase 2, 2026-05-27, PR #30) — `arango_cypher/nl2cypher/tenant_guardrail.py` rejects denormalised tenant predicates with literal RHS; new `LITERAL_TENANT_PREDICATE` violation code; only `@tenantId` / `@tenantKey` bind references prove scope; fails closed when `manifest.known_tenant_keys` is unset. | ~300 LOC + 12 tests |
+| **MT-3** | Cypher AST tenant injection pass | **Phase 3a done** (Wave 8 Phase 2, 2026-05-27, PR #30) — `arango_cypher/nl2cypher/tenant_ast_cypher.py` rewriter core with property-map / WHERE / UNWIND injection contracts pinned by tests. Service-route wiring deferred to follow-up (MT-3b). | ~1300 LOC + 28 tests (core) |
+| **MT-4** | AQL AST tenant injection pass | **Done** (Wave 8 Phase 2, 2026-05-27, PR #30) — `arango_cypher/tenant_ast_aql.py` plan-node walker (EnumerateCollection, Index, Traversal, Subquery) wired into `/translate`, `/execute`, `/execute-aql`, `/aql-profile`, `/nl2aql` via `arango_cypher/service/safe_exec.py`. | ~1100 LOC + 31 tests |
 | **MT-5** | EXPLAIN-plan validator + `safe_execute` wrapper | **Done** (Wave 7) — Layer 5 validator (`arango_cypher/tenant_plan_validator.py`) walks EXPLAIN nodes (EnumerateCollection / Index / Traversal / Subquery), rejects unconstrained scans + literal tenant predicates, and logs every pass/refusal with AQL+plan digests. Layer 6 `safe_execute` (`arango_query_core/exec.py`) + service adapter (`arango_cypher/service/safe_exec.py`) overrides client bind vars with session tenant before validation; wired into `/execute`, `/execute-aql`, `/aql-profile` and surfaces violations as HTTP 403. | ~700 LOC + 32 tests |
 | **MT-6** | Plan-shape LRU for Layer 5 performance | Not started | ~80 LOC + 6 tests |
 | **MT-7** | Admin bypass + audit log stream | Not started | ~150 LOC + 10 tests |

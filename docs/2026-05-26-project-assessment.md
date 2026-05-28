@@ -47,9 +47,10 @@ The codebase is still early in full openCypher compliance and mid-flight on mult
 
 ### 2. Complete Multi-Tenant Safety Waves
 
-- MT-2: harden the guardrail by rejecting literal tenant predicates in generated Cypher.
-- MT-3: add the Cypher tenant-injection pass before transpilation.
-- MT-4: add the AQL tenant-injection pass for direct AQL and NL-to-AQL paths.
+- ~~MT-2: harden the guardrail by rejecting literal tenant predicates in generated Cypher.~~ **Done 2026-05-27 (PR #30).**
+- ~~MT-3: add the Cypher tenant-injection pass before transpilation.~~ **Phase 3a done 2026-05-27 (PR #30)** — rewriter core landed; service-route wiring remains as MT-3b follow-up.
+- ~~MT-4: add the AQL tenant-injection pass for direct AQL and NL-to-AQL paths.~~ **Done 2026-05-27 (PR #30).**
+- MT-3b: wire the Cypher AST rewriter into `/translate` / `/execute` / `/nl2cypher` (currently MT-3a ships only the rewriter module).
 - MT-6: add Layer 5 plan-shape caching to reduce EXPLAIN validation overhead.
 - MT-7: implement admin bypass and audit log stream.
 - MT-8: maintain a standing red-team corpus and security review loop.
@@ -74,7 +75,7 @@ These should not be pursued as one big-bang effort. The safer path is to choose 
 
 1. ~~Land the in-progress UI changes and documentation sync.~~ **Done 2026-05-26.**
 2. Close WP-19 and the schema-inference manual pilot checks.
-3. Execute Wave 8 multi-tenant work: MT-2, MT-3, and MT-4.
+3. ~~Execute Wave 8 multi-tenant work: MT-2, MT-3, and MT-4.~~ **Done 2026-05-27 (PR #30; MT-3 service wiring deferred to MT-3b).**
 4. In parallel or immediately after, complete Wave 11 transpiler polish.
 5. Choose either TCK breadth or compiler architecture as the next major workstream.
 
