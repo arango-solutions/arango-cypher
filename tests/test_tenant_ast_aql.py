@@ -42,7 +42,6 @@ from arango_cypher.tenant_plan_validator import (
     validate_plan,
 )
 
-
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
@@ -746,7 +745,8 @@ class TestIdempotenceAndBindVars:
         leaked = {
             k: v
             for k, v in bind_vars.items()
-            if isinstance(v, str) and v in manifest.known_tenant_keys
+            if isinstance(v, str)
+            and v in manifest.known_tenant_keys
             and k not in {"tenantId", "tenantKey"}  # legitimate carriers
         }
         assert leaked == {}, f"literal tenant value leaked into bind_vars: {leaked!r}"

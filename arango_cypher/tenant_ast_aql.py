@@ -226,11 +226,9 @@ def _calc_matches_tenant_eq_bindvar(
         return False
     lhs, rhs = sides
     return (
-        _is_attribute_access_on(lhs, var_name=var_name, attr=attr)
-        and _is_bindvar_named(rhs, TENANT_ID_BIND)
+        _is_attribute_access_on(lhs, var_name=var_name, attr=attr) and _is_bindvar_named(rhs, TENANT_ID_BIND)
     ) or (
-        _is_attribute_access_on(rhs, var_name=var_name, attr=attr)
-        and _is_bindvar_named(lhs, TENANT_ID_BIND)
+        _is_attribute_access_on(rhs, var_name=var_name, attr=attr) and _is_bindvar_named(lhs, TENANT_ID_BIND)
     )
 
 
@@ -576,7 +574,8 @@ class _Rewriter:
                 self.manifest,
                 {
                     **self.sharding_profile,
-                    "collectionToEntity": self.collection_to_entity or self.sharding_profile.get("collectionToEntity"),
+                    "collectionToEntity": self.collection_to_entity
+                    or self.sharding_profile.get("collectionToEntity"),
                 },
             )
         except UnknownEntityScope as exc:
@@ -660,12 +659,9 @@ class _Rewriter:
 
         insertion = f"\n  FILTER {outvar}.{tenant_field} == @{TENANT_ID_BIND}"
         change_text = (
-            f"Added FILTER {outvar}.{tenant_field} == @{TENANT_ID_BIND} "
-            f"after FOR {outvar} IN {coll}"
+            f"Added FILTER {outvar}.{tenant_field} == @{TENANT_ID_BIND} after FOR {outvar} IN {coll}"
         )
-        self.edits.append(
-            _Edit(offset=offset, text=insertion, site_key=site_key, change=change_text)
-        )
+        self.edits.append(_Edit(offset=offset, text=insertion, site_key=site_key, change=change_text))
         self.changes.append(change_text)
 
     def rewrite_index(
@@ -699,7 +695,8 @@ class _Rewriter:
                 self.manifest,
                 {
                     **self.sharding_profile,
-                    "collectionToEntity": self.collection_to_entity or self.sharding_profile.get("collectionToEntity"),
+                    "collectionToEntity": self.collection_to_entity
+                    or self.sharding_profile.get("collectionToEntity"),
                 },
             )
         except UnknownEntityScope as exc:
@@ -762,9 +759,7 @@ class _Rewriter:
             f"Added FILTER {outvar}.{tenant_field} == @{TENANT_ID_BIND} "
             f"after FOR {outvar} IN {coll} (index-fused FOR)"
         )
-        self.edits.append(
-            _Edit(offset=offset, text=insertion, site_key=site_key, change=change_text)
-        )
+        self.edits.append(_Edit(offset=offset, text=insertion, site_key=site_key, change=change_text))
         self.changes.append(change_text)
 
     def rewrite_traversal(self, node: dict[str, Any]) -> None:
@@ -824,8 +819,16 @@ class _Rewriter:
             )
 
         vertex_outvar = _vertex_outvar_name(node) or "v"
-        edge_outvar = (node.get("edgeOutVariable") or {}).get("name") if isinstance(node.get("edgeOutVariable"), dict) else None
-        path_outvar = (node.get("pathOutVariable") or {}).get("name") if isinstance(node.get("pathOutVariable"), dict) else None
+        edge_outvar = (
+            (node.get("edgeOutVariable") or {}).get("name")
+            if isinstance(node.get("edgeOutVariable"), dict)
+            else None
+        )
+        path_outvar = (
+            (node.get("pathOutVariable") or {}).get("name")
+            if isinstance(node.get("pathOutVariable"), dict)
+            else None
+        )
 
         span = self._locate_traversal_header(vertex_outvar, edge_outvar, path_outvar)
         if span is None:
@@ -862,26 +865,20 @@ class _Rewriter:
             re.IGNORECASE,
         )
         if existing_options:
-            insertion = (
-                f"\n  FILTER {vertex_outvar}.{non_satellite_field} == @{TENANT_ID_BIND}"
-            )
+            insertion = f"\n  FILTER {vertex_outvar}.{non_satellite_field} == @{TENANT_ID_BIND}"
             offset = end
             change_text = (
                 f"Added FILTER {vertex_outvar}.{non_satellite_field} == @{TENANT_ID_BIND} "
                 f"after TraversalNode header (existing OPTIONS preserved)"
             )
         else:
-            insertion = (
-                f"\n  OPTIONS {{ prune: {vertex_outvar}.{non_satellite_field} != @{TENANT_ID_BIND} }}"
-            )
+            insertion = f"\n  OPTIONS {{ prune: {vertex_outvar}.{non_satellite_field} != @{TENANT_ID_BIND} }}"
             offset = end
             change_text = (
                 f"Added OPTIONS {{ prune: {vertex_outvar}.{non_satellite_field} != @{TENANT_ID_BIND} }} "
                 f"to traversal over {vertex_outvar}"
             )
-        self.edits.append(
-            _Edit(offset=offset, text=insertion, site_key=site_key, change=change_text)
-        )
+        self.edits.append(_Edit(offset=offset, text=insertion, site_key=site_key, change=change_text))
         self.changes.append(change_text)
 
     # ---- Apply -------------------------------------------------------
