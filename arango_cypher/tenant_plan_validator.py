@@ -34,9 +34,35 @@ part 4), which spreads ``{tenantId, tenantKey}`` from the session
 over the client-supplied bind vars **last** so the session value
 silently wins.
 
-Layer 5 is independent of Wave 8a's Layers 3 / 4 (AST rewrites). When
-those land, the predicates Layer 3 / 4 inject are exactly the shapes
-Layer 5 already recognises here — no Layer 5 changes needed.
+Layer 5 is independent of Wave 8a's Layers 3 / 4 (AST rewrites). The
+predicates Layer 3 / 4 inject (``doc.<field> == @tenantId``) are the
+shapes Layer 5 recognises here.
+
+Bind-resolution sentinel (real-ArangoDB EXPLAIN)
+------------------------------------------------
+ArangoDB's EXPLAIN **resolves value bind parameters into literal
+``value`` nodes** in the returned plan — a ``@tenantId`` reference
+becomes ``{"type": "value", "value": "<the tenant id>"}``, and the
+optimiser frequently fuses the injected ``FILTER`` *into* the
+``EnumerateCollectionNode`` (``node["filter"]``) rather than leaving a
+standalone ``CalculationNode``. A naïve "only accept a ``parameter``
+node named tenantId" check therefore fails on every real query, while
+a "accept any literal on the tenant field" check would re-open the T2
+literal-smuggling hole (a caller could hard-code another tenant's id).
+
+To get both safety and real-DB compatibility, :func:`validate_plan`
+EXPLAINs with a fresh, unguessable **sentinel** substituted for
+``tenantId`` (``bind_vars`` for execution are untouched). The plan
+walker then accepts a tenant-field equality only when it compares
+against (a) a ``parameter`` named ``tenantId`` — the hand-crafted /
+``plan_override`` shape used by tests and any ArangoDB build that does
+not fold the bind — or (b) a ``value`` literal **equal to the
+per-call sentinel**. Because the sentinel is random per validation, a
+caller cannot smuggle a matching literal, so a literal that is *not*
+the sentinel is still refused as ``LITERAL_TENANT_PREDICATE``. The
+walker also descends through ``AND`` conjunctions (never ``OR``) and
+inspects the inline ``EnumerateCollectionNode.filter`` so a fused
+predicate is recognised.
 """
 
 from __future__ import annotations
@@ -46,6 +72,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
 from .nl2cypher.tenant_scope import EntityTenantRole, TenantScopeManifest
 
@@ -121,7 +148,16 @@ def validate_plan(
        the bind-var sanity check must pass:
 
        * ``session.tenant_id`` must not be ``None``.
-       * ``bind_vars.get("tenantId")`` must equal ``session.tenant_id``.
+       * **If** ``bind_vars`` carries a ``tenantId``, it must equal
+         ``session.tenant_id``. When ``tenantId`` is absent (the AQL
+         never references ``@tenantId`` — e.g. an unconstrained scan, or
+         a storage-isolated disjoint-smartgraph traversal) the precise
+         per-node walk below decides: it refuses an unconstrained scan
+         with ``UNCONSTRAINED_COLLECTION_SCAN`` and accepts a disjoint
+         smartgraph. Layer 6 (``safe_execute``) only injects the
+         ``@tenantId`` bind when the query references it, so ``tenantId``
+         being present here already implies it equals the session value
+         — the equality check is retained as defence in depth.
 
        If the plan touches **only** satellite / global / Tenant-by-key
        collections, the bind-var check is **not** required — pure
@@ -135,11 +171,28 @@ def validate_plan(
 
     Raises :class:`TenantScopeViolation` on refusal.
     """
+    # Bind-resolution sentinel: real ArangoDB EXPLAIN folds the
+    # ``@tenantId`` value bind into literal ``value`` nodes, so we
+    # cannot tell a session-injected ``@tenantId`` from a caller-
+    # smuggled literal by node *type* alone. We EXPLAIN with a fresh
+    # unguessable sentinel substituted for ``tenantId`` (execution
+    # bind_vars are NOT touched — Layer 6 executes with the real
+    # value); the walker then accepts a tenant-field equality against
+    # the sentinel as proof the predicate is the resolved session
+    # bind, and refuses any *other* literal. ``plan_override`` callers
+    # (unit tests) skip EXPLAIN entirely and so have no sentinel — the
+    # walker falls back to accepting only ``parameter``-typed
+    # ``@tenantId`` nodes, exactly as before.
+    tenant_sentinel: str | None = None
     if plan_override is not None:
         plan = plan_override
     else:
+        explain_bind_vars = dict(bind_vars or {})
+        if "tenantId" in explain_bind_vars:
+            tenant_sentinel = f"__tenant_sentinel_{uuid4().hex}__"
+            explain_bind_vars["tenantId"] = tenant_sentinel
         try:
-            result = db.aql.explain(aql, bind_vars=bind_vars)
+            result = db.aql.explain(aql, bind_vars=explain_bind_vars)
         except Exception as exc:
             digests = _digests(aql=aql, bind_vars=bind_vars, plan=None)
             violation = TenantScopeViolation(
@@ -169,6 +222,7 @@ def validate_plan(
         manifest=manifest,
         sharding_profile=sharding_profile or {},
         collection_to_entity=collection_to_entity or {},
+        tenant_sentinel=tenant_sentinel,
     )
     touches_tenant_data = walker.classify_touches_tenant_data(nodes)
 
@@ -187,8 +241,17 @@ def validate_plan(
             _log_violation(violation, session=session)
             raise violation
 
-        bv_tenant = bind_vars.get("tenantId")
-        if bv_tenant != session_tenant:
+        # Only a *present* tenantId bind that disagrees with the session
+        # is a mismatch. An absent tenantId (the query never references
+        # ``@tenantId``) is not a mismatch — it means the query carries
+        # no tenant predicate, which the per-node walk below refuses
+        # precisely (UNCONSTRAINED_COLLECTION_SCAN) or accepts for a
+        # storage-isolated disjoint smartgraph. Layer 6 guarantees that
+        # when ``tenantId`` *is* present it equals the session value, so
+        # this branch is defence in depth against an upstream that
+        # bypasses the session-spread.
+        if "tenantId" in bind_vars and bind_vars["tenantId"] != session_tenant:
+            bv_tenant = bind_vars["tenantId"]
             violation = TenantScopeViolation(
                 code="TENANT_BIND_MISMATCH",
                 message=(
@@ -215,6 +278,11 @@ class _PlanWalker:
     manifest: TenantScopeManifest
     sharding_profile: dict[str, Any]
     collection_to_entity: dict[str, str]
+    # Per-call random sentinel substituted for ``tenantId`` at EXPLAIN
+    # time so a resolved bind literal can be told apart from a smuggled
+    # one. ``None`` on the ``plan_override`` path (no EXPLAIN ran) — the
+    # matchers then accept only ``parameter``-typed ``@tenantId`` nodes.
+    tenant_sentinel: str | None = None
 
     _nodes_by_id: dict[Any, dict[str, Any]] = field(default_factory=dict)
     _calc_by_outvar: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -390,6 +458,7 @@ class _PlanWalker:
                     manifest=self.manifest,
                     sharding_profile=self.sharding_profile,
                     collection_to_entity=self.collection_to_entity,
+                    tenant_sentinel=self.tenant_sentinel,
                 )
                 inner.walk(sub_nodes, digests=digests, session=session)
         # CalculationNode / FilterNode / ReturnNode / LimitNode / SortNode /
@@ -423,13 +492,23 @@ class _PlanWalker:
             _log_violation(violation, session=session)
             raise violation
 
-        literal_hit = self._has_literal_tenant_predicate(node, coll)
+        # Accept first: a tenant-field equality against ``@tenantId``
+        # (parameter form) or the per-call sentinel (resolved-bind
+        # form) — checking both the inline ``node["filter"]`` and any
+        # standalone CalculationNode, descending only through AND. When
+        # such a conjunct is present the scan is safe even if the query
+        # *also* carries a mismatching literal (the AND with the
+        # session value makes that conjunct return nothing — no leak).
+        if self._has_tenant_predicate(node, coll):
+            return
+
+        literal_hit = self._has_mismatching_tenant_literal(node, coll)
         if literal_hit is not None:
             violation = TenantScopeViolation(
                 code="LITERAL_TENANT_PREDICATE",
                 message=(
                     f"{coll!r} scanned with a literal tenant predicate "
-                    f"({literal_hit!r}); only @tenantId bind-var form is "
+                    f"({literal_hit!r}); only the session @tenantId bind is "
                     "accepted"
                 ),
                 **digests,
@@ -437,14 +516,13 @@ class _PlanWalker:
             _log_violation(violation, session=session)
             raise violation
 
-        if not self._has_tenant_predicate(node, coll):
-            violation = TenantScopeViolation(
-                code="UNCONSTRAINED_COLLECTION_SCAN",
-                message=(f"{coll!r} scanned without @tenantId predicate (physical kind=" + kind + ")"),
-                **digests,
-            )
-            _log_violation(violation, session=session)
-            raise violation
+        violation = TenantScopeViolation(
+            code="UNCONSTRAINED_COLLECTION_SCAN",
+            message=(f"{coll!r} scanned without @tenantId predicate (physical kind=" + kind + ")"),
+            **digests,
+        )
+        _log_violation(violation, session=session)
+        raise violation
 
     def _check_index(
         self,
@@ -482,7 +560,7 @@ class _PlanWalker:
             return
 
         tenant_field = self._tenant_field_for(coll)
-        if not _index_covers_tenant(node, tenant_field):
+        if not _index_covers_tenant(node, tenant_field, sentinel=self.tenant_sentinel):
             violation = TenantScopeViolation(
                 code="INDEX_MISSING_TENANT_PREDICATE",
                 message=(f"IndexNode on {coll!r} does not equality-match {tenant_field!r} == @tenantId"),
@@ -539,9 +617,16 @@ class _PlanWalker:
     # ---- Predicate detection ---------------------------------------------
 
     def _has_tenant_predicate(self, enum_node: dict[str, Any], collection: str) -> bool:
-        """Whether the plan carries a downstream filter / calculation
-        binding the EnumerateCollectionNode's output variable against
-        ``@tenantId`` on the collection's tenant field.
+        """Whether the plan constrains the EnumerateCollectionNode's
+        output variable to the session tenant on the collection's
+        tenant field.
+
+        Inspects both the inline ``EnumerateCollectionNode.filter`` (the
+        fused shape real ArangoDB emits) and every standalone
+        CalculationNode, descending only through ``AND`` conjunctions.
+        A conjunct is accepted when the tenant field is compared ``==``
+        to either the ``@tenantId`` *parameter* or a *value* literal
+        equal to the per-call ``tenant_sentinel``.
         """
         outvar = _outvar_name(enum_node)
         if not outvar:
@@ -549,20 +634,26 @@ class _PlanWalker:
         tenant_field = self._tenant_field_for(collection)
         if not tenant_field:
             return False
-        for calc in self._calc_by_outvar.values():
-            if _calc_matches_tenant_eq_bindvar(calc, outvar, tenant_field):
+        for expr in self._tenant_field_exprs(enum_node, outvar):
+            if _expr_scopes_tenant(
+                expr, var_name=outvar, attr=tenant_field, sentinel=self.tenant_sentinel
+            ):
                 return True
         return False
 
-    def _has_literal_tenant_predicate(
+    def _has_mismatching_tenant_literal(
         self,
         enum_node: dict[str, Any],
         collection: str,
-    ) -> str | None:
-        """Return the literal value if the plan compares the enum's
-        output variable's tenant field against a string literal — the
-        injection pattern Layer 5 explicitly refuses to honour, even
-        when the literal happens to equal the session's tenant id.
+    ) -> Any:
+        """Return a literal value if the plan compares the enum's tenant
+        field against a string literal that is **not** the per-call
+        sentinel — i.e. a caller-smuggled tenant id Layer 5 refuses to
+        honour. A literal equal to the sentinel is the resolved
+        ``@tenantId`` bind and is not flagged (and is handled by
+        :meth:`_has_tenant_predicate` anyway). Descends through both
+        ``AND`` and ``OR`` since a mismatching literal anywhere is
+        suspicious.
         """
         outvar = _outvar_name(enum_node)
         if not outvar:
@@ -570,11 +661,28 @@ class _PlanWalker:
         tenant_field = self._tenant_field_for(collection)
         if not tenant_field:
             return None
-        for calc in self._calc_by_outvar.values():
-            literal = _calc_matches_tenant_eq_literal(calc, outvar, tenant_field)
+        for expr in self._tenant_field_exprs(enum_node, outvar):
+            literal = _expr_mismatching_tenant_literal(
+                expr, var_name=outvar, attr=tenant_field, sentinel=self.tenant_sentinel
+            )
             if literal is not None:
                 return literal
         return None
+
+    def _tenant_field_exprs(self, enum_node: dict[str, Any], outvar: str) -> list[dict[str, Any]]:
+        """Candidate expressions that may carry the tenant predicate for
+        *enum_node*: the inline fused ``filter`` plus every standalone
+        CalculationNode's expression.
+        """
+        exprs: list[dict[str, Any]] = []
+        inline = enum_node.get("filter")
+        if isinstance(inline, dict):
+            exprs.append(inline)
+        for calc in self._calc_by_outvar.values():
+            e = _expr(calc)
+            if e:
+                exprs.append(e)
+        return exprs
 
     def _has_tenant_root_predicate(self, enum_node: dict[str, Any]) -> bool:
         outvar = _outvar_name(enum_node)
@@ -695,6 +803,105 @@ def _calc_matches_tenant_eq_literal(
     return None
 
 
+def _is_tenant_value_operand(expr: dict[str, Any], *, sentinel: str | None) -> bool:
+    """Operand that ties a comparison to the session tenant.
+
+    Accepts the ``@tenantId`` bind *parameter* (the hand-crafted /
+    plan-override shape, and any ArangoDB build that does not fold the
+    bind) or a ``value`` literal equal to the per-call *sentinel* (the
+    resolved-bind shape real EXPLAIN produces). A literal that is not
+    the sentinel — including ``None`` sentinel — is rejected so a
+    caller cannot smuggle another tenant's id as a literal.
+    """
+    if _is_bindvar_named(expr, "tenantId"):
+        return True
+    if sentinel is not None and _is_value_literal(expr) and _value_of_literal(expr) == sentinel:
+        return True
+    return False
+
+
+def _eq_scopes_tenant(
+    expr: dict[str, Any],
+    *,
+    var_name: str,
+    attr: str,
+    sentinel: str | None,
+) -> bool:
+    """``<var>.<attr> == (@tenantId | sentinel-literal)`` in either order."""
+    sides = _compare_eq_subnodes(expr)
+    if sides is None:
+        return False
+    lhs, rhs = sides
+    return (
+        _is_attribute_access_on(lhs, var_name=var_name, attr=attr)
+        and _is_tenant_value_operand(rhs, sentinel=sentinel)
+    ) or (
+        _is_attribute_access_on(rhs, var_name=var_name, attr=attr)
+        and _is_tenant_value_operand(lhs, sentinel=sentinel)
+    )
+
+
+def _expr_scopes_tenant(
+    expr: dict[str, Any],
+    *,
+    var_name: str,
+    attr: str,
+    sentinel: str | None,
+) -> bool:
+    """Whether *expr* constrains ``<var>.<attr>`` to the session tenant.
+
+    A bare equality compare is checked directly. Conjunctions
+    (``logical and`` / ``n-ary and``) are descended — a tenant
+    predicate ANDed with anything still scopes the scan. ``OR`` is
+    **never** descended: ``tenantId == @t OR x`` does not guarantee
+    scoping, so it must not be accepted.
+    """
+    if not isinstance(expr, dict):
+        return False
+    if _eq_scopes_tenant(expr, var_name=var_name, attr=attr, sentinel=sentinel):
+        return True
+    if expr.get("type") in {"logical and", "n-ary and"}:
+        for sub in expr.get("subNodes") or []:
+            if isinstance(sub, dict) and _expr_scopes_tenant(
+                sub, var_name=var_name, attr=attr, sentinel=sentinel
+            ):
+                return True
+    return False
+
+
+def _expr_mismatching_tenant_literal(
+    expr: dict[str, Any],
+    *,
+    var_name: str,
+    attr: str,
+    sentinel: str | None,
+) -> Any:
+    """Return a literal if *expr* compares ``<var>.<attr>`` to a string
+    literal that is not the *sentinel*, else ``None``.
+
+    Descends through both ``AND`` and ``OR`` — a mismatching literal
+    anywhere in the predicate tree is a smuggling attempt. A literal
+    equal to the sentinel is the resolved ``@tenantId`` bind and is not
+    flagged.
+    """
+    if not isinstance(expr, dict):
+        return None
+    sides = _compare_eq_subnodes(expr)
+    if sides is not None:
+        lhs, rhs = sides
+        for field_side, val_side in ((lhs, rhs), (rhs, lhs)):
+            if _is_attribute_access_on(field_side, var_name=var_name, attr=attr) and _is_value_literal(val_side):
+                value = _value_of_literal(val_side)
+                if sentinel is None or value != sentinel:
+                    return value
+    for sub in expr.get("subNodes") or []:
+        if isinstance(sub, dict):
+            hit = _expr_mismatching_tenant_literal(sub, var_name=var_name, attr=attr, sentinel=sentinel)
+            if hit is not None:
+                return hit
+    return None
+
+
 def _calc_matches_key_eq_bindvar(
     calc: dict[str, Any],
     var_name: str,
@@ -712,13 +919,18 @@ def _calc_matches_key_eq_bindvar(
     )
 
 
-def _index_covers_tenant(node: dict[str, Any], tenant_field: str | None) -> bool:
+def _index_covers_tenant(
+    node: dict[str, Any],
+    tenant_field: str | None,
+    *,
+    sentinel: str | None = None,
+) -> bool:
     """IndexNode condition references *tenant_field* == @tenantId.
 
     ArangoDB's IndexNode embeds the resolved index condition in
     ``node["condition"]["subNodes"]`` as an n-ary tree. We walk it
-    looking for the ``attribute access`` / ``parameter`` pair on the
-    expected field name.
+    looking for the ``attribute access`` compared against the
+    ``@tenantId`` parameter or the resolved-bind *sentinel* literal.
     """
     if not tenant_field:
         return False
@@ -726,7 +938,7 @@ def _index_covers_tenant(node: dict[str, Any], tenant_field: str | None) -> bool
     if not outvar:
         return False
     cond = node.get("condition")
-    return _condition_covers_tenant(cond, outvar=outvar, tenant_field=tenant_field)
+    return _condition_covers_tenant(cond, outvar=outvar, tenant_field=tenant_field, sentinel=sentinel)
 
 
 def _condition_covers_tenant(
@@ -734,6 +946,7 @@ def _condition_covers_tenant(
     *,
     outvar: str,
     tenant_field: str,
+    sentinel: str | None = None,
 ) -> bool:
     if not isinstance(cond, dict):
         return False
@@ -742,14 +955,16 @@ def _condition_covers_tenant(
         lhs, rhs = sides
         if (
             _is_attribute_access_on(lhs, var_name=outvar, attr=tenant_field)
-            and _is_bindvar_named(rhs, "tenantId")
+            and _is_tenant_value_operand(rhs, sentinel=sentinel)
         ) or (
             _is_attribute_access_on(rhs, var_name=outvar, attr=tenant_field)
-            and _is_bindvar_named(lhs, "tenantId")
+            and _is_tenant_value_operand(lhs, sentinel=sentinel)
         ):
             return True
     for sub in cond.get("subNodes") or []:
-        if isinstance(sub, dict) and _condition_covers_tenant(sub, outvar=outvar, tenant_field=tenant_field):
+        if isinstance(sub, dict) and _condition_covers_tenant(
+            sub, outvar=outvar, tenant_field=tenant_field, sentinel=sentinel
+        ):
             return True
     return False
 

@@ -70,6 +70,11 @@ class TestSafeExecuteCore:
     def test_session_tenant_silently_overrides_client_bindvar(self) -> None:
         """A deliberately-wrong client tenantId is overwritten by the
         session value — this is the load-bearing T7 defence.
+
+        The AQL references both ``@tenantId`` and ``@tenantKey`` so the
+        session-spread is active for both (a query that uses neither
+        drops the binds entirely; see
+        :meth:`test_unused_tenant_binds_are_not_injected`).
         """
         db = _FakeDb()
         called: dict[str, Any] = {}
@@ -80,10 +85,11 @@ class TestSafeExecuteCore:
             called["bind_vars"] = dict(bind_vars)
             called["aql"] = aql
 
+        aql = "FOR x IN C FILTER x.t == @tenantId AND x._key == @tenantKey RETURN x"
         cursor, final_bind = safe_execute(
             db=db,
-            aql="RETURN 1",
-            client_bind_vars={"tenantId": "tenant-B-rogue", "other": 42},
+            aql=aql,
+            client_bind_vars={"tenantId": "tenant-B-rogue", "tenantKey": "rogue-key", "other": 42},
             session=_FakeSession(tenant_id="tenant-A-uuid", tenant_key="tenant-A-uuid"),
             validator=_stub_validator,
             manifest=object(),
@@ -97,9 +103,60 @@ class TestSafeExecuteCore:
         }
         # The validator saw the session-tenant bind, not the client one.
         assert called["bind_vars"]["tenantId"] == "tenant-A-uuid"
+        assert called["bind_vars"]["tenantKey"] == "tenant-A-uuid"
         # Execute fired with the same bind vars after validation.
-        assert db.aql.calls == [("RETURN 1", final_bind, {})]
+        assert db.aql.calls == [(aql, final_bind, {})]
         assert cursor == "<cursor:1>"
+
+    def test_unused_tenant_binds_are_not_injected(self) -> None:
+        """Regression (ERR 1552): a query that never references
+        ``@tenantId`` / ``@tenantKey`` must NOT carry those binds.
+
+        ArangoDB rejects a query whose ``bind_vars`` declares a value
+        the text never uses, so the unconditional session-spread broke
+        every safe global / satellite-only read at EXPLAIN time. The
+        client's stray ``tenantId`` is inert here and is dropped too.
+        """
+        db = _FakeDb()
+        seen: dict[str, Any] = {}
+
+        def _capture(*, bind_vars, **_kwargs) -> None:
+            seen["bind_vars"] = dict(bind_vars)
+
+        cursor, final_bind = safe_execute(
+            db=db,
+            aql="FOR c IN Country RETURN c",
+            client_bind_vars={"tenantId": "client-supplied", "limit": 5},
+            session=_FakeSession(tenant_id="tenant-A-uuid", tenant_key="tenant-A-uuid"),
+            validator=_capture,
+            manifest=object(),
+            sharding_profile={},
+        )
+
+        assert "tenantId" not in final_bind
+        assert "tenantKey" not in final_bind
+        assert final_bind == {"limit": 5}
+        # The validator's EXPLAIN would have received the same lean
+        # bind set — no unused tenant binds to trip ERR 1552.
+        assert "tenantId" not in seen["bind_vars"]
+        assert "tenantKey" not in seen["bind_vars"]
+        assert cursor == "<cursor:1>"
+
+    def test_only_referenced_tenant_bind_is_injected(self) -> None:
+        """When the AQL references ``@tenantId`` but not ``@tenantKey``,
+        only ``tenantId`` is spread — ``tenantKey`` would be an unused
+        bind and is omitted."""
+        db = _FakeDb()
+        _, final_bind = safe_execute(
+            db=db,
+            aql="FOR e IN Employee FILTER e.tenantId == @tenantId RETURN e",
+            client_bind_vars={},
+            session=_FakeSession(tenant_id="tenant-A-uuid", tenant_key="tenant-A-uuid"),
+            validator=lambda **_: None,
+            manifest=object(),
+            sharding_profile={},
+        )
+        assert final_bind == {"tenantId": "tenant-A-uuid"}
 
     def test_validator_refusal_blocks_execute(self) -> None:
         """When the validator raises, execute must not run."""
@@ -235,7 +292,13 @@ class TestSafeExecuteServiceAdapter:
 
     def test_satellite_only_query_with_mapping_executes(self) -> None:
         """End-to-end: mapping with one satellite collection → Layer 5
-        accepts, execute fires, bind vars echo the session tenant.
+        accepts, execute fires.
+
+        The query never references ``@tenantId`` / ``@tenantKey``, so —
+        per the ERR 1552 fix — those binds are NOT injected. A real
+        ArangoDB would reject the query otherwise; the fake DB wouldn't,
+        which is exactly why this regression hid until the live smoke
+        test.
         """
         db = _FakeDb()
         session = _FakeSession()
@@ -248,9 +311,12 @@ class TestSafeExecuteServiceAdapter:
         )
         assert cursor == "<cursor:1>"
         assert bind_vars["limit"] == 10
-        assert bind_vars["tenantId"] == "tenant-A-uuid"
-        assert bind_vars["tenantKey"] == "tenant-A-uuid"
+        assert "tenantId" not in bind_vars
+        assert "tenantKey" not in bind_vars
         assert db.aql.calls[0][0] == "FOR c IN Country RETURN c"
+        # The bind vars passed to ArangoDB carry no unused tenant binds.
+        assert "tenantId" not in db.aql.calls[0][1]
+        assert "tenantKey" not in db.aql.calls[0][1]
 
     def test_tenant_scoped_collection_without_filter_refused(self) -> None:
         """Mapping declares Employee as TENANT_SCOPED smartgraph; the

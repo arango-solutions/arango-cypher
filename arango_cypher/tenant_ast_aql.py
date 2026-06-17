@@ -454,6 +454,7 @@ class _Rewriter:
     sharding_profile: dict[str, Any]
     manifest: TenantScopeManifest
     collection_to_entity: dict[str, str]
+    bind_vars: dict[str, Any] = field(default_factory=dict)
     edits: list[_Edit] = field(default_factory=list)
     changes: list[str] = field(default_factory=list)
     seen_sites: set[str] = field(default_factory=set)
@@ -461,10 +462,44 @@ class _Rewriter:
 
     # ---- Source-location helpers -----------------------------------
 
+    def _collection_source_tokens(self, collection: str) -> list[str]:
+        """Regex fragments matching how *collection* can appear after
+        ``FOR <var> IN`` in the AQL source.
+
+        The transpiler binds the collection name as a *collection bind
+        parameter* (``FOR n IN @@collection`` with
+        ``bind_vars['@collection'] == 'Alert'``) rather than inlining
+        the literal name. The EXPLAIN plan resolves the bind to the
+        physical collection, so the plan node reports ``collection ==
+        'Alert'`` while the source text says ``@@collection``. To
+        locate the splice site we must match *both* forms:
+
+        1. The literal name (backtick-optional) — NL→AQL / hand-written
+           AQL path: ``FOR n IN Alert`` or ``FOR n IN `Alert```.
+        2. Any collection-bind token ``@@<name>`` whose bound value is
+           this collection — the transpiler path. In python-arango a
+           collection bind is keyed ``@<name>`` in ``bind_vars`` and
+           written ``@@<name>`` in the query, so we map every
+           ``bind_vars`` key starting with ``@`` whose value equals the
+           collection back to its ``@@<name>`` source token.
+
+        Ordering is literal-first so a query that happens to inline the
+        name is matched without depending on bind_vars.
+        """
+        tokens = [rf"`?{re.escape(collection)}`?"]
+        for key, value in (self.bind_vars or {}).items():
+            if not isinstance(key, str) or not key.startswith("@"):
+                continue
+            if value == collection:
+                # key == '@collection'  →  source token '@@collection'
+                tokens.append(re.escape("@" + key))
+        return tokens
+
     def _locate_for(self, outvar: str, collection: str) -> int | None:
         """Find the offset just after a ``FOR <outvar> IN <coll>``
         clause in :attr:`aql`. Tolerates backticks around the
-        collection name and arbitrary whitespace.
+        collection name, collection-bind parameters (``@@collection``),
+        and arbitrary whitespace.
 
         Returns the offset of the first character *after* the match
         (so an insertion at that offset goes between the FOR header
@@ -476,11 +511,13 @@ class _Rewriter:
         belt-and-braces against pathological inputs).
         """
         # Use word boundaries on the var name and tolerate optional
-        # backticks on the collection name. The transpiler emits
-        # backticks for keyword-shadowed names and the NL→AQL path
-        # may not — accept both.
+        # backticks on the collection name, plus the collection-bind
+        # form the transpiler emits (``@@collection``). The transpiler
+        # emits backticks for keyword-shadowed names and the NL→AQL
+        # path may not — accept all of them.
+        coll_alt = "|".join(self._collection_source_tokens(collection))
         pattern = re.compile(
-            rf"\bFOR\s+{re.escape(outvar)}\s+IN\s+`?{re.escape(collection)}`?",
+            rf"\bFOR\s+{re.escape(outvar)}\s+IN\s+(?:{coll_alt})",
             re.IGNORECASE,
         )
         for m in pattern.finditer(self.aql):
@@ -1079,14 +1116,26 @@ def inject_tenant_scope(
     # (route handlers may reuse it for logging / response).
     augmented = dict(bind_vars or {})
 
-    # Heuristic short-circuit. When there's no tenant entity in the
-    # manifest (single-tenant deployment, hand-crafted test mapping)
-    # or there are no tenant-scoped entities at all, the rewriter
-    # is a structural no-op. We still walk the plan to honour the
-    # idempotency contract, but the walker will find no work.
-    if not manifest.entities or manifest.tenant_entity is None:
+    # Structural short-circuit. The rewriter only has work to do when
+    # the manifest classified at least one entity as TENANT_SCOPED.
+    #
+    # We deliberately do NOT gate on ``manifest.tenant_entity`` here.
+    # ``tenant_entity`` is only set when a conceptual entity is literally
+    # named ``Tenant`` (the traversal-scoping root), but a schema can be
+    # multi-tenant purely through a denormalised tenant column
+    # (e.g. ``Alert.tenantId``) with *no* Tenant root collection at all.
+    # Gating on ``tenant_entity is None`` made Layer 4 a no-op on those
+    # schemas while Layer 5 (which classifies per-entity off the manifest
+    # role, independent of any Tenant root) still treated the same
+    # collections as scoped and refused the unscoped scan — the two
+    # layers disagreed and every tenant-bound query 403'd. Checking
+    # ``scoped_entities()`` keeps the two layers in lock-step: if Layer 5
+    # would refuse an unscoped read, Layer 4 injects the predicate that
+    # makes it safe. We still walk the plan when there *are* scoped
+    # entities to honour the idempotency contract.
+    if not manifest.entities or not manifest.scoped_entities():
         logger.debug(
-            "inject_tenant_scope: manifest has no tenant entity; "
+            "inject_tenant_scope: manifest has no tenant-scoped entities; "
             "returning aql unchanged (single-tenant / admin-bypass path)"
         )
         return aql, augmented, []
@@ -1096,6 +1145,7 @@ def inject_tenant_scope(
         sharding_profile=sharding_profile or {},
         manifest=manifest,
         collection_to_entity=collection_to_entity or {},
+        bind_vars=augmented,
     )
     _walk_plan(plan, rewriter)
     rewritten = rewriter.apply()

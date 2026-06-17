@@ -39,6 +39,28 @@ from ..security import (
 )
 
 
+def _tenant_violation_response(v: TenantScopeViolation) -> HTTPException:
+    """Build the canonical 403 response for a Layer 5/6 tenant refusal.
+
+    Must be raised **inside** any ``_translate_errors`` block so the
+    ``HTTPException`` is re-raised untouched (``_translate_errors`` only
+    wraps non-``HTTPException`` errors). A bare ``TenantScopeViolation``
+    raised inside that block would otherwise be masked as a generic
+    HTTP 500 — hiding an actionable "connect with a tenant" refusal
+    behind "Internal Server Error".
+    """
+    return HTTPException(
+        status_code=403,
+        detail={
+            "error": "tenant_scope_violation",
+            "code": v.code,
+            "message": v.message,
+            "aql_digest": v.aql_digest[:16],
+            "plan_digest": v.plan_digest[:16],
+        },
+    )
+
+
 def _layer4_error_response(exc: AqlRewriteError) -> HTTPException:
     """Translate a Layer-4 refusal into an HTTP 422 / 403 response.
 
@@ -257,9 +279,12 @@ def execute_endpoint(
         bind_vars=run_bind,
     )
 
-    try:
-        with _translate_errors("AQL execution failed"):
-            t_exec = time.perf_counter()
+    with _translate_errors("AQL execution failed"):
+        t_exec = time.perf_counter()
+        # Convert the tenant refusal to a 403 *here*, inside the block,
+        # so `_translate_errors` re-raises it as an HTTPException
+        # untouched instead of masking it as a generic 500.
+        try:
             cursor, run_bind = safe_execute_aql(
                 db=session.db,
                 aql=run_aql,
@@ -268,18 +293,9 @@ def execute_endpoint(
                 mapping_dict=req.mapping,
             )
             results = list(cursor)
-            exec_ms = round((time.perf_counter() - t_exec) * 1000, 1)
-    except TenantScopeViolation as v:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "tenant_scope_violation",
-                "code": v.code,
-                "message": v.message,
-                "aql_digest": v.aql_digest[:16],
-                "plan_digest": v.plan_digest[:16],
-            },
-        ) from v
+        except TenantScopeViolation as v:
+            raise _tenant_violation_response(v) from v
+        exec_ms = round((time.perf_counter() - t_exec) * 1000, 1)
 
     log_endpoint_timing(
         "/execute",
@@ -331,9 +347,9 @@ def execute_aql_endpoint(
         aql=req.aql,
         bind_vars=req.bind_vars,
     )
-    try:
-        with _translate_errors("AQL execution failed"):
-            t_exec = time.perf_counter()
+    with _translate_errors("AQL execution failed"):
+        t_exec = time.perf_counter()
+        try:
             cursor, final_bind = safe_execute_aql(
                 db=session.db,
                 aql=run_aql,
@@ -342,18 +358,9 @@ def execute_aql_endpoint(
                 mapping_dict=req.mapping,
             )
             results = list(cursor)
-            exec_ms = round((time.perf_counter() - t_exec) * 1000, 1)
-    except TenantScopeViolation as v:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "tenant_scope_violation",
-                "code": v.code,
-                "message": v.message,
-                "aql_digest": v.aql_digest[:16],
-                "plan_digest": v.plan_digest[:16],
-            },
-        ) from v
+        except TenantScopeViolation as v:
+            raise _tenant_violation_response(v) from v
+        exec_ms = round((time.perf_counter() - t_exec) * 1000, 1)
 
     log_endpoint_timing(
         "/execute-aql",
@@ -482,9 +489,9 @@ def aql_profile_endpoint(
         bind_vars=transpiled.bind_vars,
     )
     final_bind = run_bind
-    try:
-        t_exec = time.perf_counter()
-        with _translate_errors("AQL profiled execution failed"):
+    t_exec = time.perf_counter()
+    with _translate_errors("AQL profiled execution failed"):
+        try:
             cursor, final_bind = safe_execute_aql(
                 db=session.db,
                 aql=run_aql,
@@ -496,18 +503,9 @@ def aql_profile_endpoint(
             results = list(cursor)
             stats = cursor.statistics()
             profile_data = cursor.profile() if hasattr(cursor, "profile") else None
-        exec_ms = round((time.perf_counter() - t_exec) * 1000, 1)
-    except TenantScopeViolation as v:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "tenant_scope_violation",
-                "code": v.code,
-                "message": v.message,
-                "aql_digest": v.aql_digest[:16],
-                "plan_digest": v.plan_digest[:16],
-            },
-        ) from v
+        except TenantScopeViolation as v:
+            raise _tenant_violation_response(v) from v
+    exec_ms = round((time.perf_counter() - t_exec) * 1000, 1)
 
     log_endpoint_timing(
         "/aql-profile",

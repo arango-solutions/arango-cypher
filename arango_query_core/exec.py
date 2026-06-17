@@ -1,10 +1,37 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from .aql import AqlQuery
+
+
+def _aql_references_bindvar(aql: str, name: str) -> bool:
+    """Whether *aql* references the value bind parameter ``@name``.
+
+    ArangoDB rejects a query (``[ERR 1552] bind parameter '<name>' was
+    not declared in the query``) when ``bind_vars`` carries a key the
+    query text never uses. The Layer-6 session-spread must therefore
+    add ``tenantId`` / ``tenantKey`` **only** when the AQL actually
+    references them — otherwise a perfectly safe global / satellite-only
+    read (e.g. ``FOR c IN Country RETURN c``) explodes at EXPLAIN time
+    just because the session injected an unused tenant bind.
+
+    Matches a single-``@`` *value* reference (``@tenantId``) and
+    deliberately ignores the doubled *collection* form (``@@tenantId``)
+    — tenant scope binds are always value binds. The name boundary
+    stops ``@tenantId`` from matching a longer identifier such as
+    ``@tenantIdentifier``.
+
+    This is a textual heuristic, mirroring Layer 4's textual splice
+    approach. A false positive (``@tenantId`` appearing only inside an
+    AQL comment or string literal) would re-introduce ERR 1552, but the
+    transpiler and Layer 3/4 only ever emit the token in real predicate
+    positions, so the heuristic is safe for produced AQL.
+    """
+    return re.search(r"(?<![@\w])@" + re.escape(name) + r"(?![\w])", aql) is not None
 
 
 @dataclass
@@ -46,6 +73,17 @@ def safe_execute(
     verifies the bind-var matches the session — closing T7 (bind-var
     override) by construction.
 
+    The session binds are spread **only when the AQL references the
+    corresponding ``@tenantId`` / ``@tenantKey`` parameter**. ArangoDB
+    refuses a query that declares a bind value it never uses
+    (``[ERR 1552] bind parameter '<name>' was not declared in the
+    query``), so unconditionally injecting the session tenant would
+    blow up every safe global / satellite-only read at EXPLAIN time.
+    A query that *does* reference the tenant bind always has the
+    session value win; a client-supplied ``tenantId`` on a query that
+    never uses ``@tenantId`` is inert and is dropped (it cannot affect
+    results and would only trip ERR 1552).
+
     Returns ``(cursor, bind_vars)`` so the caller can echo the final
     bind vars back to the UI for transparency (§9.2). The validator is
     injected rather than imported here so ``arango_query_core`` stays
@@ -58,8 +96,14 @@ def safe_execute(
     if session is None:
         raise PermissionError("safe_execute: no authenticated session; cannot bind tenant context")
     bind_vars = dict(client_bind_vars or {})
-    bind_vars["tenantId"] = getattr(session, "tenant_id", None)
-    bind_vars["tenantKey"] = getattr(session, "tenant_key", None)
+    if _aql_references_bindvar(aql, "tenantId"):
+        bind_vars["tenantId"] = getattr(session, "tenant_id", None)
+    else:
+        bind_vars.pop("tenantId", None)
+    if _aql_references_bindvar(aql, "tenantKey"):
+        bind_vars["tenantKey"] = getattr(session, "tenant_key", None)
+    else:
+        bind_vars.pop("tenantKey", None)
 
     validator(
         db=db,
