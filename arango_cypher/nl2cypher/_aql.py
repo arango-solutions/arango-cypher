@@ -138,6 +138,22 @@ FOR doc IN sharedCollection
   RETURN doc
 ```
 
+### Counting / grouping by entity or relationship type
+Many schemas store ALL nodes in one document collection and ALL edges in one
+edge collection, with the kind distinguished by a type field shown in the
+schema as ``[type discriminator: <field>=...]``. To answer "how many of each
+type" / "most common entity or relationship types", COLLECT on that exact
+discriminator field — NOT on _from/_to and NOT on invented fields like
+_fromType/_toType (those do not exist; edges only have _from, _to, _id, _key):
+```
+// most common relationship types (edges share one collection, typed by <field>)
+FOR e IN edgeCollection
+  COLLECT relType = e.<typeField> WITH COUNT INTO count
+  SORT count DESC
+  LIMIT 30
+  RETURN {{ relationshipType: relType, count }}
+```
+
 ## Critical Rules
 1. Use EXACT collection names from the schema (case-sensitive)
 2. Use EXACT field names from the schema (case-sensitive)
@@ -216,12 +232,30 @@ def _build_physical_schema_summary(bundle: MappingBundle) -> str:
             domain = rel.get("domain", "?")
             range_ = rel.get("range", "?")
             props = rel.get("properties", {})
-            prop_names = list(props.keys())[:8] if isinstance(props, dict) else []
+            # ``_fromType`` / ``_toType`` are denormalised *node*-type
+            # fields on the edge (the kind of the source / target vertex).
+            # Their names contain "Type", which reliably lures the LLM into
+            # grouping relationship-type questions by them. Annotate so the
+            # model groups by the real relationship-type discriminator
+            # (``rel['typeField']``, e.g. ``type``) instead.
+            _edge_field_notes = {
+                "_fromType": "_fromType (source NODE type — NOT the relationship type)",
+                "_toType": "_toType (target NODE type — NOT the relationship type)",
+            }
+            prop_names = (
+                [_edge_field_notes.get(p, p) for p in list(props.keys())[:8]]
+                if isinstance(props, dict)
+                else []
+            )
             prop_str = ", ".join(prop_names) if prop_names else "no properties"
 
             type_info = ""
             if style == "GENERIC_WITH_TYPE" and rel.get("typeField"):
-                type_info = f" [type discriminator: {rel['typeField']}={rel.get('typeValue', rtype)}]"
+                type_info = (
+                    f" [relationship-type field: {rel['typeField']} "
+                    f"(=='{rel.get('typeValue', rtype)}' for this type; "
+                    f"GROUP BY this field to count relationship types)]"
+                )
 
             domain_col = _resolve_collection_name(domain, pm) or domain
             range_col = _resolve_collection_name(range_, pm) or range_
@@ -381,8 +415,25 @@ def _validate_aql_syntax(
     if known_collections:
         mentioned = set()
         for m in re.finditer(r"\bFOR\s+\w+\s+IN\s+(\w+)", aql):
-            mentioned.add(m.group(1))
-        for m in re.finditer(r"\bINTO\s+(\w+)", aql):
+            token = m.group(1)
+            # ``FOR v IN 1..3 OUTBOUND start edge`` is a graph traversal:
+            # the token after IN is the depth range (a number), not a
+            # collection. Collection identifiers never start with a digit,
+            # so skip purely numeric captures rather than flag "1" as an
+            # unknown collection. (Two-variable traversals ``FOR v, e IN``
+            # don't match this regex at all.)
+            if token.isdigit():
+                continue
+            mentioned.add(token)
+        # ``INTO <name>`` names a collection ONLY in the data-modification
+        # form ``INSERT <expr> INTO <collection>``. The grouping form
+        # ``COLLECT … INTO <var>`` (and ``WITH COUNT INTO <var>``) binds an
+        # aggregation *variable*, not a collection — treating it as a
+        # collection falsely rejects every valid aggregation query (the
+        # classic "unknown collection: group" bug). Scope the check to the
+        # INSERT target only; the non-greedy gap stops at the first INTO
+        # after INSERT, which is the collection name.
+        for m in re.finditer(r"\bINSERT\b[\s\S]*?\bINTO\s+(\w+)", aql, re.IGNORECASE):
             mentioned.add(m.group(1))
         built_in = {"OUTBOUND", "INBOUND", "ANY", "GRAPH"}
         bad = mentioned - known_collections - built_in
