@@ -2762,19 +2762,80 @@ def _extra_label_filters(var: str, labels: list[str], primary: str) -> list[str]
     return out
 
 
+def _shared_type_field(resolver: MappingResolver | None, kind: str) -> str | None:
+    """Return the common type-discriminator field across a mapping section.
+
+    ``kind`` is ``"entities"`` or ``"relationships"``. When every
+    type-discriminated definition in that section shares a single
+    ``typeField`` (the GraphRAG / naked-LPG shape — one physical
+    collection whose rows are distinguished by, e.g., ``type``), return
+    that field name so ``labels()`` / ``type()`` can read the real
+    discriminator instead of collapsing to the collection name. Returns
+    ``None`` when there is no discriminator or the field is ambiguous
+    (mixed discriminators), in which case callers fall back to the
+    collection-name behaviour.
+    """
+    if resolver is None:
+        return None
+    section = resolver.bundle.physical_mapping.get(kind)
+    if not isinstance(section, dict) or not section:
+        return None
+    discriminated_styles = {"LABEL", "GENERIC_WITH_TYPE"}
+    fields = {
+        d["typeField"]
+        for d in section.values()
+        if isinstance(d, dict)
+        and d.get("style") in discriminated_styles
+        and d.get("typeField")
+    }
+    return next(iter(fields)) if len(fields) == 1 else None
+
+
 def _infer_unlabeled_collection(resolver: MappingResolver) -> str:
     pm = resolver.bundle.physical_mapping
     entities = pm.get("entities") if isinstance(pm.get("entities"), dict) else {}
     if not isinstance(entities, dict) or not entities:
         raise CoreError("A single label is required in v0 subset", code="UNSUPPORTED")
-    colls: set[str] = set()
-    for m in entities.values():
-        if isinstance(m, dict):
+
+    def _collections(styles: set[str] | None) -> set[str]:
+        out: set[str] = set()
+        for m in entities.values():
+            if not isinstance(m, dict):
+                continue
             c = m.get("collectionName")
-            if isinstance(c, str) and c:
-                colls.add(c)
-    if len(colls) == 1:
-        return next(iter(colls))
+            if not (isinstance(c, str) and c):
+                continue
+            if styles is None or m.get("style") in styles:
+                out.add(c)
+        return out
+
+    all_colls = _collections(None)
+    if len(all_colls) == 1:
+        return next(iter(all_colls))
+
+    # Multi-collection schema. The common GraphRAG / naked-LPG shape is one
+    # type-discriminated "domain" vertex collection (e.g. ``Node``, whose rows
+    # carry a ``type`` discriminator) plus side document stores (chunk text,
+    # benchmark/ops collections) that are modelled COLLECTION-style. An
+    # unlabeled ``MATCH (n)`` means the domain graph, so resolve to the single
+    # type-discriminated collection when there is exactly one — the side
+    # stores are intentionally excluded.
+    core_colls = _collections({"LABEL", "GENERIC_WITH_TYPE"})
+    if len(core_colls) == 1:
+        primary = next(iter(core_colls))
+        excluded = sorted(all_colls - core_colls)
+        if excluded:
+            warnings = _active_warnings.get()
+            msg = (
+                f"Unlabeled MATCH resolved to the domain collection '{primary}'. "
+                f"Side collection(s) {excluded} are excluded from label-less "
+                f"matches; reference them by label (e.g. MATCH (n:Chunk)) to "
+                f"query them directly."
+            )
+            if msg not in warnings:
+                warnings.append(msg)
+        return primary
+
     raise CoreError("A single label is required in v0 subset", code="UNSUPPORTED")
 
 
@@ -3720,27 +3781,38 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
         if fn_norm == "type":
             if len(compiled_args) != 1:
                 raise CoreError("type expects 1 arg", code="UNSUPPORTED")
+            r_var = compiled_args[0]
             resolver = _active_resolver.get()
-            if resolver is not None:
-                r_var = compiled_args[0]
-                rel_type_field = resolver.bundle.physical_mapping.get(
-                    "relationshipTypes",
-                    {},
-                ).get("defaultTypeField")
-                if rel_type_field:
-                    return f"{r_var}.{rel_type_field}"
-            return f"PARSE_IDENTIFIER({compiled_args[0]}._id).collection"
+            type_field = _shared_type_field(resolver, "relationships") if resolver else None
+            if type_field:
+                # Generic-edge shape (e.g. GraphRAG/LPG: all edges in one
+                # collection discriminated by ``type``): the Cypher
+                # relationship type is the discriminator value. Fall back
+                # to the collection name for dedicated edges that lack the
+                # field, so mixed schemas stay correct.
+                return (
+                    f"({r_var}.{type_field} != null ? {r_var}.{type_field} "
+                    f": PARSE_IDENTIFIER({r_var}._id).collection)"
+                )
+            # Dedicated-collection shape: the edge collection name encodes
+            # the relationship type.
+            return f"PARSE_IDENTIFIER({r_var}._id).collection"
         if fn_norm == "labels":
             if len(compiled_args) != 1:
                 raise CoreError("labels expects 1 arg", code="UNSUPPORTED")
+            n_var = compiled_args[0]
             resolver = _active_resolver.get()
-            if resolver is not None:
-                entity_defs = resolver.bundle.physical_mapping.get("entityLabels", {})
-                for _ek, ev in entity_defs.items():
-                    if ev.get("style") == "LABEL" and ev.get("typeField"):
-                        tf = ev["typeField"]
-                        return f"[{compiled_args[0]}.{tf}]"
-            return f"[PARSE_IDENTIFIER({compiled_args[0]}._id).collection]"
+            type_field = _shared_type_field(resolver, "entities") if resolver else None
+            if type_field:
+                # Type-discriminated nodes (LABEL / GENERIC_WITH_TYPE) carry
+                # their label in the discriminator field; dedicated /
+                # side-store collections (e.g. chunks) fall back to the
+                # collection name.
+                return (
+                    f"[{n_var}.{type_field} != null ? {n_var}.{type_field} "
+                    f": PARSE_IDENTIFIER({n_var}._id).collection]"
+                )
+            return f"[PARSE_IDENTIFIER({n_var}._id).collection]"
         if fn_norm == "timestamp":
             return "DATE_NOW()"
         if fn_norm == "date":
