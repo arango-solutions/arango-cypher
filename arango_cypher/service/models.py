@@ -80,6 +80,31 @@ class ConnectResponse(BaseModel):
     is_admin: bool = False
 
 
+class TenantDiscoverRequest(BaseModel):
+    """Body for ``POST /tenants/discover``.
+
+    Carries the introspected mapping so the server can build the
+    tenant-scope manifest and decide how to enumerate tenants:
+    from a ``Tenant`` collection when one exists, or by sampling the
+    distinct values of the denormalised tenant field otherwise.
+    """
+
+    mapping: dict[str, Any] | None = None
+
+
+class BindTenantRequest(BaseModel):
+    """Body for ``POST /session/tenant`` — re-bind the active session's
+    tenant after schema analysis without re-authenticating.
+
+    ``tenantId`` is ``None`` to clear the binding ("all tenants" /
+    reference-only mode). ``tenantKey`` defaults to ``tenantId`` when
+    omitted (denormalised-tenant schemas key on the id itself).
+    """
+
+    tenantId: str | None = Field(default=None, max_length=_MAX_FIELD_LENGTH)
+    tenantKey: str | None = Field(default=None, max_length=_MAX_FIELD_LENGTH)
+
+
 class TranslateRequest(BaseModel):
     cypher: str = Field(..., max_length=_MAX_CYPHER_LENGTH)
     mapping: dict[str, Any] | None = None

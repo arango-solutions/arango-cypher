@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TenantRecord, TenantContext } from "../api/client";
 
+// Tenants may carry an optional `docs` count (the denormalised
+// discovery path reports how many documents each tenant has) so the
+// picker can show which tenants actually hold data.
+type TenantOption = TenantRecord & { docs?: number };
+
 interface Props {
-  tenants: TenantRecord[];
+  tenants: TenantOption[];
   loading: boolean;
   selection: TenantContext | null;
   onSelect: (ctx: TenantContext | null) => void;
@@ -36,7 +41,7 @@ interface Props {
 //     AQL it transpiles to `t._key == '...'` — the cheapest
 //     possible tenant filter.
 // NAME is still surfaced as the human-readable label.
-function toContext(t: TenantRecord): TenantContext {
+function toContext(t: TenantOption): TenantContext {
   return {
     property: "_key",
     value: t.key,
@@ -214,7 +219,14 @@ export default function TenantSelector({
                   }`}
                   title={t.id || (t.hex_id ? `TENANT_HEX_ID: ${t.hex_id}` : undefined)}
                 >
-                  <div className="font-medium truncate">{t.name || t.key}</div>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium truncate">{t.name || t.key}</span>
+                    {typeof t.docs === "number" && (
+                      <span className="text-[10px] text-gray-500 shrink-0 tabular-nums">
+                        {t.docs.toLocaleString()} docs
+                      </span>
+                    )}
+                  </div>
                   {(t.subdomain || (t.name && t.key !== t.name)) && (
                     <div className="text-[10px] text-gray-500 truncate">
                       {t.subdomain || t.key}

@@ -25,11 +25,12 @@ import {
   listCorrections,
   deleteCorrection,
   suggestNlQueries,
-  listTenants,
+  discoverTenants,
+  bindTenant,
   isAuthError,
   type CorrectionRecord,
   type TenantContext,
-  type TenantRecord,
+  type DiscoveredTenant,
 } from "./api/client";
 
 const NL_SAMPLES_SEEN_KEY = "nl_samples_seen";
@@ -456,52 +457,39 @@ export default function App() {
     return ents ? Object.keys(ents).length : 0;
   }, [state.mapping]);
 
-  // Heuristic: this schema is multi-tenant if the conceptual or
-  // physical mapping declares a `Tenant` entity. When true we show the
-  // tenant selector; when false we hide it entirely so single-tenant
-  // workspaces get no extra chrome. See
-  // `arango_cypher.nl2cypher.tenant_guardrail.has_tenant_entity`
-  // for the mirrored backend check.
-  const hasTenantEntity = useMemo(() => {
-    const m = state.mapping as Record<string, unknown>;
-    const cs =
-      (m?.conceptual_schema as Record<string, unknown> | undefined) ??
-      (m?.conceptualSchema as Record<string, unknown> | undefined);
-    const ents = cs?.entities;
-    if (Array.isArray(ents)) {
-      for (const e of ents) {
-        if (e && typeof e === "object" && (e as { name?: unknown }).name === "Tenant") {
-          return true;
-        }
-      }
-    }
-    const pm =
-      (m?.physical_mapping as Record<string, unknown> | undefined) ??
-      (m?.physicalMapping as Record<string, unknown> | undefined);
-    const pEnts = pm?.entities as Record<string, unknown> | undefined;
-    return !!(pEnts && Object.prototype.hasOwnProperty.call(pEnts, "Tenant"));
-  }, [state.mapping]);
-
-  const [tenantCatalog, setTenantCatalog] = useState<TenantRecord[]>([]);
+  // Whether the *analysed* schema is multi-tenant. Unlike the old
+  // mapping-only heuristic (which just looked for a literal `Tenant`
+  // entity), this is decided by the backend's tenant-scope manifest
+  // after introspection — so it also catches the common denormalised
+  // shape where tenancy lives only as a field (e.g. `Alert.tenantId`)
+  // with no `Tenant` collection at all. Drives whether the tenant
+  // picker is shown.
+  const [tenantMultiTenant, setTenantMultiTenant] = useState(false);
+  const [tenantCatalog, setTenantCatalog] = useState<DiscoveredTenant[]>([]);
   const [tenantsDetected, setTenantsDetected] = useState(false);
   const [tenantsLoading, setTenantsLoading] = useState(false);
   const [tenantContext, setTenantContext] = useState<TenantContext | null>(null);
-  // Diagnostic state — what collection the backend tried to query and
-  // whether it found it via mapping vs heuristic. Surfaced in the
-  // selector tooltip / empty state so a missing tenant list isn't
-  // silent.
+  // Diagnostic state — how tenants were discovered (Tenant collection
+  // vs denormalised field), the field/collection involved, and the last
+  // error. Surfaced in the selector tooltip / empty state so a missing
+  // tenant list is never silent.
   const [tenantResolution, setTenantResolution] = useState<{
     collection: string | null;
     source: "client" | "heuristic" | null;
     error: string | null;
   }>({ collection: null, source: null, error: null });
 
-  // Fetch the tenant catalog when we connect to a schema that has a
-  // Tenant entity. Skipped otherwise — we want /tenants to be a no-op
-  // for single-tenant workspaces, not an always-on network call.
+  // Discover selectable tenants once we're connected and schema
+  // analysis has finished. This is deliberately a *post-analysis*
+  // step: whether the schema is multi-tenant — and what the tenant
+  // ids are — can only be known after introspection builds the
+  // tenant-scope manifest. The backend handles both shapes (a
+  // `Tenant` collection or denormalised field values) and tells us
+  // via `multiTenant` whether to show the picker at all.
   useEffect(() => {
     const token = state.connection.token;
     if (!token) {
+      setTenantMultiTenant(false);
       setTenantCatalog([]);
       setTenantsDetected(false);
       setTenantContext(null);
@@ -509,33 +497,34 @@ export default function App() {
       return;
     }
     if (state.introspecting) return;
-    if (!hasTenantEntity) {
-      setTenantCatalog([]);
-      setTenantsDetected(false);
-      setTenantContext(null);
-      setTenantResolution({ collection: null, source: null, error: null });
-      return;
-    }
     let cancelled = false;
     setTenantsLoading(true);
     (async () => {
       try {
-        // Pass the introspected mapping so the server can resolve the
-        // *actual* tenant collection name (e.g. `Tenants` vs literal
-        // `Tenant`) from physical_mapping. Without this, real-world
-        // schemas where the collection name doesn't match the
-        // conceptual entity name silently produce an empty catalog.
+        // Pass the introspected mapping so the server can build the
+        // tenant-scope manifest and resolve the actual physical
+        // collection names / denormalised tenant field.
         const mapping =
           (state.mapping as Record<string, unknown> | null | undefined) || null;
-        const resp = await listTenants(token, mapping);
+        const resp = await discoverTenants(token, mapping);
         if (cancelled) return;
-        setTenantsDetected(resp.detected);
+        setTenantMultiTenant(resp.multiTenant);
+        // `detected` for the selector = "we have a usable tenant
+        // catalog". For multi-tenant schemas with no rows yet (empty
+        // probed collections) we still flag detected so the empty
+        // state reads "no tenants" rather than "no tenant collection".
+        setTenantsDetected(resp.multiTenant);
         setTenantCatalog(resp.tenants || []);
         setTenantResolution({
-          collection: resp.collection ?? null,
-          source: resp.source ?? null,
+          collection: resp.collections?.[0] ?? resp.tenantField ?? null,
+          source: null,
           error: null,
         });
+        if (!resp.multiTenant) {
+          setTenantContext(null);
+          setTenantsLoading(false);
+          return;
+        }
         // Rehydrate a previously-saved selection for this (url, database).
         const saved = loadTenantContext(
           state.connection.url,
@@ -566,6 +555,16 @@ export default function App() {
             setTenantContext(migrated);
             if (saved.property !== "_key" || saved.value !== resolved.key) {
               saveTenantContext(state.connection.url, state.connection.database, migrated);
+            }
+            // Re-bind the freshly-issued session to the rehydrated
+            // tenant. The session token changes on every (re)connect,
+            // so a saved selection is meaningless until we push it back
+            // to the server — otherwise the first query after a reload
+            // runs unbound and trips Layer 5.
+            try {
+              await bindTenant(token, resolved.key);
+            } catch (bindErr) {
+              console.warn("Tenant rebind on rehydrate failed:", bindErr);
             }
           } else {
             setTenantContext(null);
@@ -614,7 +613,6 @@ export default function App() {
     state.connection.url,
     state.connection.database,
     state.introspecting,
-    hasTenantEntity,
     state.mapping,
   ]);
 
@@ -622,8 +620,25 @@ export default function App() {
     (ctx: TenantContext | null) => {
       setTenantContext(ctx);
       saveTenantContext(state.connection.url, state.connection.database, ctx);
+      // Re-bind the live session to the chosen tenant (or clear it for
+      // "All tenants"). This is what actually scopes execution at
+      // Layers 4–6 — the local `tenantContext` only drives the
+      // NL-to-Cypher guardrail and the pill's display.
+      const token = state.connection.token;
+      if (!token) return;
+      (async () => {
+        try {
+          await bindTenant(token, ctx ? ctx.value : null);
+        } catch (err) {
+          console.warn("Tenant bind failed:", err);
+          if (isAuthError(err)) dispatch({ type: "DISCONNECT" });
+        }
+      })();
     },
-    [state.connection.url, state.connection.database],
+    // `dispatch` is stable (useReducer); omitted intentionally so this
+    // callback identity only changes with the connection target.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.connection.url, state.connection.database, state.connection.token],
   );
 
   const tenantContextRef = useRef<TenantContext | null>(null);
@@ -907,7 +922,7 @@ export default function App() {
           />
         </div>
         <div className="flex items-center gap-2">
-          {isConnected && hasTenantEntity && (
+          {isConnected && tenantMultiTenant && (
             <TenantSelector
               tenants={tenantCatalog}
               loading={tenantsLoading}

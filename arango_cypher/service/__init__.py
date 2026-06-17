@@ -104,6 +104,7 @@ from .models import (
     _MAX_NOTE_LENGTH,
     _MAX_RETRY_HINT_LENGTH,
     _MAX_TURTLE_LENGTH,
+    BindTenantRequest,
     ConnectRequest,
     ConnectResponse,
     CorrectionRequest,
@@ -119,6 +120,7 @@ from .models import (
     OwlImportRequest,
     SuggestIndexesRequest,
     TenantContextPayload,
+    TenantDiscoverRequest,
     ToolCallRequest,
     TranslateRequest,
     TranslateResponse,
@@ -200,6 +202,7 @@ from .ui import (
 __all__ = [
     "app",
     # Re-exported request/response models
+    "BindTenantRequest",
     "ConnectRequest",
     "ConnectResponse",
     "CorrectionRequest",
@@ -215,6 +218,7 @@ __all__ = [
     "OwlImportRequest",
     "SuggestIndexesRequest",
     "TenantContextPayload",
+    "TenantDiscoverRequest",
     "ToolCallRequest",
     "TranslateRequest",
     "TranslateResponse",

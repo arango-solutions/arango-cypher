@@ -533,3 +533,107 @@ class TestWorkbenchVsTenantUserMode:
         assert not any("ignored" in m and "tenant-A-uuid" in m for m in warning_messages), (
             f"unexpected override warning when body == session: {warning_messages!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# /execute — tenant refusals must surface as 403, never masked as 500
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteTenantViolationStatusCode:
+    """Regression: a ``TenantScopeViolation`` raised by Layer 5/6 inside the
+    ``_translate_errors`` block must reach the client as a structured HTTP
+    403, not a generic 500.
+
+    The bug: ``_translate_errors`` (a context manager wrapping
+    ``safe_execute_aql``) caught the violation as a plain ``Exception`` and
+    converted it to 500 before the route's own ``except TenantScopeViolation``
+    handler could run — hiding an actionable "connect with a tenant" refusal
+    behind "Internal Server Error".
+    """
+
+    def _connect_unbound(self) -> str:
+        fake_db = _FakeDb(has_tenant_collection=False)
+        with _patched_arango_client(_make_fake_client(fake_db)):
+            client = TestClient(_app())
+            resp = client.post(
+                "/connect",
+                json={
+                    "url": "http://example.invalid",
+                    "database": "test",
+                    "username": "root",
+                    "password": "",
+                },
+            )
+        assert resp.status_code == 200, resp.text
+        return resp.json()["token"]
+
+    def test_tenant_violation_surfaces_as_403(self, monkeypatch: pytest.MonkeyPatch):
+        from arango_cypher.service.routes import cypher as cypher_routes
+        from arango_cypher.tenant_plan_validator import TenantScopeViolation
+
+        token = self._connect_unbound()
+
+        class _Transpiled:
+            aql = "FOR n IN @@coll RETURN n"
+            bind_vars: dict[str, Any] = {}
+            warnings: list[Any] = []
+
+        # Reach safe_execute_aql without needing a real schema/translation.
+        monkeypatch.setattr(cypher_routes, "_mapping_from_dict", lambda _m: object())
+        monkeypatch.setattr(cypher_routes, "translate", lambda *_a, **_k: _Transpiled())
+
+        def _raise_violation(**_kwargs):
+            raise TenantScopeViolation(
+                code="NO_SESSION_TENANT",
+                message="session has no tenant_id; cannot validate tenant-scoped query",
+                aql_digest="a" * 64,
+                plan_digest="b" * 64,
+            )
+
+        monkeypatch.setattr(cypher_routes, "safe_execute_aql", _raise_violation)
+
+        client = TestClient(_app())
+        resp = client.post(
+            "/execute",
+            headers={"X-Arango-Session": token},
+            json={"cypher": "MATCH (n:User) RETURN n", "mapping": {"any": "thing"}},
+        )
+
+        assert resp.status_code == 403, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error"] == "tenant_scope_violation"
+        assert detail["code"] == "NO_SESSION_TENANT"
+        assert detail["aql_digest"] == "a" * 16
+        _fresh_service()._sessions.pop(token, None)
+
+    def test_generic_execute_error_still_500(self, monkeypatch: pytest.MonkeyPatch):
+        """A non-tenant failure (e.g. a driver error) must still map to 500
+        via ``_translate_errors`` — the 403 path is scoped to tenant refusals.
+        """
+        from arango_cypher.service.routes import cypher as cypher_routes
+
+        token = self._connect_unbound()
+
+        class _Transpiled:
+            aql = "FOR n IN @@coll RETURN n"
+            bind_vars: dict[str, Any] = {}
+            warnings: list[Any] = []
+
+        monkeypatch.setattr(cypher_routes, "_mapping_from_dict", lambda _m: object())
+        monkeypatch.setattr(cypher_routes, "translate", lambda *_a, **_k: _Transpiled())
+
+        def _raise_runtime(**_kwargs):
+            raise RuntimeError("arango driver exploded")
+
+        monkeypatch.setattr(cypher_routes, "safe_execute_aql", _raise_runtime)
+
+        client = TestClient(_app())
+        resp = client.post(
+            "/execute",
+            headers={"X-Arango-Session": token},
+            json={"cypher": "MATCH (n:User) RETURN n", "mapping": {"any": "thing"}},
+        )
+
+        assert resp.status_code == 500, resp.text
+        _fresh_service()._sessions.pop(token, None)

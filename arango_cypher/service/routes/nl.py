@@ -13,7 +13,7 @@ from fastapi import Depends, HTTPException
 from ...tenant_ast_aql import AqlRewriteError
 from ...tenant_plan_validator import TenantScopeViolation
 from ..app import _PUBLIC_MODE, app
-from ..models import NL2AqlRequest, NL2CypherRequest, NLSuggestRequest
+from ..models import NL2AqlRequest, NL2CypherRequest, NLSuggestRequest, TenantDiscoverRequest
 from ..observability import (
     current_llm_provider_and_model,
     log_endpoint_timing,
@@ -473,3 +473,195 @@ def tenants_endpoint(
         "collection": resolved,
         "source": source,
     }
+
+
+# Per (collection, field) pair, cap the distinct-value scan so a huge
+# tenant-scoped collection can't wedge the discovery call. 5000 distinct
+# tenants is far beyond any realistic interactive picker.
+_TENANT_DISCOVER_LIMIT = 5000
+# Cap how many scoped collections we probe so a wide schema with dozens
+# of tenant-scoped entities doesn't fan out into dozens of COLLECT scans.
+_TENANT_DISCOVER_MAX_COLLECTIONS = 8
+
+
+@app.post("/tenants/discover")
+def tenants_discover_endpoint(
+    req: TenantDiscoverRequest,
+    session: _Session = Depends(_get_session),
+):
+    """Discover selectable tenants for the connected database.
+
+    Unlike ``GET /tenants`` (which only enumerates a literal/aliased
+    ``Tenant`` collection), this builds the tenant-scope manifest from
+    the supplied mapping and supports the common real-world shape where
+    there is **no** ``Tenant`` collection — tenants exist only as
+    denormalised values on scoped collections (e.g. ``Alert.tenantId``).
+
+    Resolution order:
+
+    1. ``Tenant`` root collection present → enumerate it (rich records).
+    2. Otherwise → for each distinct ``(collection, denorm_field)`` of
+       the manifest's ``TENANT_SCOPED`` entities (bounded), sample the
+       distinct field values and union them into a tenant list.
+    3. Neither → ``multiTenant: false`` (single-tenant / reference-only).
+
+    Response::
+
+        {
+          "multiTenant": bool,
+          "scope": "collection" | "denorm" | "none",
+          "tenantField": str | null,   # denorm field, when scope=denorm
+          "tenants": [{"id","key","name","subdomain","hex_id","docs"?}],
+          "collections": [str],        # probed collections (denorm scope)
+        }
+    """
+    from ...nl2cypher.tenant_scope import EntityTenantRole, analyze_tenant_scope
+    from ..mapping import _mapping_from_dict
+
+    t0 = time.perf_counter()
+    db = session.db
+    mapping = _mapping_from_dict(req.mapping) if req.mapping else None
+    if mapping is None:
+        log_endpoint_timing(
+            "/tenants/discover",
+            round((time.perf_counter() - t0) * 1000, 1),
+            multi_tenant=False,
+            scope="none",
+        )
+        return {
+            "multiTenant": False,
+            "scope": "none",
+            "tenantField": None,
+            "tenants": [],
+            "collections": [],
+        }
+
+    manifest = analyze_tenant_scope(mapping)
+
+    # ---- 1) Tenant-root collection path --------------------------------
+    if manifest.tenant_entity is not None:
+        coll = _collection_name_for(mapping, manifest.tenant_entity) or "Tenant"
+        if _COLLECTION_NAME_RE.fullmatch(coll):
+            with _translate_errors("Failed to inspect collections"):
+                exists = db.has_collection(coll)
+            if exists:
+                aql = (
+                    f"FOR t IN `{coll}` LIMIT {_TENANT_CATALOG_LIMIT} SORT t.NAME "
+                    "RETURN {id: t._id, key: t._key, name: t.NAME, "
+                    "subdomain: t.SUBDOMAIN, hex_id: t.TENANT_HEX_ID}"
+                )
+                with _translate_errors("Tenant catalog query failed"):
+                    tenants = list(db.aql.execute(aql))
+                log_endpoint_timing(
+                    "/tenants/discover",
+                    round((time.perf_counter() - t0) * 1000, 1),
+                    multi_tenant=True,
+                    scope="collection",
+                    tenants=len(tenants),
+                )
+                return {
+                    "multiTenant": True,
+                    "scope": "collection",
+                    "tenantField": "_key",
+                    "tenants": tenants,
+                    "collections": [coll],
+                }
+
+    # ---- 2) Denormalised-field discovery -------------------------------
+    # Collect distinct (collection, denorm_field) pairs across scoped
+    # entities. Several conceptual entities can share one physical
+    # collection (severity-subtyped Alert → Critical/Info/Warning), so
+    # we dedupe on the pair to avoid scanning the same collection twice.
+    pairs: list[tuple[str, str]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for entity_name, scope in manifest.entities.items():
+        if scope.role is not EntityTenantRole.TENANT_SCOPED or not scope.denorm_field:
+            continue
+        coll = _collection_name_for(mapping, entity_name) or entity_name
+        if not _COLLECTION_NAME_RE.fullmatch(coll):
+            continue
+        pair = (coll, scope.denorm_field)
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        pairs.append(pair)
+
+    tenant_field = pairs[0][1] if pairs else None
+    values: dict[str, int] = {}
+    probed: list[str] = []
+    for coll, field_name in pairs[:_TENANT_DISCOVER_MAX_COLLECTIONS]:
+        with _translate_errors("Failed to inspect collections"):
+            if not db.has_collection(coll):
+                continue
+        aql = (
+            f"FOR d IN `{coll}` FILTER d.@field != null "
+            f"COLLECT v = d.@field WITH COUNT INTO n "
+            f"SORT n DESC LIMIT {_TENANT_DISCOVER_LIMIT} "
+            "RETURN {value: v, docs: n}"
+        )
+        with _translate_errors("Tenant discovery query failed"):
+            rows = list(db.aql.execute(aql, bind_vars={"field": field_name}))
+        probed.append(coll)
+        for r in rows:
+            v = r.get("value")
+            if isinstance(v, str) and v:
+                values[v] = values.get(v, 0) + int(r.get("docs") or 0)
+
+    if values:
+        tenants = [
+            {"id": v, "key": v, "name": v, "subdomain": None, "hex_id": None, "docs": cnt}
+            for v, cnt in sorted(values.items(), key=lambda kv: (-kv[1], kv[0]))
+        ]
+        log_endpoint_timing(
+            "/tenants/discover",
+            round((time.perf_counter() - t0) * 1000, 1),
+            multi_tenant=True,
+            scope="denorm",
+            tenants=len(tenants),
+            collections=len(probed),
+        )
+        return {
+            "multiTenant": True,
+            "scope": "denorm",
+            "tenantField": tenant_field,
+            "tenants": tenants,
+            "collections": probed,
+        }
+
+    # ---- 3) Single-tenant / reference-only -----------------------------
+    log_endpoint_timing(
+        "/tenants/discover",
+        round((time.perf_counter() - t0) * 1000, 1),
+        multi_tenant=bool(pairs),
+        scope="denorm" if pairs else "none",
+        tenants=0,
+    )
+    return {
+        # ``pairs`` non-empty but no values means the schema *is*
+        # tenant-scoped but the probed collections were empty — still
+        # multi-tenant, just nothing to pick yet.
+        "multiTenant": bool(pairs),
+        "scope": "denorm" if pairs else "none",
+        "tenantField": tenant_field,
+        "tenants": [],
+        "collections": probed,
+    }
+
+
+def _collection_name_for(mapping: object, entity_name: str) -> str | None:
+    """Physical collection name backing *entity_name*, or None.
+
+    Reads ``physical_mapping.entities[entity].collectionName`` from a
+    mapping bundle (object or dict) via the same extractor the
+    tenant-scope analyzer uses, so collection-name resolution can't
+    drift between classification and discovery.
+    """
+    from ...nl2cypher.tenant_scope import _physical_mapping
+
+    ents = _physical_mapping(mapping).get("entities") or {}
+    entry = ents.get(entity_name) if isinstance(ents, dict) else None
+    if isinstance(entry, dict):
+        coll = entry.get("collectionName") or entry.get("collection")
+        if isinstance(coll, str) and coll:
+            return coll
+    return None

@@ -13,7 +13,7 @@ from fastapi import Depends, HTTPException
 from ..._env import read_arango_password
 from ...api import get_cypher_profile
 from ..app import _PUBLIC_MODE, _svc_logger, app
-from ..models import ConnectRequest, ConnectResponse
+from ..models import BindTenantRequest, ConnectRequest, ConnectResponse
 from ..observability import log_endpoint_timing
 from ..security import (
     _check_connect_target,
@@ -146,6 +146,65 @@ def connect(req: ConnectRequest):
         tenant_key=tenant_key,
         is_admin=bool(req.isAdmin),
     )
+
+
+@app.post("/session/tenant")
+def bind_session_tenant(
+    req: BindTenantRequest,
+    session: _Session = Depends(_get_session),
+):
+    """Re-bind (or clear) the active session's tenant after schema
+    analysis, without re-authenticating.
+
+    The tenant binding cannot be chosen at ``/connect`` time because the
+    caller does not yet know whether the schema is multi-tenant or what
+    the tenant ids are — that's only known after introspection +
+    :func:`analyze_tenant_scope`. This endpoint lets the UI's
+    post-analysis tenant picker set the binding on the existing session;
+    Layers 4–6 then scope every subsequent query to it.
+
+    ``tenantId`` of ``None`` clears the binding (reference-only / "all
+    tenants" mode). ``tenantKey`` defaults to ``tenantId``. Acceptance
+    mirrors ``/connect``: when a ``Tenant`` collection exists the key is
+    validated against it; otherwise the id is bound verbatim (denormalised
+    schemas) and Layer 5 enforces scoping on tenant-touching reads.
+    """
+    t0 = time.perf_counter()
+    tenant_id = req.tenantId or None
+    tenant_key = (req.tenantKey if req.tenantKey is not None else tenant_id) or None
+
+    if tenant_id is not None and tenant_key is not None:
+        try:
+            has_tenant_collection = session.db.has_collection("Tenant")
+        except Exception:
+            has_tenant_collection = False
+        if has_tenant_collection:
+            try:
+                tenant_doc = session.db.collection("Tenant").get(tenant_key)
+            except Exception as exc:
+                _svc_logger.warning("tenant rebind lookup failed for key=%r: %s", tenant_key, exc)
+                tenant_doc = None
+            if tenant_doc is None:
+                log_endpoint_timing(
+                    "/session/tenant",
+                    round((time.perf_counter() - t0) * 1000, 1),
+                    status="error",
+                    error_type="unknown_tenant",
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error": "unknown_tenant", "tenantId": tenant_id, "tenantKey": tenant_key},
+                )
+
+    session.tenant_id = tenant_id
+    session.tenant_key = tenant_key
+    log_endpoint_timing(
+        "/session/tenant",
+        round((time.perf_counter() - t0) * 1000, 1),
+        tenant_id=tenant_id,
+        bound=tenant_id is not None,
+    )
+    return {"tenant_id": tenant_id, "tenant_key": tenant_key, "bound": tenant_id is not None}
 
 
 @app.post("/disconnect")

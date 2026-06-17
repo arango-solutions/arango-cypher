@@ -3,6 +3,15 @@ export interface ConnectRequest {
   database: string;
   username: string;
   password: string;
+  // Optional tenant binding. When set, the backend binds the session
+  // to this tenant so Layers 4–6 inject `FILTER <doc>.<tenantField> ==
+  // @tenantId` and refuse cross-tenant reads. Required to query
+  // tenant-scoped collections; leave empty for single-tenant /
+  // reference-only databases. `tenantKey` defaults to `tenantId` when
+  // omitted (denormalised-tenant schemas with no `Tenant` collection
+  // use the same value for both).
+  tenantId?: string;
+  tenantKey?: string;
 }
 
 export interface ConnectResponse {
@@ -374,6 +383,67 @@ export async function listTenants(
     ? `/tenants?collection=${encodeURIComponent(collection)}`
     : "/tenants";
   return request(path, { headers: authHeaders(token) });
+}
+
+// Tenant record as returned by /tenants/discover for the denormalised
+// path: `key`/`id`/`name` all carry the bare tenant id (there is no
+// `Tenant` collection to source rich fields from), plus a doc count
+// so the picker can show how much data each tenant has.
+export interface DiscoveredTenant extends TenantRecord {
+  docs?: number;
+}
+
+export interface TenantDiscoverResponse {
+  // Whether the analysed schema is tenant-scoped at all. When false the
+  // UI hides the tenant picker entirely (single-tenant / reference-only).
+  multiTenant: boolean;
+  // How tenants are enumerated: a dedicated `Tenant` collection, the
+  // distinct values of a denormalised field, or none.
+  scope: "collection" | "denorm" | "none";
+  // The denormalised tenant field (e.g. "tenantId") when scope=denorm.
+  tenantField: string | null;
+  tenants: DiscoveredTenant[];
+  // Collections actually probed for denormalised tenant values.
+  collections: string[];
+}
+
+// Discover selectable tenants *after* schema analysis. Unlike
+// `listTenants`, this POSTs the introspected mapping so the server can
+// build the tenant-scope manifest and enumerate tenants whether they
+// live in a `Tenant` collection or only as denormalised field values.
+export async function discoverTenants(
+  token: string,
+  mapping?: Record<string, unknown> | null,
+): Promise<TenantDiscoverResponse> {
+  return request("/tenants/discover", {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ mapping: mapping ?? null }),
+  });
+}
+
+export interface BindTenantResponse {
+  tenant_id: string | null;
+  tenant_key: string | null;
+  bound: boolean;
+}
+
+// Re-bind (or clear, when tenantId is null) the active session's tenant
+// without re-authenticating. Called when the user picks a tenant in the
+// post-analysis picker; Layers 4–6 then scope every subsequent query.
+export async function bindTenant(
+  token: string,
+  tenantId: string | null,
+  tenantKey?: string | null,
+): Promise<BindTenantResponse> {
+  return request("/session/tenant", {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({
+      tenantId,
+      tenantKey: tenantKey ?? tenantId,
+    }),
+  });
 }
 
 export interface NlSamplesResponse {
