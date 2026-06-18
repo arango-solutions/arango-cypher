@@ -13,7 +13,7 @@ from fastapi import Depends, HTTPException
 from ..._env import read_arango_password
 from ...api import get_cypher_profile
 from ..app import _PUBLIC_MODE, _svc_logger, app
-from ..models import BindTenantRequest, ConnectRequest, ConnectResponse
+from ..models import BindGraphRequest, BindTenantRequest, ConnectRequest, ConnectResponse
 from ..observability import log_endpoint_timing
 from ..security import (
     _check_connect_target,
@@ -205,6 +205,102 @@ def bind_session_tenant(
         bound=tenant_id is not None,
     )
     return {"tenant_id": tenant_id, "tenant_key": tenant_key, "bound": tenant_id is not None}
+
+
+@app.get("/graphs")
+def list_graphs(session: _Session = Depends(_get_session)):
+    """List the connected database's named graphs and their collections.
+
+    Used by the UI's named-graph scope selector (PRD §17). Each entry carries
+    the graph's edge definitions plus the flattened vertex / orphan collection
+    lists and a ``collectionCount`` so the picker can show "scope to N
+    collections" without a second round-trip. Returns ``{"graphs": []}`` cleanly
+    for databases with no named graphs so the UI can be mechanical about
+    show/hide.
+    """
+    t0 = time.perf_counter()
+    graphs: list[dict] = []
+    try:
+        raw = session.db.graphs()
+    except Exception as exc:
+        _svc_logger.warning("listing named graphs failed: %s", exc)
+        raw = []
+
+    for g in raw:
+        edge_defs: list[dict] = []
+        vertex: set[str] = set()
+        edges: set[str] = set()
+        for ed in g.get("edge_definitions") or g.get("edgeDefinitions") or []:
+            edge_col = ed.get("edge_collection") or ed.get("edgeCollection")
+            frm = ed.get("from_vertex_collections") or ed.get("fromVertexCollections") or []
+            to = ed.get("to_vertex_collections") or ed.get("toVertexCollections") or []
+            if edge_col:
+                edges.add(edge_col)
+            vertex.update(frm)
+            vertex.update(to)
+            edge_defs.append({"edgeCollection": edge_col, "from": list(frm), "to": list(to)})
+        orphans = list(g.get("orphan_collections") or g.get("orphanCollections") or [])
+        vertex.update(orphans)
+        graphs.append(
+            {
+                "name": g.get("name"),
+                "edgeDefinitions": edge_defs,
+                "vertexCollections": sorted(vertex),
+                "orphanCollections": sorted(orphans),
+                "collectionCount": len(vertex | edges),
+            }
+        )
+
+    graphs.sort(key=lambda gg: gg.get("name") or "")
+    log_endpoint_timing(
+        "/graphs",
+        round((time.perf_counter() - t0) * 1000, 1),
+        graphs=len(graphs),
+    )
+    return {"graphs": graphs}
+
+
+@app.post("/session/graph")
+def bind_session_graph(
+    req: BindGraphRequest,
+    session: _Session = Depends(_get_session),
+):
+    """Bind (or clear) the active session's named-graph scope (PRD §17).
+
+    ``graphName`` of ``None`` clears the binding ("all collections" mode);
+    otherwise it must name an existing graph in the connected database
+    (validated here — HTTP 404 on a miss). Once bound, every mapping-consuming
+    endpoint restricts schema introspection to that graph's collections.
+    """
+    t0 = time.perf_counter()
+    graph_name = req.graphName or None
+
+    if graph_name is not None:
+        try:
+            exists = session.db.has_graph(graph_name)
+        except Exception as exc:
+            _svc_logger.warning("graph existence probe failed for %r: %s", graph_name, exc)
+            exists = False
+        if not exists:
+            log_endpoint_timing(
+                "/session/graph",
+                round((time.perf_counter() - t0) * 1000, 1),
+                status="error",
+                error_type="unknown_graph",
+            )
+            raise HTTPException(
+                status_code=404,
+                detail={"error": "unknown_graph", "graphName": graph_name},
+            )
+
+    session.graph_name = graph_name
+    log_endpoint_timing(
+        "/session/graph",
+        round((time.perf_counter() - t0) * 1000, 1),
+        graph_name=graph_name or "",
+        bound=graph_name is not None,
+    )
+    return {"graph_name": graph_name, "bound": graph_name is not None}
 
 
 @app.post("/disconnect")

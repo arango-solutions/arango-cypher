@@ -446,6 +446,57 @@ export async function bindTenant(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Named-graph scoping (PRD §17)
+// ---------------------------------------------------------------------------
+
+export interface GraphEdgeDefinition {
+  edgeCollection: string | null;
+  from: string[];
+  to: string[];
+}
+
+export interface NamedGraph {
+  name: string;
+  edgeDefinitions: GraphEdgeDefinition[];
+  vertexCollections: string[];
+  orphanCollections: string[];
+  collectionCount: number;
+}
+
+export interface GraphsResponse {
+  graphs: NamedGraph[];
+}
+
+// List the connected database's named graphs so the UI can offer an
+// optional scope selector. Degrades to an empty list on older backends.
+export async function listGraphs(token: string): Promise<GraphsResponse> {
+  try {
+    return await request("/graphs", { headers: authHeaders(token) });
+  } catch {
+    return { graphs: [] };
+  }
+}
+
+export interface BindGraphResponse {
+  graph_name: string | null;
+  bound: boolean;
+}
+
+// Bind (or clear, when graphName is null) the active session's named-graph
+// scope. After binding, schema introspection only considers that graph's
+// collections (PRD §17).
+export async function bindGraph(
+  token: string,
+  graphName: string | null,
+): Promise<BindGraphResponse> {
+  return request("/session/graph", {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({ graphName }),
+  });
+}
+
 export interface NlSamplesResponse {
   queries: string[];
   elapsed_ms?: number;

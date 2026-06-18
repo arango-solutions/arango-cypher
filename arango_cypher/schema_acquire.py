@@ -118,6 +118,136 @@ def _cache_key(db: StandardDatabase) -> str:
         return ""
 
 
+# Characters legal in an ArangoDB document ``_key`` are a superset of what a
+# graph name can contain, but we still sanitise defensively so a graph name can
+# never break the persistent cache key (PRD §17.4 "Cache isolation").
+_GRAPH_KEY_SAFE_RE = re.compile(r"[^A-Za-z0-9_.\-]")
+
+
+def _graph_scoped_cache_key(base: str, graph_name: str | None) -> str:
+    """Return a graph-aware variant of a cache key.
+
+    ``base`` with no graph → unchanged (the unscoped "all collections" view).
+    ``base`` + ``graph_name`` → ``"<base>::graph::<sanitised-name>"`` so each
+    named graph — and the unscoped view — gets an independent cache slot and
+    they never alias one another.
+    """
+    if not graph_name:
+        return base
+    safe = _GRAPH_KEY_SAFE_RE.sub("_", graph_name)
+    return f"{base}::graph::{safe}" if base else f"graph::{safe}"
+
+
+def graph_collections(db: StandardDatabase, graph_name: str) -> tuple[set[str], set[str]]:
+    """Resolve the vertex- and edge-collection membership of a named graph.
+
+    Returns ``(vertex_collections, edge_collections)``. The vertex set is the
+    union of every edge definition's from/to vertex collections plus the graph's
+    orphan collections; the edge set is the union of every edge definition's edge
+    collection (PRD §17.1).
+
+    Raises :class:`CoreError` (code ``UNKNOWN_GRAPH``) when the graph does not
+    exist so callers can map it to an HTTP 404.
+    """
+    try:
+        exists = db.has_graph(graph_name)
+    except Exception:  # pragma: no cover - defensive: treat probe failure as missing
+        exists = False
+    if not exists:
+        raise CoreError(f"Named graph {graph_name!r} does not exist", code="UNKNOWN_GRAPH")
+
+    graph = db.graph(graph_name)
+    vertex: set[str] = set()
+    edges: set[str] = set()
+    # ``Graph.vertex_collections()`` returns the full set of vertex
+    # collections in the graph — both those referenced by an edge definition
+    # and the orphan (edge-less) ones — so it subsumes orphan enumeration.
+    try:
+        vertex.update(graph.vertex_collections() or [])
+    except Exception:  # pragma: no cover - defensive across driver versions
+        pass
+    for ed in graph.edge_definitions() or []:
+        edge_col = ed.get("edge_collection") or ed.get("edgeCollection")
+        if edge_col:
+            edges.add(edge_col)
+        # Defensive: also fold the declared from/to vertex collections in,
+        # in case a driver version returns a partial vertex_collections list.
+        for key in ("from_vertex_collections", "fromVertexCollections"):
+            vertex.update(ed.get(key) or [])
+        for key in ("to_vertex_collections", "toVertexCollections"):
+            vertex.update(ed.get(key) or [])
+    return vertex, edges
+
+
+def _filter_bundle_to_graph(
+    bundle: MappingBundle,
+    vertex_collections: set[str],
+    edge_collections: set[str],
+) -> MappingBundle:
+    """Return a copy of ``bundle`` restricted to a named graph's collections.
+
+    Filters the physical mapping's entities (by ``collectionName`` ∈
+    ``vertex_collections``) and relationships (by ``edgeCollectionName`` ∈
+    ``edge_collections``), then prunes the conceptual schema and
+    ``metadata.statistics`` to the surviving labels / relationship types so every
+    downstream consumer (resolver summary, NL prompt, transpiler) sees only the
+    scoped graph (PRD §17.4).
+    """
+    pm = bundle.physical_mapping or {}
+    pm_entities = pm.get("entities") if isinstance(pm.get("entities"), dict) else {}
+    pm_rels = pm.get("relationships") if isinstance(pm.get("relationships"), dict) else {}
+
+    kept_entities = {
+        label: emap
+        for label, emap in pm_entities.items()
+        if isinstance(emap, dict) and emap.get("collectionName") in vertex_collections
+    }
+    kept_rels = {
+        rtype: rmap
+        for rtype, rmap in pm_rels.items()
+        if isinstance(rmap, dict)
+        and (rmap.get("edgeCollectionName") or rmap.get("collectionName")) in edge_collections
+    }
+    kept_labels = set(kept_entities)
+    kept_rtypes = set(kept_rels)
+
+    new_pm = {**pm, "entities": kept_entities, "relationships": kept_rels}
+
+    cs = bundle.conceptual_schema or {}
+    new_cs = dict(cs)
+    cs_entities = cs.get("entities")
+    if isinstance(cs_entities, list):
+        new_cs["entities"] = [
+            e
+            for e in cs_entities
+            if not isinstance(e, dict) or (e.get("name") or e.get("label") or e.get("entity")) in kept_labels
+        ]
+    cs_rels = cs.get("relationships")
+    if isinstance(cs_rels, list):
+        new_cs["relationships"] = [
+            r for r in cs_rels if not isinstance(r, dict) or r.get("type") in kept_rtypes
+        ]
+
+    meta = bundle.metadata or {}
+    new_meta = dict(meta)
+    stats = meta.get("statistics")
+    if isinstance(stats, dict):
+        new_stats = dict(stats)
+        if isinstance(stats.get("entities"), dict):
+            new_stats["entities"] = {k: v for k, v in stats["entities"].items() if k in kept_labels}
+        if isinstance(stats.get("relationships"), dict):
+            new_stats["relationships"] = {k: v for k, v in stats["relationships"].items() if k in kept_rtypes}
+        new_meta["statistics"] = new_stats
+
+    return MappingBundle(
+        conceptual_schema=new_cs,
+        physical_mapping=new_pm,
+        metadata=new_meta,
+        owl_turtle=bundle.owl_turtle,
+        source=bundle.source,
+    )
+
+
 def _fallback_fingerprint(db: StandardDatabase, *, include_counts: bool) -> str:
     """Coarse local fingerprint used only when ``schema_analyzer`` is unavailable.
 
@@ -1492,6 +1622,7 @@ def get_mapping(
     cache_collection: str | None = DEFAULT_CACHE_COLLECTION,
     cache_key: str = DEFAULT_CACHE_KEY,
     force_refresh: bool = False,
+    graph_name: str | None = None,
 ) -> MappingBundle:
     """3-tier mapping acquisition with two-tier caching.
 
@@ -1532,11 +1663,17 @@ def get_mapping(
             code="INVALID_ARGUMENT",
         )
 
-    key = _cache_key(db)
+    # Graph scoping (PRD §17): each named graph — and the unscoped "all
+    # collections" view — gets an independent cache slot in both tiers so a
+    # scoped bundle never aliases the full-DB bundle.
+    key = _graph_scoped_cache_key(_cache_key(db), graph_name)
+    effective_cache_key = _graph_scoped_cache_key(cache_key, graph_name)
     shape_fp = _shape_fingerprint(db)
     full_fp = _full_fingerprint(db)
     persistent = (
-        ArangoSchemaCache(collection_name=cache_collection, cache_key=cache_key) if cache_collection else None
+        ArangoSchemaCache(collection_name=cache_collection, cache_key=effective_cache_key)
+        if cache_collection
+        else None
     )
 
     if not force_refresh and key:
@@ -1570,7 +1707,7 @@ def get_mapping(
             else:
                 logger.info("Schema shape changed for %s; full re-introspection", key)
 
-    bundle = _build_fresh_bundle(db, strategy=strategy, include_owl=include_owl)
+    bundle = _build_fresh_bundle(db, strategy=strategy, include_owl=include_owl, graph_name=graph_name)
     bundle = _safe_refresh_statistics(db, bundle)
     if key:
         _save_cache(db, key, bundle, shape_fp, full_fp, persistent)
@@ -1582,8 +1719,15 @@ def _build_fresh_bundle(
     *,
     strategy: str,
     include_owl: bool,
+    graph_name: str | None = None,
 ) -> MappingBundle:
-    """Run the chosen acquisition strategy and attach OWL Turtle if requested."""
+    """Run the chosen acquisition strategy and attach OWL Turtle if requested.
+
+    When ``graph_name`` is set the freshly-built (whole-database) bundle is
+    filtered down to that named graph's collection membership before statistics
+    are computed, so the scoped view never carries non-member collections
+    (PRD §17.4).
+    """
     if strategy == "analyzer":
         bundle = acquire_mapping_bundle(db, include_owl=include_owl)
     elif strategy == "heuristic":
@@ -1635,6 +1779,17 @@ def _build_fresh_bundle(
                 "Failed to generate OWL Turtle for heuristic mapping",
                 exc_info=True,
             )
+
+    if graph_name:
+        vertex_colls, edge_colls = graph_collections(db, graph_name)
+        bundle = _filter_bundle_to_graph(bundle, vertex_colls, edge_colls)
+        logger.info(
+            "Scoped mapping to named graph %r: %d vertex collection(s), %d edge collection(s)",
+            graph_name,
+            len(vertex_colls),
+            len(edge_colls),
+        )
+
     return bundle
 
 
@@ -1718,14 +1873,18 @@ def invalidate_cache(
     *,
     cache_collection: str | None = DEFAULT_CACHE_COLLECTION,
     cache_key: str = DEFAULT_CACHE_KEY,
+    graph_name: str | None = None,
 ) -> None:
     """Drop both in-memory and persistent caches for this database.
 
     Use after a manual schema migration or when you want the next
-    ``get_mapping()`` call to re-introspect unconditionally.
+    ``get_mapping()`` call to re-introspect unconditionally. ``graph_name``
+    scopes the invalidation to a single named-graph cache slot (PRD §17);
+    omit it to drop the unscoped "all collections" slot.
     """
-    key = _cache_key(db)
+    key = _graph_scoped_cache_key(_cache_key(db), graph_name)
     if key:
         _mapping_cache.pop(key, None)
     if cache_collection:
-        ArangoSchemaCache(collection_name=cache_collection, cache_key=cache_key).invalidate(db)
+        effective_cache_key = _graph_scoped_cache_key(cache_key, graph_name)
+        ArangoSchemaCache(collection_name=cache_collection, cache_key=effective_cache_key).invalidate(db)

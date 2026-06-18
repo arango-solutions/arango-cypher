@@ -105,6 +105,18 @@ class BindTenantRequest(BaseModel):
     tenantKey: str | None = Field(default=None, max_length=_MAX_FIELD_LENGTH)
 
 
+class BindGraphRequest(BaseModel):
+    """Body for ``POST /session/graph`` — bind (or clear) the active session's
+    named-graph scope after schema analysis (PRD §17).
+
+    ``graphName`` is ``None`` to clear the binding ("all collections" mode);
+    otherwise it must name an existing graph in the connected database (the
+    endpoint validates existence and returns HTTP 404 on a miss).
+    """
+
+    graphName: str | None = Field(default=None, max_length=_MAX_FIELD_LENGTH)
+
+
 class TranslateRequest(BaseModel):
     cypher: str = Field(..., max_length=_MAX_CYPHER_LENGTH)
     mapping: dict[str, Any] | None = None

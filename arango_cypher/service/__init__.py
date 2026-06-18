@@ -104,6 +104,7 @@ from .models import (
     _MAX_NOTE_LENGTH,
     _MAX_RETRY_HINT_LENGTH,
     _MAX_TURTLE_LENGTH,
+    BindGraphRequest,
     BindTenantRequest,
     ConnectRequest,
     ConnectResponse,
@@ -202,6 +203,7 @@ from .ui import (
 __all__ = [
     "app",
     # Re-exported request/response models
+    "BindGraphRequest",
     "BindTenantRequest",
     "ConnectRequest",
     "ConnectResponse",

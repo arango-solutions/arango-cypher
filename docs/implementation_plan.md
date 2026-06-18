@@ -908,6 +908,47 @@ All Cypher queries — whether hand-written, LLM-generated, or from NL2Cypher �
 
 ---
 
+## WP-NG: Optional named-graph scoping
+
+**PRD**: §17 (Named-graph scoping)
+**Priority**: User-requested feature; subsumes the "schema hygiene" follow-up
+**Estimate**: ~3-4 days (backend + UI + tests)
+
+### Scope
+
+Let an operator optionally restrict a session to a single ArangoDB **named
+graph** so schema introspection, the NL prompt context, transpilation, and
+execution consider only that graph's collections. No graph selected → all
+collections (unchanged default).
+
+### Slices (incremental, each independently verifiable)
+
+1. **Acquire-layer scoping.** `graph_collections(db, name)` resolver +
+   `_filter_bundle_to_graph(bundle, vertex_colls, edge_colls)`; thread
+   `graph_name` through `get_mapping` → `_build_fresh_bundle` →
+   `acquire_mapping_bundle`; graph-aware cache keys in both tiers. Tests:
+   `tests/test_schema_acquire_graph_scope.py`.
+2. **Session field.** `_Session.graph_name` slot.
+3. **Endpoints.** `GET /graphs` (list named graphs + collections);
+   `POST /session/graph` (bind/clear, validate existence). Wire
+   `session.graph_name` into the schema endpoints. Tests:
+   `tests/test_service_graphs.py`.
+4. **UI.** `GraphSelector` toolbar control populated from `/graphs`, persisted
+   per `(url, database)` in `localStorage`, re-introspects on change; default
+   "All collections".
+
+### Acceptance criteria
+
+- With no graph bound, `/schema/introspect` output is identical to today.
+- With a graph bound, only that graph's vertex/edge collections appear in the
+  introspected mapping; the schema cache for the scoped view is isolated from the
+  unscoped view.
+- `POST /session/graph` with an unknown graph returns 404; with `null` clears the
+  binding.
+- Full unit suite green; UI typecheck + build green.
+
+---
+
 ## Tracking
 
 Update this table as work packages are completed:
@@ -943,4 +984,5 @@ Update this table as work packages are completed:
 | WP-28 | Analyzer-unavailable visibility & service hardening (D2) | v0.4 | **Done** | Merged 2026-04-23 (commit `ac6eaff`, PR `feat/wp28-analyzer-visibility`). `_attach_warning` + `_bundle_needs_reacquire` helpers in `arango_cypher/schema_acquire.py`; `ANALYZER_NOT_INSTALLED` warning emitted on heuristic-fallback bundles; service refuses to start when `schema_analyzer` is unimportable unless `ARANGO_CYPHER_ALLOW_HEURISTIC=1`; analyzer-retry on cache miss; `POST /schema/force-reacquire` + `warnings` field on `/schema/introspect`; UI `SchemaWarningBanner` component dismissable per `(url, database, code)`. Closes D2. |
 | WP-29 | NL prompt label-escaping guidance + fail-closed retry (D3 + D4) | v0.4 | **Done** | Merged 2026-04-24 (commit `d4a871f`, PR `fix/wp29-nl-prompt-label-escape`). `_escape_label` helper applied in `_build_schema_summary` + `_aql.py`; backtick-escaping rule appended to `_SYSTEM_PROMPT`; `_call_llm_with_retry` fails closed with `method="validation_failed"` on retry exhaustion (mirrors Wave-4r tenant-guardrail pattern); UI renders red banner on validation-failed instead of writing invalid Cypher to the editor. Closes D3 + D4. |
 | WP-30 | Translate-on-NL-output feedback (D6) | v0.4 | **Done** | Merged 2026-04-24 (commit `618aace`, PR `feat/wp30-editor-cypher-source`). `editorCypherSource` state machine in the UI reducer; regenerate-from-NL banner action surfaces on translate failure when Cypher originated from NL; `retry_context` field on `/nl2cypher` request plumbed into `PromptBuilder.retry_context` at iteration 0. Closes D6. **Bug-fix wave §11 closeout E2E walkthrough on `ic-knowledge-graph-temporal` is the remaining manual step before the bug-fix PRD flips from OPEN → CLOSED.** |
+| WP-NG | Optional named-graph scoping | v0.4 | **In progress** | Started 2026-06-17. PRD §17. Backend acquire-layer scoping + `/graphs` + `/session/graph` + UI `GraphSelector`. |
 | WP-25 | NL→Cypher pipeline hardening (SOTA upgrades) | v0.4 | **Done** | 2026-04-20. All five sub-packages landed 2026-04-18 (WP-25.1 dynamic few-shot, WP-25.2 pre-flight entity resolution, WP-25.3 execution-grounded validation via `_api/explain`, WP-25.4 cache-friendly section ordering + `cached_tokens` + live `AnthropicProvider`, WP-25.5 eval harness + regression gate); Waves 4g–4l (2026-04-18..20) closed all post-WP-25 follow-ups: live-DB plumbing in the runner + latent bug fix (4g), `LEVENSHTEIN_DISTANCE` fuzzy scoring in `EntityResolver` (4h), baseline refreshes landing pattern_match at 93.5 % (OpenAI gpt-4o-mini) and 100 % (Anthropic claude-haiku-4-5) (4i / 4j / 4l), role-noun few-shot enrichment for hallucination_bait (4j), nightly CI workflow (4k) with two-row provider matrix (4l). End-to-end cache-hit plumbing proven against Sonnet 4.5 (99.5 % cache-read on warm call). |

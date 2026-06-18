@@ -131,6 +131,7 @@ class _Session:
         "tenant_id",
         "tenant_key",
         "is_admin",
+        "graph_name",
     )
 
     def __init__(
@@ -142,6 +143,7 @@ class _Session:
         tenant_id: str | None = None,
         tenant_key: str | None = None,
         is_admin: bool = False,
+        graph_name: str | None = None,
     ):
         self.token = token
         self.db = db
@@ -151,6 +153,9 @@ class _Session:
         self.tenant_id = tenant_id
         self.tenant_key = tenant_key
         self.is_admin = is_admin
+        # Optional named-graph scoping (PRD §17): when set, mapping-consuming
+        # endpoints restrict introspection to this graph's collections.
+        self.graph_name = graph_name
 
     def touch(self) -> None:
         self.last_used = time.time()

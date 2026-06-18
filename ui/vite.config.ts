@@ -27,6 +27,7 @@ export default defineConfig({
       "/corrections": "http://localhost:8001",
       "/tenants": "http://localhost:8001",
       "/session": "http://localhost:8001",
+      "/graphs": "http://localhost:8001",
     },
   },
   build: {

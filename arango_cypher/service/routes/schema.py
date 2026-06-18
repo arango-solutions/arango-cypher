@@ -128,7 +128,7 @@ def schema_introspect(
     db = session.db
     from ...schema_acquire import get_mapping as _get_mapping
 
-    bundle = _get_mapping(db, force_refresh=force)
+    bundle = _get_mapping(db, force_refresh=force, graph_name=getattr(session, "graph_name", None))
 
     resolver = MappingResolver(bundle)
     result = resolver.schema_summary()
@@ -218,7 +218,7 @@ def schema_statistics(
     from ...schema_acquire import get_mapping as _get_mapping
 
     t0 = time.perf_counter()
-    bundle = _get_mapping(session.db)
+    bundle = _get_mapping(session.db, graph_name=getattr(session, "graph_name", None))
     stats = _compute_stats(session.db, bundle)
     elapsed = round(time.perf_counter() - t0, 3)
     log_endpoint_timing(
@@ -331,6 +331,7 @@ def schema_invalidate_cache(
         session.db,
         cache_collection=(cache_collection or DEFAULT_CACHE_COLLECTION) if persistent else None,
         cache_key=cache_key or DEFAULT_CACHE_KEY,
+        graph_name=getattr(session, "graph_name", None),
     )
     log_endpoint_timing(
         "/schema/invalidate-cache",
@@ -360,7 +361,12 @@ def schema_force_reacquire(
 
     t0 = time.perf_counter()
     try:
-        bundle = _get_mapping(session.db, force_refresh=True, strategy="analyzer")
+        bundle = _get_mapping(
+            session.db,
+            force_refresh=True,
+            strategy="analyzer",
+            graph_name=getattr(session, "graph_name", None),
+        )
     except ImportError as exc:
         log_endpoint_timing(
             "/schema/force-reacquire",

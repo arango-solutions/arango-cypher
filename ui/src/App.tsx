@@ -10,6 +10,7 @@ import QueryHistory from "./components/QueryHistory";
 import SampleQueries from "./components/SampleQueries";
 import ClauseOutline from "./components/ClauseOutline";
 import TenantSelector from "./components/TenantSelector";
+import GraphSelector from "./components/GraphSelector";
 import SchemaWarningBanner from "./components/SchemaWarningBanner";
 import { useAppState } from "./api/store";
 import { buildCorrespondenceMap, buildReverseMap } from "./utils/correspondenceMap";
@@ -27,14 +28,20 @@ import {
   suggestNlQueries,
   discoverTenants,
   bindTenant,
+  listGraphs,
+  bindGraph,
+  introspectSchema,
+  introspectToMapping,
   isAuthError,
   type CorrectionRecord,
   type TenantContext,
   type DiscoveredTenant,
+  type NamedGraph,
 } from "./api/client";
 
 const NL_SAMPLES_SEEN_KEY = "nl_samples_seen";
 const TENANT_CTX_KEY = "tenant_context";
+const GRAPH_SCOPE_KEY = "graph_scope";
 
 function loadSeenNlSamples(): Record<string, number> {
   try {
@@ -78,6 +85,28 @@ function saveTenantContext(url: string, database: string, ctx: TenantContext | n
     const key = tenantCtxStoreKey(url, database);
     if (ctx == null) localStorage.removeItem(key);
     else localStorage.setItem(key, JSON.stringify(ctx));
+  } catch {
+    // ignore
+  }
+}
+
+function graphScopeStoreKey(url: string, database: string): string {
+  return `${GRAPH_SCOPE_KEY}::${url}::${database}`;
+}
+
+function loadGraphScope(url: string, database: string): string | null {
+  try {
+    return localStorage.getItem(graphScopeStoreKey(url, database));
+  } catch {
+    return null;
+  }
+}
+
+function saveGraphScope(url: string, database: string, graphName: string | null) {
+  try {
+    const key = graphScopeStoreKey(url, database);
+    if (graphName == null) localStorage.removeItem(key);
+    else localStorage.setItem(key, graphName);
   } catch {
     // ignore
   }
@@ -479,6 +508,16 @@ export default function App() {
     error: string | null;
   }>({ collection: null, source: null, error: null });
 
+  // Named-graph scoping (PRD §17). The catalog of named graphs in the
+  // connected database, the currently-bound scope (null = all
+  // collections), and the last fetch error. Unlike tenancy, named graphs
+  // can be listed immediately after connect (a single `db.graphs()` call),
+  // so this is fetched as soon as we have a token.
+  const [graphCatalog, setGraphCatalog] = useState<NamedGraph[]>([]);
+  const [graphsLoading, setGraphsLoading] = useState(false);
+  const [graphScope, setGraphScope] = useState<string | null>(null);
+  const [graphError, setGraphError] = useState<string | null>(null);
+
   // Discover selectable tenants once we're connected and schema
   // analysis has finished. This is deliberately a *post-analysis*
   // step: whether the schema is multi-tenant — and what the tenant
@@ -639,6 +678,117 @@ export default function App() {
     // callback identity only changes with the connection target.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [state.connection.url, state.connection.database, state.connection.token],
+  );
+
+  // Re-introspect the live session (force-refresh) so the freshly-bound
+  // named-graph scope is reflected in the mapping. Shared by the graph
+  // picker and the rehydrate path.
+  const reintrospectScoped = useCallback(
+    async (token: string) => {
+      dispatch({ type: "INTROSPECT_START" });
+      try {
+        const schema = await introspectSchema(token, 50, true);
+        const mapping = introspectToMapping(schema);
+        dispatch({
+          type: "INTROSPECT_SUCCESS",
+          mapping,
+          warnings: schema.warnings ?? [],
+        });
+      } catch (err) {
+        dispatch({
+          type: "INTROSPECT_ERROR",
+          error: err instanceof Error ? err.message : "Introspection failed",
+        });
+      }
+    },
+    // dispatch is stable (useReducer).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  // Fetch the named-graph catalog once connected, and rehydrate a saved
+  // scope for this (url, database). Named graphs are cheap to enumerate
+  // (a single `db.graphs()` call), so unlike tenant discovery this does
+  // not wait for introspection.
+  useEffect(() => {
+    const token = state.connection.token;
+    if (!token) {
+      setGraphCatalog([]);
+      setGraphScope(null);
+      setGraphError(null);
+      return;
+    }
+    let cancelled = false;
+    setGraphsLoading(true);
+    const { url, database } = state.connection;
+    (async () => {
+      try {
+        const resp = await listGraphs(token);
+        if (cancelled) return;
+        const graphs = resp.graphs || [];
+        setGraphCatalog(graphs);
+        setGraphError(null);
+        const saved = loadGraphScope(url, database);
+        if (saved && graphs.some((g) => g.name === saved)) {
+          setGraphScope(saved);
+          // The session token is fresh on every (re)connect, so a saved
+          // scope must be pushed back to the server, and the initial
+          // (connect-time) introspection ran unscoped — re-introspect.
+          try {
+            await bindGraph(token, saved);
+            if (!cancelled) await reintrospectScoped(token);
+          } catch (bindErr) {
+            console.warn("Graph rebind on rehydrate failed:", bindErr);
+          }
+        } else {
+          setGraphScope(null);
+          if (saved) saveGraphScope(url, database, null);
+        }
+      } catch (err) {
+        const status =
+          err && typeof err === "object" && "status" in err
+            ? ` (HTTP ${(err as { status: number }).status})`
+            : "";
+        const msg = `${err instanceof Error ? err.message : String(err)}${status}`;
+        console.warn("Graph catalog fetch failed:", msg);
+        if (!cancelled) {
+          setGraphCatalog([]);
+          setGraphError(msg);
+        }
+        if (isAuthError(err)) dispatch({ type: "DISCONNECT" });
+      } finally {
+        if (!cancelled) setGraphsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // dispatch is stable; reintrospectScoped identity is stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.connection.token, state.connection.url, state.connection.database]);
+
+  const handleGraphSelect = useCallback(
+    (graphName: string | null) => {
+      setGraphScope(graphName);
+      saveGraphScope(state.connection.url, state.connection.database, graphName);
+      const token = state.connection.token;
+      if (!token) return;
+      (async () => {
+        try {
+          await bindGraph(token, graphName);
+          // Re-introspect so the scoped mapping drives translation /
+          // NL / execution from here on.
+          await reintrospectScoped(token);
+        } catch (err) {
+          console.warn("Graph bind failed:", err);
+          setGraphError(err instanceof Error ? err.message : String(err));
+          if (isAuthError(err)) dispatch({ type: "DISCONNECT" });
+        }
+      })();
+    },
+    // dispatch / reintrospectScoped are stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.connection.url, state.connection.database, state.connection.token, reintrospectScoped],
   );
 
   const tenantContextRef = useRef<TenantContext | null>(null);
@@ -922,6 +1072,15 @@ export default function App() {
           />
         </div>
         <div className="flex items-center gap-2">
+          {isConnected && (
+            <GraphSelector
+              graphs={graphCatalog}
+              loading={graphsLoading}
+              selection={graphScope}
+              onSelect={handleGraphSelect}
+              error={graphError}
+            />
+          )}
           {isConnected && tenantMultiTenant && (
             <TenantSelector
               tenants={tenantCatalog}
