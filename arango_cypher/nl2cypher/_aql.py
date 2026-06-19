@@ -515,6 +515,7 @@ def _call_llm_for_aql(
     known_collections: set[str] | None = None,
     tenant_context: TenantContext | None = None,
     tenant_manifest: TenantScopeManifest | None = None,
+    cypher: str | None = None,
 ) -> NL2AqlResult | None:
     """Call the LLM to generate AQL directly, with validation and retry.
 
@@ -543,12 +544,13 @@ def _call_llm_for_aql(
         "total_tokens": 0,
         "cached_tokens": 0,
     }
+    base_user = _cypher_to_aql_user_prompt(cypher) if cypher else question
     for attempt in range(1 + max_retries):
         try:
-            user = question
+            user = base_user
             if attempt > 0 and last_error:
                 user = (
-                    f"{question}\n\n"
+                    f"{base_user}\n\n"
                     f"(Previous attempt produced invalid AQL: {last_error}. "
                     f"Please fix and try again.)"
                 )
@@ -638,6 +640,27 @@ def _collect_known_collections(bundle: MappingBundle) -> set[str]:
     return cols
 
 
+def _cypher_to_aql_user_prompt(cypher: str) -> str:
+    """Frame a failing Cypher query as a Cypher->AQL translation task.
+
+    Used by the workbench's "Generate AQL with AI" recovery action when a
+    Cypher query cannot be transpiled deterministically (e.g. it uses a
+    feature outside the v0 subset). The system prompt is unchanged — the
+    model is still the AQL expert with the full physical schema — only the
+    user message reframes the task from "answer this question" to "translate
+    this Cypher".
+    """
+    return (
+        "Translate the following openCypher query into an equivalent ArangoDB "
+        "AQL query, using ONLY the collections, edge collections, and fields "
+        "described in the schema above. Preserve the original intent: keep the "
+        "same filters, traversal directions, grouping/aggregation, ordering, "
+        "and limits. Map Cypher labels and relationship types to the matching "
+        "collections or type-discriminator fields from the schema.\n\n"
+        f"Cypher query:\n{cypher.strip()}"
+    )
+
+
 def nl_to_aql(
     question: str,
     *,
@@ -645,6 +668,7 @@ def nl_to_aql(
     llm_provider: LLMProvider | None = None,
     max_retries: int = 2,
     tenant_context: TenantContext | None = None,
+    cypher: str | None = None,
 ) -> NL2AqlResult:
     """Translate a natural language question directly to AQL.
 
@@ -662,6 +686,11 @@ def nl_to_aql(
         llm_provider: A custom LLM provider. If None, uses OpenAI
             provider from environment variables.
         max_retries: Number of retry attempts if LLM output fails validation.
+        tenant_context: Active tenant scope, if any.
+        cypher: When set, the LLM is asked to translate this Cypher query to
+            AQL instead of answering ``question``. This powers the workbench
+            fallback for Cypher that the deterministic transpiler cannot
+            handle. ``question`` may still be passed for logging/context.
     """
     if mapping is None:
         return NL2AqlResult(
@@ -702,6 +731,7 @@ def nl_to_aql(
         known_collections=known_collections,
         tenant_context=tenant_context,
         tenant_manifest=tenant_manifest,
+        cypher=cypher,
     )
     if result and result.aql:
         return result
@@ -723,7 +753,12 @@ def nl_to_aql(
     return NL2AqlResult(
         aql="",
         bind_vars={},
-        explanation="LLM could not generate valid AQL. Try rephrasing the question.",
+        explanation=(
+            "LLM could not translate this Cypher query to AQL. The query may use "
+            "a feature with no AQL equivalent in this schema."
+            if cypher
+            else "LLM could not generate valid AQL. Try rephrasing the question."
+        ),
         confidence=0.0,
         method="llm_direct",
     )

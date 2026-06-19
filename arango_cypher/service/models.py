@@ -248,6 +248,10 @@ class NL2AqlRequest(BaseModel):
     question: str = Field(..., max_length=_MAX_NL_QUESTION_LENGTH)
     mapping: dict[str, Any] | None = None
     tenant_context: TenantContextPayload | None = None
+    # When set, the LLM translates this Cypher query to AQL instead of
+    # answering ``question``. Powers the workbench "Generate AQL with AI"
+    # fallback for Cypher the deterministic transpiler cannot handle.
+    cypher: str | None = Field(default=None, max_length=_MAX_FIELD_LENGTH)
 
 
 class OwlExportRequest(BaseModel):

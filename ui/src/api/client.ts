@@ -125,26 +125,56 @@ function formatDetail(detail: unknown): string {
   if (typeof detail === "string") return detail;
   if (detail && typeof detail === "object") {
     const obj = detail as Record<string, unknown>;
+    // Prefer the human-readable `message` when present. Structured
+    // refusals (tenant scope, Layer-4 rewrite) carry a machine `error`
+    // *kind* plus a human `message`; transpiler 422s carry the message
+    // directly in `error`. Checking `message` first surfaces the useful
+    // text in both shapes instead of e.g. "tenant_scope_violation".
+    if (typeof obj.message === "string") return obj.message;
     if (typeof obj.error === "string") return obj.error;
     if (typeof obj.detail === "string") return obj.detail;
-    // ArangoDB / the AMP proxy returns `{"message": "..."}` on
-    // auth and some other errors — treat `message` the same as
-    // `detail`/`error` so it isn't rendered as raw JSON.
-    if (typeof obj.message === "string") return obj.message;
   }
   return JSON.stringify(detail);
+}
+
+// Pull a stable error `code` (e.g. UNSUPPORTED, NOT_IMPLEMENTED,
+// tenant_scope_violation) out of a structured error body so callers can
+// branch on it — most importantly to decide whether to offer the
+// "Generate AQL with AI" fallback for a non-transpilable Cypher query.
+function extractCode(detail: unknown): string | undefined {
+  if (detail && typeof detail === "object") {
+    const obj = detail as Record<string, unknown>;
+    if (typeof obj.code === "string") return obj.code;
+  }
+  return undefined;
 }
 
 export class ApiError extends Error {
   status: number;
   detail: unknown;
+  code?: string;
 
   constructor(status: number, detail: unknown) {
     super(formatDetail(detail));
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.code = extractCode(detail);
   }
+}
+
+// Codes the deterministic Cypher->AQL transpiler raises when a query uses a
+// feature outside its supported subset. These are recoverable via the
+// LLM-backed Cypher->AQL fallback (unlike syntax errors or tenant refusals).
+const TRANSPILE_FALLBACK_CODES = new Set(["UNSUPPORTED", "NOT_IMPLEMENTED"]);
+
+export function isTranspileFallbackError(err: unknown): boolean {
+  return (
+    err instanceof ApiError &&
+    err.status === 422 &&
+    !!err.code &&
+    TRANSPILE_FALLBACK_CODES.has(err.code)
+  );
 }
 
 export function isAuthError(err: unknown): boolean {
@@ -311,9 +341,13 @@ export async function nl2Aql(
   question: string,
   mapping: Record<string, unknown>,
   tenantContext?: TenantContext | null,
+  cypher?: string | null,
 ): Promise<NL2AqlResponse> {
   const body: Record<string, unknown> = { question, mapping };
   if (tenantContext) body.tenant_context = tenantContext;
+  // When set, the backend translates this Cypher to AQL instead of
+  // answering `question` — the "Generate AQL with AI" recovery path.
+  if (cypher) body.cypher = cypher;
   return request("/nl2aql", {
     method: "POST",
     body: JSON.stringify(body),

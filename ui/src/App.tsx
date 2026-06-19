@@ -33,6 +33,7 @@ import {
   introspectSchema,
   introspectToMapping,
   isAuthError,
+  isTranspileFallbackError,
   type CorrectionRecord,
   type TenantContext,
   type DiscoveredTenant,
@@ -219,6 +220,11 @@ export default function App() {
   // behaviour silently dropped an invalid query into the editor.
   const [nlError, setNlError] = useState("");
   const [nlMode, setNlMode] = useState<"cypher" | "aql">("cypher");
+  // Holds the Cypher that failed to transpile with a recoverable
+  // (UNSUPPORTED / NOT_IMPLEMENTED) error, enabling the "Generate AQL
+  // with AI" fallback button in the error banner. Null when the current
+  // error isn't a recoverable transpile failure.
+  const [aqlFallbackCypher, setAqlFallbackCypher] = useState<string | null>(null);
   const directAqlRef = useRef(false); // true when AQL came from NL→AQL direct path
   const [aqlModified, setAqlModified] = useState(false);
   const editedAqlRef = useRef("");
@@ -333,6 +339,7 @@ export default function App() {
   const handleTranslate = useCallback(async () => {
     if (!cypherRef.current.trim()) return;
     directAqlRef.current = false;
+    setAqlFallbackCypher(null);
     dispatch({ type: "TRANSLATE_START" });
     try {
       const resp = await translateCypher(makeRequest());
@@ -350,6 +357,7 @@ export default function App() {
         type: "TRANSLATE_ERROR",
         error: err instanceof Error ? err.message : String(err),
       });
+      setAqlFallbackCypher(isTranspileFallbackError(err) ? cypherRef.current : null);
       handleMaybeAuthError(err);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -357,6 +365,7 @@ export default function App() {
 
   const handleExecute = useCallback(async () => {
     if (!state.connection.token) return;
+    setAqlFallbackCypher(null);
     dispatch({ type: "EXECUTE_START" });
     try {
       if (directAqlRef.current && state.aql) {
@@ -389,6 +398,11 @@ export default function App() {
         type: "EXECUTE_ERROR",
         error: err instanceof Error ? err.message : String(err),
       });
+      // Only the Cypher->AQL path can raise a transpile error; a direct-AQL
+      // run that fails is an execution error, not a transpile one.
+      setAqlFallbackCypher(
+        !directAqlRef.current && isTranspileFallbackError(err) ? cypherRef.current : null,
+      );
       handleMaybeAuthError(err);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -966,6 +980,56 @@ export default function App() {
     handleMaybeAuthError,
   ]);
 
+  // C (transparent fallback): when a Cypher query can't be transpiled
+  // deterministically (UNSUPPORTED / NOT_IMPLEMENTED), offer a one-click
+  // recovery that asks the LLM to translate the *failing Cypher* to AQL via
+  // /nl2aql. If the Cypher came from the NL pipeline we also pass the original
+  // question as context. The result runs through /execute-aql (Layer 4/5 still
+  // apply), so this stays within the tenant-safety boundary.
+  const handleFallbackToAql = useCallback(async () => {
+    const failingCypher = aqlFallbackCypher;
+    if (!failingCypher) return;
+    setNlLoading(true);
+    setNlError("");
+    setNlInfo("");
+    try {
+      const tenantCtx = tenantContextRef.current;
+      const question =
+        state.editorCypherSource === "nl_pipeline" ? state.lastNlQuestion || "" : "";
+      const resp = await nl2Aql(question, mappingRef.current, tenantCtx, failingCypher);
+      if (resp.aql) {
+        directAqlRef.current = true;
+        dispatch({
+          type: "TRANSLATE_SUCCESS",
+          aql: resp.aql,
+          bindVars: resp.bind_vars || {},
+          warnings: [],
+          translateMs: resp.elapsed_ms,
+        });
+        dispatch({ type: "CLEAR_ERROR" });
+        setAqlFallbackCypher(null);
+        const ms = resp.elapsed_ms != null ? ` ${resp.elapsed_ms}ms` : "";
+        const tokens = resp.total_tokens ? ` ${resp.total_tokens}tok` : "";
+        setNlInfo(`AI-generated AQL from Cypher (${resp.method})${ms}${tokens}`);
+        if (autoRun) setPendingAutoRun(true);
+      } else {
+        setNlError(resp.explanation || "AI could not translate this Cypher to AQL.");
+      }
+    } catch (err) {
+      setNlError(err instanceof Error ? err.message : "AI Cypher→AQL fallback failed");
+      handleMaybeAuthError(err);
+    } finally {
+      setNlLoading(false);
+    }
+  }, [
+    aqlFallbackCypher,
+    state.editorCypherSource,
+    state.lastNlQuestion,
+    dispatch,
+    autoRun,
+    handleMaybeAuthError,
+  ]);
+
   // Chain auto-translate after NL→Cypher when enabled.
   useEffect(() => {
     if (!pendingAutoTranslate) return;
@@ -1165,8 +1229,21 @@ export default function App() {
                 {nlLoading ? "..." : "Regenerate from NL with error hint"}
               </button>
             )}
+            {aqlFallbackCypher && (
+              <button
+                onClick={handleFallbackToAql}
+                disabled={nlLoading || !isConnected}
+                title="This Cypher uses a feature the transpiler can't translate. Ask the LLM to generate equivalent AQL instead."
+                className="px-2 py-1 text-xs font-medium rounded bg-amber-600 hover:bg-amber-500 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {nlLoading ? "..." : "Generate AQL with AI"}
+              </button>
+            )}
             <button
-              onClick={() => dispatch({ type: "CLEAR_ERROR" })}
+              onClick={() => {
+                setAqlFallbackCypher(null);
+                dispatch({ type: "CLEAR_ERROR" });
+              }}
               className="text-red-400 hover:text-red-200 text-xs"
             >
               Dismiss

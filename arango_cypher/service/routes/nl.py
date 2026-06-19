@@ -257,6 +257,7 @@ def nl2aql_endpoint(
         req.question,
         mapping=req.mapping,
         tenant_context=tenant_ctx,
+        cypher=req.cypher,
     )
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
 
