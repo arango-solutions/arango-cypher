@@ -66,6 +66,10 @@ def _extract_relationship_type_and_var(*args, **kwargs):
     return _core_helper("_extract_relationship_type_and_var")(*args, **kwargs)
 
 
+def _resolve_relationship_for_pattern(*args, **kwargs):
+    return _core_helper("_resolve_relationship_for_pattern")(*args, **kwargs)
+
+
 def _infer_unlabeled_collection(*args, **kwargs):
     return _core_helper("_infer_unlabeled_collection")(*args, **kwargs)
 
@@ -254,7 +258,7 @@ def _translate_mutating_query(
         rel_type, rel_var, rel_range = _extract_relationship_type_and_var(rel_pat, default_var="r")
         direction = _relationship_direction(rel_pat)
 
-        r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
+        r_map = _resolve_relationship_for_pattern(resolver, rel_type)
         edge_key = _pick_bind_key("@edgeCollection", bind_vars)
         bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
 

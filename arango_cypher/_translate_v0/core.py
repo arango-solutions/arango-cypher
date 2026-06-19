@@ -429,7 +429,11 @@ def _emit_single_hop(
         if h.rel_type is not None:
             _warn_missing_vci(resolver, h.rel_type, h.r_map)
     elif h.r_style == "DEDICATED_COLLECTION":
-        rel_type_exprs[h.rel_var] = _aql_string_literal(h.rel_type)
+        rel_type_exprs[h.rel_var] = (
+            _aql_string_literal(h.rel_type)
+            if h.rel_type is not None
+            else _untyped_rel_type_expr(h.rel_var, resolver)
+        )
     else:
         raise CoreError(f"Unsupported relationship mapping style: {h.r_style}", code="INVALID_MAPPING")
 
@@ -605,7 +609,11 @@ def _emit_edge_type_filters_for_hop(
         if h.rel_type is not None:
             _warn_missing_vci(resolver, h.rel_type, h.r_map)
     elif h.r_style == "DEDICATED_COLLECTION":
-        rel_type_exprs[h.rel_var] = _aql_string_literal(h.rel_type)
+        rel_type_exprs[h.rel_var] = (
+            _aql_string_literal(h.rel_type)
+            if h.rel_type is not None
+            else _untyped_rel_type_expr(ref, resolver)
+        )
     else:
         raise CoreError(f"Unsupported relationship mapping style: {h.r_style}", code="INVALID_MAPPING")
 
@@ -902,7 +910,7 @@ def _translate_match_body(
         if v_labels:
             v_primary = _pick_primary_entity_label(v_labels, resolver)
             v_map = resolver.resolve_entity(_strip_label_backticks(v_primary))
-        r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
+        r_map = _resolve_relationship_for_pattern(resolver, rel_type)
         r_style = r_map.get("style")
 
         edge_collection = ""
@@ -1408,7 +1416,7 @@ def _compile_optional_with_chains(
         inner_v = _pick_fresh_var(f"{v_var}_0", forbidden_vars=forbidden_vars)
         inner_r = _pick_fresh_var(f"{rel_var}_0", forbidden_vars=forbidden_vars)
 
-        r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
+        r_map = _resolve_relationship_for_pattern(resolver, rel_type)
         edge_key = _pick_bind_key("@edgeCollection", bind_vars)
         bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
         if not isinstance(bind_vars[edge_key], str) or not bind_vars[edge_key]:
@@ -1621,7 +1629,7 @@ def _compile_match_multi_parts_from_parts(
         bound_labels[var] = primary
 
     def emit_rel_type_filter(rel_var: str, rel_type: str) -> str | None:
-        r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
+        r_map = _resolve_relationship_for_pattern(resolver, rel_type)
         r_style = r_map.get("style")
         if r_style == "GENERIC_WITH_TYPE":
             rtf_key = _pick_bind_key(f"{rel_var}TypeField", bind_vars)
@@ -1792,7 +1800,7 @@ def _compile_match_multi_parts_from_parts(
             direction = _relationship_direction(rel_pat)
 
             # Relationship mapping (edge collection + optional type filter)
-            r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
+            r_map = _resolve_relationship_for_pattern(resolver, rel_type)
             edge_key = _pick_bind_key("@edgeCollection", bind_vars)
             bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
             if not isinstance(bind_vars[edge_key], str) or not bind_vars[edge_key]:
@@ -1960,7 +1968,7 @@ def _compile_match_from_bound(
         if v_labels:
             v_primary = _pick_primary_entity_label(v_labels, resolver)
             v_map = resolver.resolve_entity(_strip_label_backticks(v_primary))
-        r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
+        r_map = _resolve_relationship_for_pattern(resolver, rel_type)
 
         edge_key = _pick_bind_key("@edgeCollection", bind_vars)
         bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
@@ -2017,7 +2025,11 @@ def _compile_match_from_bound(
         elif r_style != "DEDICATED_COLLECTION":
             raise CoreError(f"Unsupported relationship mapping style: {r_style}", code="INVALID_MAPPING")
         else:
-            rel_type_exprs[rel_cy] = _aql_string_literal(rel_type)
+            rel_type_exprs[rel_cy] = (
+                _aql_string_literal(rel_type)
+                if rel_type is not None
+                else _untyped_rel_type_expr(r_aql, resolver)
+            )
 
         for f in v_filters + r_filters:
             lines.append(f"    FILTER {f}")
@@ -2171,7 +2183,7 @@ def _compile_match_pipeline(
         if v_labels:
             v_primary = _pick_primary_entity_label(v_labels, resolver)
             v_map = resolver.resolve_entity(_strip_label_backticks(v_primary))
-        r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
+        r_map = _resolve_relationship_for_pattern(resolver, rel_type)
 
         edge_key = _pick_bind_key("@edgeCollection", bind_vars)
         bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
@@ -2584,7 +2596,16 @@ def _append_return_aggregation(
         expr = _compile_expression(expr_ctx, bind_vars)
         if var_env:
             expr = _rewrite_vars(expr, var_env)
-        var_name = alias or _infer_key(expr) or f"expr{len(compiled_nonagg) + len(compiled_agg) + 1}"
+        # Infer the COLLECT group key from the original Cypher expression
+        # (e.g. ``type(r)`` -> ``type``) rather than the compiled AQL, which
+        # for non-trivial expressions like the ``type()`` runtime discriminator
+        # would yield a malformed identifier (``...collection)``).
+        var_name = (
+            alias
+            or _infer_key(expr_txt)
+            or _infer_key(expr)
+            or f"expr{len(compiled_nonagg) + len(compiled_agg) + 1}"
+        )
         compiled_nonagg.append((var_name, expr))
 
     group_parts = ", ".join(f"{v} = {e}" for v, e in compiled_nonagg)
@@ -2784,9 +2805,7 @@ def _shared_type_field(resolver: MappingResolver | None, kind: str) -> str | Non
     fields = {
         d["typeField"]
         for d in section.values()
-        if isinstance(d, dict)
-        and d.get("style") in discriminated_styles
-        and d.get("typeField")
+        if isinstance(d, dict) and d.get("style") in discriminated_styles and d.get("typeField")
     }
     return next(iter(fields)) if len(fields) == 1 else None
 
@@ -2837,6 +2856,108 @@ def _infer_unlabeled_collection(resolver: MappingResolver) -> str:
         return primary
 
     raise CoreError("A single label is required in v0 subset", code="UNSUPPORTED")
+
+
+def _infer_unlabeled_edge_collection(resolver: MappingResolver) -> str:
+    """Resolve the single edge collection backing an untyped relationship.
+
+    An untyped relationship (``-[r]->`` / ``-[]->`` / ``-->``) does not name a
+    type, so we traverse a single edge collection with no type-discriminator
+    filter (i.e. all relationship types in that collection are returned). This
+    mirrors :func:`_infer_unlabeled_collection` for label-less nodes.
+
+    Resolution order:
+
+    1. If the mapping has exactly one edge collection, use it.
+    2. Otherwise, narrow to type-discriminated edge collections
+       (``GENERIC_WITH_TYPE`` / ``DEDICATED_COLLECTION``). When exactly one
+       remains, use it and warn that other edge collections are excluded.
+    3. Otherwise raise ``UNSUPPORTED`` — spanning multiple edge collections
+       requires naming a type (a multi-collection ``ANY`` traversal is a
+       larger change deferred for now).
+    """
+    pm = resolver.bundle.physical_mapping
+    rels = pm.get("relationships") if isinstance(pm.get("relationships"), dict) else {}
+    if not isinstance(rels, dict) or not rels:
+        raise CoreError(
+            "Untyped relationships require at least one relationship in the mapping",
+            code="UNSUPPORTED",
+        )
+
+    def _edge_collections(styles: set[str] | None) -> set[str]:
+        out: set[str] = set()
+        for m in rels.values():
+            if not isinstance(m, dict):
+                continue
+            c = m.get("edgeCollectionName") or m.get("collectionName")
+            if not (isinstance(c, str) and c):
+                continue
+            if styles is None or m.get("style") in styles:
+                out.add(c)
+        return out
+
+    all_edges = _edge_collections(None)
+    if len(all_edges) == 1:
+        return next(iter(all_edges))
+    if not all_edges:
+        raise CoreError(
+            "Untyped relationships require at least one edge collection in the mapping",
+            code="UNSUPPORTED",
+        )
+
+    core_edges = _edge_collections({"GENERIC_WITH_TYPE", "DEDICATED_COLLECTION"})
+    if len(core_edges) == 1:
+        primary = next(iter(core_edges))
+        excluded = sorted(all_edges - core_edges)
+        if excluded:
+            warnings = _active_warnings.get()
+            msg = (
+                f"Untyped relationship resolved to edge collection '{primary}'. "
+                f"Other edge collection(s) {excluded} are excluded from type-less "
+                f"matches; specify a relationship type (e.g. -[r:TYPE]->) to query them."
+            )
+            if msg not in warnings:
+                warnings.append(msg)
+        return primary
+
+    raise CoreError(
+        "Untyped relationships spanning multiple edge collections are not yet "
+        "supported; specify a relationship type, e.g. -[r:TYPE]->",
+        code="UNSUPPORTED",
+    )
+
+
+def _resolve_relationship_for_pattern(resolver: MappingResolver, rel_type: str | None) -> dict[str, Any]:
+    """Resolve a relationship pattern to a physical mapping.
+
+    For a typed relationship this delegates to
+    :meth:`MappingResolver.resolve_relationship`. For an untyped relationship
+    (``rel_type is None``) it synthesises a ``DEDICATED_COLLECTION``-style map
+    over the inferred single edge collection, so every existing style branch
+    emits a plain traversal with no type filter. ``type(r)`` is special-cased
+    separately (see :func:`_untyped_rel_type_expr`) because the literal-type
+    shortcut used for dedicated collections does not apply when no type is named.
+    """
+    if rel_type is None:
+        return {
+            "style": "DEDICATED_COLLECTION",
+            "edgeCollectionName": _infer_unlabeled_edge_collection(resolver),
+        }
+    return resolver.resolve_relationship(_strip_label_backticks(rel_type))
+
+
+def _untyped_rel_type_expr(ref: str, resolver: MappingResolver | None) -> str:
+    """AQL expression yielding the runtime type of an untyped edge.
+
+    Prefers the shared type-discriminator field (e.g. ``r.type``) when the
+    mapping defines a single one across relationships, falling back to the
+    edge's physical collection name. Mirrors the runtime ``type()`` compilation
+    used elsewhere so ``RETURN type(r)`` is correct for untyped traversals.
+    """
+    type_field = _shared_type_field(resolver, "relationships") if resolver else None
+    if type_field:
+        return f"({ref}.{type_field} != null ? {ref}.{type_field} : PARSE_IDENTIFIER({ref}._id).collection)"
+    return f"PARSE_IDENTIFIER({ref}._id).collection"
 
 
 def _compile_node_pattern_properties(
@@ -2922,14 +3043,19 @@ def _relationship_direction(rel_pat: CypherParser.OC_RelationshipPatternContext)
 
 def _extract_relationship_type_and_var(
     rel_pat: CypherParser.OC_RelationshipPatternContext, *, default_var: str
-) -> tuple[str, str, tuple[int, int]]:
-    """Returns (rel_type, rel_var, (min_hops, max_hops))."""
+) -> tuple[str | None, str, tuple[int, int]]:
+    """Returns (rel_type, rel_var, (min_hops, max_hops)).
+
+    ``rel_type`` is ``None`` for an *untyped* relationship — ``-->``,
+    ``-[]->`` or ``-[r]->`` with no ``:TYPE``. Callers resolve untyped
+    relationships via :func:`_resolve_relationship_for_pattern`, which traverses
+    the single inferred edge collection with no type filter. Multi-type edges
+    (``-[:A|B]->``) remain unsupported.
+    """
     detail = rel_pat.oC_RelationshipDetail()
     if detail is None:
-        raise CoreError(
-            "Relationship detail with a single type is required in v0 subset",
-            code="UNSUPPORTED",
-        )
+        # Bare ``-->`` / ``<--`` / ``--``: untyped, no variable, single hop.
+        return None, default_var, (1, 1)
 
     min_hops, max_hops = 1, 1
     range_ctx = detail.oC_RangeLiteral()
@@ -2937,17 +3063,23 @@ def _extract_relationship_type_and_var(
         min_hops, max_hops = _parse_range_literal(range_ctx)
 
     rel_var = (detail.oC_Variable().getText() if detail.oC_Variable() is not None else default_var).strip()
+    if not rel_var:
+        raise CoreError("Invalid relationship pattern", code="UNSUPPORTED")
+
     types_ctx = detail.oC_RelationshipTypes()
     if types_ctx is None:
-        raise CoreError("Relationship type is required in v0 subset", code="UNSUPPORTED")
+        # ``-[]->`` or ``-[r]->``: untyped relationship.
+        return None, rel_var, (min_hops, max_hops)
     types = types_ctx.oC_RelTypeName()
-    if not types or len(types) != 1:
+    if not types:
+        return None, rel_var, (min_hops, max_hops)
+    if len(types) != 1:
         raise CoreError(
             "Exactly one relationship type is required in v0 subset",
             code="UNSUPPORTED",
         )
     rel_type = types[0].getText().strip()
-    if not rel_type or not rel_var:
+    if not rel_type:
         raise CoreError("Invalid relationship pattern", code="UNSUPPORTED")
     return rel_type, rel_var, (min_hops, max_hops)
 
@@ -3096,7 +3228,7 @@ def _compile_subquery_body(
     rel_type, _, rel_range = _extract_relationship_type_and_var(rel_pat, default_var="_sq_r")
     direction = _relationship_direction(rel_pat)
 
-    r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
+    r_map = _resolve_relationship_for_pattern(resolver, rel_type)
     edge_key = _pick_bind_key("@sqEdge", bind_vars)
     bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
 
@@ -3195,7 +3327,7 @@ def _compile_pattern_predicate(
     if resolver is None:
         raise CoreError("Pattern predicates require a mapping resolver", code="UNSUPPORTED")
 
-    r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
+    r_map = _resolve_relationship_for_pattern(resolver, rel_type)
     edge_key = _pick_bind_key("@ppEdge", bind_vars)
     bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
 
@@ -3293,7 +3425,7 @@ def _compile_pattern_comprehension(
     if resolver is None:
         raise CoreError("Pattern comprehension requires a mapping resolver", code="UNSUPPORTED")
 
-    r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
+    r_map = _resolve_relationship_for_pattern(resolver, rel_type)
     edge_key = _pick_bind_key("@pcEdge", bind_vars)
     bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
 

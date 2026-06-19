@@ -26,17 +26,10 @@ from tests.helpers.mapping_fixtures import mapping_bundle_for
             "NOT_IMPLEMENTED",
             "Only MATCH is supported after WITH",
         ),
-        # Relationship detail/type guardrails
-        (
-            "MATCH (u:User)-->(v:User) RETURN u",
-            "UNSUPPORTED",
-            "Relationship detail",
-        ),
-        (
-            "MATCH (u:User)-[]->(v:User) RETURN u",
-            "UNSUPPORTED",
-            "Relationship type is required",
-        ),
+        # Relationship type guardrails. Untyped relationships (``-->`` /
+        # ``-[]->`` / ``-[r]->``) are now supported when a single edge
+        # collection can be inferred (see test_translate_untyped_rel_goldens),
+        # but multi-type edges remain unsupported.
         (
             "MATCH (u:User)-[:FOLLOWS|LIKES]->(v:User) RETURN u",
             "UNSUPPORTED",
