@@ -715,3 +715,123 @@ class TestExplainIntegration:
                 session=_FakeSession(),
             )
         assert exc_info.value.code == "EXPLAIN_FAILED"
+
+
+# ---------------------------------------------------------------------------
+# Non-tenant / single-tenant schema short-circuit (regression: Layer 5 used to
+# falsely refuse ALL edge access and traversals on schemas with no tenant
+# scoping, because edge collections have no conceptual entity — and thus no
+# GLOBAL role to short-circuit on — and _check_traversal had no global gate at
+# all. Verified live against FinReflectKG, whose manifest has zero scoped
+# entities yet every traversal was rejected with UNCONSTRAINED_TRAVERSAL.)
+# ---------------------------------------------------------------------------
+
+
+def _global_only_manifest() -> TenantScopeManifest:
+    """A schema with no tenant model: every conceptual entity is GLOBAL and
+    there is no tenant root. Edge collections (e.g. ``relations``) are not
+    mapped to any entity, so their role resolves to ``None``.
+    """
+    return TenantScopeManifest(
+        tenant_entity=None,
+        entities={
+            "ORG": EntityScope(role=EntityTenantRole.GLOBAL, denorm_field=None, reachable_from_tenant=False),
+            "PERSON": EntityScope(role=EntityTenantRole.GLOBAL, denorm_field=None, reachable_from_tenant=False),
+        },
+    )
+
+
+class TestNonTenantSchemaShortCircuit:
+    """On a schema with no tenant scoping, Layer 5 must execute (nothing to
+    isolate) instead of refusing. No sharding profile, no tenant bind."""
+
+    _unbound = _FakeSession(tenant_id=None, tenant_key=None)
+
+    def test_node_scan_on_global_collection_accepted(self) -> None:
+        plan = _wrap_plan([_singleton_node(), _enum_node(nid=2, collection="Node"), _return_node(nid=3)])
+        _call_validate(
+            plan=plan,
+            bind_vars={},
+            manifest=_global_only_manifest(),
+            sharding_profile={},
+            collection_to_entity={"Node": "ORG"},
+            session=self._unbound,
+        )
+
+    def test_edge_collection_scan_accepted(self) -> None:
+        # ``relations`` maps to no entity (role None) and has unknown layout
+        # — previously this fell through to UNCONSTRAINED_COLLECTION_SCAN.
+        plan = _wrap_plan([_singleton_node(), _enum_node(nid=2, collection="relations"), _return_node(nid=3)])
+        _call_validate(
+            plan=plan,
+            bind_vars={},
+            manifest=_global_only_manifest(),
+            sharding_profile={},
+            collection_to_entity={"Node": "ORG"},
+            session=self._unbound,
+        )
+
+    def test_edge_index_lookup_accepted(self) -> None:
+        node = {
+            "type": "IndexNode",
+            "id": 2,
+            "collection": "relations",
+            "outVariable": {"name": "e", "id": 100},
+            "condition": None,
+        }
+        plan = _wrap_plan([_singleton_node(), node, _return_node(nid=3)])
+        _call_validate(
+            plan=plan,
+            bind_vars={},
+            manifest=_global_only_manifest(),
+            sharding_profile={},
+            collection_to_entity={"Node": "ORG"},
+            session=self._unbound,
+        )
+
+    def test_anonymous_traversal_accepted(self) -> None:
+        # Real anonymous-traversal shape: top-level vertex/edge collection
+        # lists, and ``graph`` is a *list* of edge collections (not a dict).
+        node = {
+            "type": "TraversalNode",
+            "id": 2,
+            "options": {},
+            "graph": ["relations"],
+            "vertexCollections": ["Node", "relations"],
+            "edgeCollections": ["relations"],
+        }
+        plan = _wrap_plan([_singleton_node(), node, _return_node(nid=3)])
+        _call_validate(
+            plan=plan,
+            bind_vars={},
+            manifest=_global_only_manifest(),
+            sharding_profile={},
+            collection_to_entity={"Node": "ORG"},
+            session=self._unbound,
+        )
+
+    def test_tenant_scoped_traversal_still_refused(self) -> None:
+        # DEFENCE IN DEPTH: the short-circuit must NOT weaken enforcement.
+        # The same anonymous-traversal shape touching a TENANT_SCOPED
+        # collection (Employee, smartgraph) is still refused.
+        node = {
+            "type": "TraversalNode",
+            "id": 2,
+            "options": {},
+            "graph": ["TENANTOWNSEMPLOYEE"],
+            "vertexCollections": ["Tenant", "Employee"],
+            "edgeCollections": ["TENANTOWNSEMPLOYEE"],
+        }
+        plan = _wrap_plan([_singleton_node(), node, _return_node(nid=3)])
+        with pytest.raises(TenantScopeViolation) as exc_info:
+            _call_validate(plan=plan)  # default _manifest() + _sharding_profile()
+        assert exc_info.value.code == "UNCONSTRAINED_TRAVERSAL"
+
+    def test_tenant_scoped_edge_scan_still_refused(self) -> None:
+        # Employee (TENANT_SCOPED, smartgraph) scanned without a tenant
+        # predicate is still refused — the gate only spares non-touching
+        # collections.
+        plan = _wrap_plan([_singleton_node(), _enum_node(nid=2, collection="Employee"), _return_node(nid=3)])
+        with pytest.raises(TenantScopeViolation) as exc_info:
+            _call_validate(plan=plan, bind_vars={})
+        assert exc_info.value.code == "UNCONSTRAINED_COLLECTION_SCAN"

@@ -478,9 +478,15 @@ class _PlanWalker:
         kind = self._layout_kind(coll)
         if kind in {"satellite", "system"}:
             return
-        role = self._role_of_collection(coll)
-        if role is EntityTenantRole.GLOBAL and kind == "unknown":
+        # Non-tenant-touching collections (global/unknown role on a
+        # non-smartgraph layout, including edge collections absent from
+        # the conceptual entity map) hold no tenant data to isolate —
+        # Layer 5 has nothing to enforce. Mirrors the Layer 4
+        # short-circuit for schemas with no tenant model and fixes false
+        # UNCONSTRAINED_* refusals on single-tenant / non-tenant DBs.
+        if not self._is_tenant_touching_collection(coll):
             return
+        role = self._role_of_collection(coll)
         if role is EntityTenantRole.TENANT_ROOT:
             if self._has_tenant_root_predicate(node):
                 return
@@ -537,9 +543,12 @@ class _PlanWalker:
         kind = self._layout_kind(coll)
         if kind in {"satellite", "system"}:
             return
-        role = self._role_of_collection(coll)
-        if role is EntityTenantRole.GLOBAL and kind == "unknown":
+        # See _check_enumerate: skip collections with no tenant data to
+        # isolate so single-tenant / non-tenant edge indexes aren't
+        # falsely refused with INDEX_MISSING_TENANT_PREDICATE.
+        if not self._is_tenant_touching_collection(coll):
             return
+        role = self._role_of_collection(coll)
         if role is EntityTenantRole.TENANT_ROOT:
             if _index_keyed_by_tenant_key(node):
                 return
@@ -576,6 +585,16 @@ class _PlanWalker:
         digests: dict[str, str],
         session: Any,
     ) -> None:
+        # 0) If none of the collections this traversal touches are
+        # tenant-touching, there is nothing to isolate (single-tenant /
+        # non-tenant schema, or a purely global subgraph). Without this
+        # gate every traversal on a non-multi-tenant DB is falsely
+        # refused: edge collections have no conceptual entity and thus
+        # no GLOBAL role to short-circuit on, and the per-node enumerate/
+        # index checks never see the traversal's collections.
+        involved = self._traversal_all_collections(node)
+        if involved and not any(self._is_tenant_touching_collection(c) for c in involved):
+            return
         # 1) Every vertex collection in play is satellite → OK.
         vertex_colls = self._traversal_vertex_collections(node)
         if vertex_colls and all(self._layout_kind(c) == "satellite" for c in vertex_colls):
@@ -599,6 +618,25 @@ class _PlanWalker:
         )
         _log_violation(violation, session=session)
         raise violation
+
+    def _traversal_all_collections(self, node: dict[str, Any]) -> list[str]:
+        """All vertex + edge collections a TraversalNode reads.
+
+        Reads the node's top-level ``vertexCollections`` / ``edgeCollections``
+        lists (the anonymous-traversal shape real ArangoDB emits, where
+        ``node["graph"]`` is a *list* of edge collection names rather than a
+        dict) and falls back to the named-graph helper. Used only to decide
+        whether the traversal touches any tenant-scoped collection.
+        """
+        out: list[str] = []
+        for key in ("vertexCollections", "edgeCollections"):
+            v = node.get(key)
+            if isinstance(v, list):
+                out.extend(c for c in v if isinstance(c, str))
+        out.extend(self._traversal_vertex_collections(node))
+        # Deduplicate while preserving order.
+        seen: set[str] = set()
+        return [c for c in out if not (c in seen or seen.add(c))]
 
     def _traversal_vertex_collections(self, node: dict[str, Any]) -> list[str]:
         # The plan exposes the resolved vertex collections under
