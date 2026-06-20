@@ -116,6 +116,25 @@ class TestUnlabeledMatchResolution:
         assert "chunks" in msgs
         assert "Node" in msgs
 
+    def test_unlabeled_match_warning_caps_long_side_collection_list(self):
+        # Many side stores (the real-world case: aga_*, benchmark_*, chunks,
+        # schema cache). The warning must summarise, not list all of them.
+        ents = {
+            "Person": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "Person"},
+        }
+        for i in range(12):
+            ents[f"Side{i}"] = {"style": "COLLECTION", "collectionName": f"side_store_{i:02d}"}
+        out = translate("MATCH (n) RETURN count(n) AS c", mapping=_bundle(ents))
+        msg = " ".join(_warns(out))
+        assert "Node" in msg
+        assert "12 side collection(s) excluded" in msg
+        # Capped preview: 5 shown + "and 7 more", not all 12 inline.
+        assert "and 7 more" in msg
+        assert "side_store_11" not in msg
+        # Both escape hatches surfaced.
+        assert "by label" in msg
+        assert "named graph" in msg
+
     def test_single_collection_unlabeled_still_resolves(self):
         ents = {
             "Person": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "Person"},

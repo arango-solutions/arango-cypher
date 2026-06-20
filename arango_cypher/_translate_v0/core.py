@@ -2845,11 +2845,21 @@ def _infer_unlabeled_collection(resolver: MappingResolver) -> str:
         excluded = sorted(all_colls - core_colls)
         if excluded:
             warnings = _active_warnings.get()
+            # Cap the inline list so the banner doesn't become a wall of
+            # text on databases with many operational / RAG / benchmark
+            # side stores (some real schemas exclude 25+). Show a short
+            # preview plus a count, and point to the two ways to reach the
+            # excluded data: label it, or scope to a named graph.
+            preview_n = 5
+            shown = ", ".join(excluded[:preview_n])
+            more = len(excluded) - preview_n
+            listed = shown + (f", and {more} more" if more > 0 else "")
             msg = (
                 f"Unlabeled MATCH resolved to the domain collection '{primary}'. "
-                f"Side collection(s) {excluded} are excluded from label-less "
-                f"matches; reference them by label (e.g. MATCH (n:Chunk)) to "
-                f"query them directly."
+                f"{len(excluded)} side collection(s) excluded from label-less "
+                f"matches ({listed}). Reference one by label "
+                f"(e.g. MATCH (n:Chunk)) to query it directly, or scope the "
+                f"session to a named graph to drop side collections entirely."
             )
             if msg not in warnings:
                 warnings.append(msg)
