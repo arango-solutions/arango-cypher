@@ -87,6 +87,26 @@ def _utcnow_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _age_seconds(updated_at: Any) -> float | None:
+    """Seconds since an ISO-8601 ``updated_at`` string, or ``None`` if unparseable.
+
+    Used by the TTL fast-path so a freshly-written persistent cache entry can be
+    trusted without re-fingerprinting the live database (an operation that walks
+    every collection and costs seconds on a remote cluster). A missing or
+    malformed timestamp returns ``None`` so the caller falls back to the
+    authoritative fingerprint check rather than trusting an entry of unknown age.
+    """
+    if not isinstance(updated_at, str):
+        return None
+    try:
+        ts = datetime.fromisoformat(updated_at)
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - ts).total_seconds()
+
+
 class ArangoSchemaCache:
     """Collection-backed mapping cache.
 
@@ -135,6 +155,20 @@ class ArangoSchemaCache:
 
     def get(self, db: StandardDatabase) -> tuple[MappingBundle, str, str] | None:
         """Fetch cached ``(bundle, shape_fp, full_fp)`` or ``None`` on miss."""
+        hit = self.get_with_age(db)
+        if hit is None:
+            return None
+        bundle, shape_fp, full_fp, _age = hit
+        return bundle, shape_fp, full_fp
+
+    def get_with_age(self, db: StandardDatabase) -> tuple[MappingBundle, str, str, float | None] | None:
+        """Fetch ``(bundle, shape_fp, full_fp, age_seconds)`` or ``None`` on miss.
+
+        ``age_seconds`` is the time since the entry's ``updated_at`` timestamp,
+        or ``None`` when the timestamp is missing/unparseable. Callers use it to
+        decide whether the entry is fresh enough to trust without re-running the
+        (expensive) live-database fingerprint check.
+        """
         try:
             if not db.has_collection(self.collection_name):
                 return None
@@ -173,7 +207,7 @@ class ArangoSchemaCache:
                 self.cache_key,
             )
             return None
-        return bundle, shape_fp, full_fp
+        return bundle, shape_fp, full_fp, _age_seconds(doc.get("updated_at"))
 
     def set(
         self,

@@ -89,7 +89,13 @@ export default function ConnectionDialog({ connection, introspecting, dispatch }
 
       dispatch({ type: "INTROSPECT_START" });
       try {
-        const schema = await introspectSchema(resp.token, 50, true);
+        // Use the cache on connect (force=false). get_mapping compares the
+        // live shape/full fingerprints against the cached bundle and only
+        // rebuilds when the schema actually changed, so a returning user
+        // gets an instant mapping instead of paying the full analyzer cost
+        // on every reconnect. The explicit "Refresh schema" button
+        // (handleReintrospect) is the escape hatch that forces a rebuild.
+        const schema = await introspectSchema(resp.token, 50);
         const mapping = introspectToMapping(schema);
         dispatch({
           type: "INTROSPECT_SUCCESS",

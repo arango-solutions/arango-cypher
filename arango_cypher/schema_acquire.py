@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -42,7 +43,28 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from arango.database import StandardDatabase
 
-CACHE_TTL_SECONDS = 300
+
+# Schema-cache freshness TTL (seconds). Within this window a cached mapping is
+# trusted *without* re-running the live-database fingerprint check, which walks
+# every collection (counts + indexes) and costs several seconds on a remote
+# cluster — turning every cache hit into a multi-second operation and defeating
+# the cache. The TTL bounds how stale a served mapping can be; the explicit
+# "Refresh schema" path (``force_refresh=True``) bypasses it entirely for an
+# immediate rebuild. Set ``ARANGO_CYPHER_SCHEMA_CACHE_TTL_S=0`` to disable the
+# fast-path and always fingerprint (the pre-TTL behaviour).
+def _default_cache_ttl_seconds() -> int:
+    raw = os.environ.get("ARANGO_CYPHER_SCHEMA_CACHE_TTL_S")
+    if raw is None or raw.strip() == "":
+        return 300
+    try:
+        val = int(raw)
+    except ValueError:
+        logger.warning("Invalid ARANGO_CYPHER_SCHEMA_CACHE_TTL_S=%r; falling back to 300s", raw)
+        return 300
+    return max(0, val)
+
+
+CACHE_TTL_SECONDS = _default_cache_ttl_seconds()
 
 # In-memory fast path: (bundle, ts, shape_fp, full_fp) keyed by db name + cache key.
 _mapping_cache: dict[str, tuple[MappingBundle, float, str, str]] = {}
@@ -1614,6 +1636,56 @@ def enrich_bundle_with_statistics(
     )
 
 
+def _fresh_cached_bundle(
+    db: StandardDatabase,
+    key: str,
+    persistent: ArangoSchemaCache | None,
+    ttl_seconds: int,
+) -> MappingBundle | None:
+    """Return a recently-validated cached bundle without re-fingerprinting.
+
+    The TTL fast-path: if a cache entry (in-memory first, then persistent) is
+    younger than ``ttl_seconds`` and is not a degraded heuristic bundle that
+    should be rebuilt, trust it directly. This skips the ~per-collection
+    live-database fingerprint walk that otherwise runs on every
+    :func:`get_mapping` call and dominates latency on remote clusters.
+
+    Returns ``None`` when there is no entry, the entry is too old (or of unknown
+    age), or the entry is a heuristic fallback that can now be upgraded — in all
+    of which cases the caller falls back to the authoritative fingerprint check.
+
+    ``ttl_seconds == 0`` disables the fast-path entirely (always returns
+    ``None``), restoring the pre-TTL fingerprint-on-every-call behaviour.
+    """
+    if ttl_seconds <= 0 or not key:
+        return None
+
+    now = time.time()
+    mem = _mapping_cache.get(key)
+    if mem is not None:
+        bundle, ts, _shape_fp, _full_fp = mem
+        if (now - ts) < ttl_seconds and not _bundle_needs_reacquire(bundle):
+            logger.debug("Schema cache fast-path (in-memory) for %s; age %.1fs", key, now - ts)
+            return bundle
+
+    if persistent is None:
+        return None
+    hit = persistent.get_with_age(db)
+    if hit is None:
+        return None
+    bundle, shape_fp, full_fp, age = hit
+    if age is None or age >= ttl_seconds:
+        return None
+    if _bundle_needs_reacquire(bundle):
+        return None
+    # Hydrate the in-memory tier so the next call in this process skips the
+    # persistent round-trip too. Use the persisted timestamp's age to seed a
+    # consistent expiry rather than resetting the clock on every read.
+    _mapping_cache[key] = (bundle, now - age, shape_fp, full_fp)
+    logger.debug("Schema cache fast-path (persistent) for %s; age %.1fs", key, age)
+    return bundle
+
+
 def get_mapping(
     db: StandardDatabase,
     *,
@@ -1668,13 +1740,24 @@ def get_mapping(
     # scoped bundle never aliases the full-DB bundle.
     key = _graph_scoped_cache_key(_cache_key(db), graph_name)
     effective_cache_key = _graph_scoped_cache_key(cache_key, graph_name)
-    shape_fp = _shape_fingerprint(db)
-    full_fp = _full_fingerprint(db)
     persistent = (
         ArangoSchemaCache(collection_name=cache_collection, cache_key=effective_cache_key)
         if cache_collection
         else None
     )
+
+    # TTL fast-path: a recently-validated cache entry is trusted without the
+    # expensive live-database fingerprint walk (the dominant cost on remote
+    # clusters). force_refresh skips this so "Refresh schema" always rebuilds.
+    if not force_refresh:
+        fresh = _fresh_cached_bundle(db, key, persistent, CACHE_TTL_SECONDS)
+        if fresh is not None:
+            return fresh
+
+    # Slow path (cache empty, stale, or past its TTL): compute the authoritative
+    # fingerprints and validate / rebuild against them.
+    shape_fp = _shape_fingerprint(db)
+    full_fp = _full_fingerprint(db)
 
     if not force_refresh and key:
         cached = _lookup_cache(db, key, persistent)

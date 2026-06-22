@@ -694,14 +694,19 @@ export default function App() {
     [state.connection.url, state.connection.database, state.connection.token],
   );
 
-  // Re-introspect the live session (force-refresh) so the freshly-bound
-  // named-graph scope is reflected in the mapping. Shared by the graph
-  // picker and the rehydrate path.
+  // Re-introspect the live session so the freshly-bound named-graph scope
+  // is reflected in the mapping. Uses the cache (force=false): each scope
+  // has its own cache slot, so this is cheap on rehydrate. Shared by the
+  // graph picker and the rehydrate path.
   const reintrospectScoped = useCallback(
     async (token: string) => {
       dispatch({ type: "INTROSPECT_START" });
       try {
-        const schema = await introspectSchema(token, 50, true);
+        // force=false: the graph-scoped mapping has its own cache slot
+        // (keyed by graph name), so binding/rehydrating a scope hits the
+        // cache once it has been built. get_mapping still re-introspects
+        // automatically if the underlying schema shape changed.
+        const schema = await introspectSchema(token, 50);
         const mapping = introspectToMapping(schema);
         dispatch({
           type: "INTROSPECT_SUCCESS",

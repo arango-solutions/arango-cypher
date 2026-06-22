@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
 from arango_cypher.schema_acquire import (
+    CACHE_TTL_SECONDS,
     _build_heuristic_mapping,
     _cache_key,
     _mapping_cache,
@@ -379,18 +381,79 @@ class TestCaching:
 
         key = _cache_key(db)
         assert key in _mapping_cache
-        _, ts, _shape_fp, _full_fp = _mapping_cache[key]
-        # Stale shape fingerprint forces a full re-introspection, not a
-        # stats-only refresh, so bundle2 is guaranteed to be freshly built.
+        _, _ts, _shape_fp, _full_fp = _mapping_cache[key]
+        # Age the entry past the TTL so the fast-path no longer trusts it; with a
+        # stale shape fingerprint the slow path then does a full re-introspection
+        # (not a stats-only refresh), so bundle2 is guaranteed to be freshly built.
         _mapping_cache[key] = (
             bundle1,
-            ts,
+            time.time() - CACHE_TTL_SECONDS - 1,
             "stale-shape-fingerprint",
             "stale-full-fingerprint",
         )
 
         bundle2 = get_mapping(db, strategy="heuristic", cache_collection=None)
         assert bundle2 is not bundle1
+
+    def test_ttl_fast_path_skips_fingerprinting(self):
+        # Within the TTL a warm in-memory entry must be returned WITHOUT calling
+        # the (expensive, remote) fingerprint functions. This is the core fix:
+        # fingerprinting walks every collection and dominates latency on remote
+        # clusters, so a cache hit must not pay for it.
+        db = _make_mock_db(
+            doc_collections=["users"],
+            docs_by_collection={"users": [{"name": "A"}]},
+        )
+        bundle1 = get_mapping(db, strategy="heuristic", cache_collection=None)
+
+        with (
+            patch("arango_cypher.schema_acquire._shape_fingerprint") as shape,
+            patch("arango_cypher.schema_acquire._full_fingerprint") as full,
+        ):
+            bundle2 = get_mapping(db, strategy="heuristic", cache_collection=None)
+
+        assert bundle2 is bundle1
+        shape.assert_not_called()
+        full.assert_not_called()
+
+    def test_expired_entry_falls_back_to_fingerprint(self):
+        # Once the entry ages past the TTL, the authoritative fingerprint check
+        # must run again (so genuine schema changes are still detected).
+        db = _make_mock_db(
+            doc_collections=["users"],
+            docs_by_collection={"users": [{"name": "A"}]},
+        )
+        bundle1 = get_mapping(db, strategy="heuristic", cache_collection=None)
+        key = _cache_key(db)
+        bundle, _ts, shape_fp, full_fp = _mapping_cache[key]
+        _mapping_cache[key] = (bundle, time.time() - CACHE_TTL_SECONDS - 1, shape_fp, full_fp)
+
+        with patch("arango_cypher.schema_acquire._shape_fingerprint", return_value=shape_fp) as shape:
+            get_mapping(db, strategy="heuristic", cache_collection=None)
+
+        # bundle1 referenced so the assertion above stays meaningful across edits.
+        assert bundle1 is not None
+        shape.assert_called()
+
+    def test_ttl_zero_disables_fast_path(self):
+        # ARANGO_CYPHER_SCHEMA_CACHE_TTL_S=0 restores fingerprint-on-every-call.
+        db = _make_mock_db(
+            doc_collections=["users"],
+            docs_by_collection={"users": [{"name": "A"}]},
+        )
+        get_mapping(db, strategy="heuristic", cache_collection=None)
+
+        with (
+            patch("arango_cypher.schema_acquire.CACHE_TTL_SECONDS", 0),
+            patch(
+                "arango_cypher.schema_acquire._shape_fingerprint",
+                return_value="x",
+            ) as shape,
+            patch("arango_cypher.schema_acquire._full_fingerprint", return_value="y"),
+        ):
+            get_mapping(db, strategy="heuristic", cache_collection=None)
+
+        shape.assert_called()
 
     def test_cache_key_deterministic(self):
         db = _make_mock_db(doc_collections=["a", "b", "c"])

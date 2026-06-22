@@ -240,6 +240,44 @@ class TestArangoSchemaCache:
         assert full_fp == "full-a"
         assert cached.physical_mapping == bundle.physical_mapping
 
+    def test_get_with_age_reports_fresh_entry(self):
+        # A just-written entry must report a small, non-negative age so the TTL
+        # fast-path can trust it without re-fingerprinting.
+        db, _store = _make_db_with_cache_support()
+        cache = ArangoSchemaCache()
+        cache.set(
+            db,
+            bundle=_bundle_with_stats(),
+            shape_fingerprint="shape-a",
+            full_fingerprint="full-a",
+        )
+        hit = cache.get_with_age(db)
+        assert hit is not None
+        _bundle, shape_fp, full_fp, age = hit
+        assert shape_fp == "shape-a"
+        assert full_fp == "full-a"
+        assert age is not None
+        assert 0 <= age < 60
+
+    def test_get_with_age_returns_none_age_when_timestamp_missing(self):
+        # A legacy/partial document without updated_at must report age=None so
+        # the caller declines the fast-path and falls back to fingerprinting.
+        db, store = _make_db_with_cache_support()
+        col = _FakeCollection()
+        col.docs["mapping"] = {
+            "_key": "mapping",
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "shape_fingerprint": "a",
+            "full_fingerprint": "b",
+            "bundle": bundle_to_doc(_bundle_with_stats()),
+            # no updated_at
+        }
+        store[DEFAULT_CACHE_COLLECTION] = col
+        cache = ArangoSchemaCache()
+        hit = cache.get_with_age(db)
+        assert hit is not None
+        assert hit[3] is None
+
     def test_set_returns_false_when_collection_cannot_be_created(self):
         """Read-only users must not cause the caller to fail — the cache is
         a performance hint, not a source of truth.
