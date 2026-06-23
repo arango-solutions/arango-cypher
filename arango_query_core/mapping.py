@@ -54,6 +54,39 @@ class RelationshipStats:
     selectivity: float = 1.0
 
 
+# ArangoDB system attributes that lead an edge/vertex-centric index but carry
+# no user-property selectivity on their own.
+_SYSTEM_INDEX_FIELDS: frozenset[str] = frozenset({"_from", "_to", "_id", "_key", "_rev"})
+
+
+def _is_structural_vci(index_type: str, fields: tuple[str, ...]) -> bool:
+    """Detect a vertex-centric index by *structure*, not just an explicit flag.
+
+    A vertex-centric index (VCI) is an edge-collection index keyed on
+    ``_from`` or ``_to`` *plus* one or more edge properties (e.g. the
+    ``type`` discriminator for ``GENERIC_WITH_TYPE`` edges). ArangoDB does
+    **not** set a ``vci`` boolean on these — they are reported as ordinary
+    ``persistent`` indexes — so a flag-only check (``idx.get("vci")``) misses
+    real, hand-created VCIs like ``["_from", "type", "_toType"]`` and produces
+    a false "no VCI" warning while also suppressing the traversal index hint.
+
+    Returns ``True`` when:
+
+    * the index type is explicitly a VCI type, **or**
+    * it is a ``persistent``/``edge`` index whose leading field is ``_from``
+      or ``_to`` and which carries at least one non-system field (so the bare
+      ``["_from", "_to"]`` edge index does not qualify — it cannot filter on a
+      discriminator property).
+    """
+    if index_type in {"vci", "vertex_centric_index"}:
+        return True
+    if index_type not in {"persistent", "edge"}:
+        return False
+    if not fields or fields[0] not in ("_from", "_to"):
+        return False
+    return any(f not in _SYSTEM_INDEX_FIELDS for f in fields)
+
+
 @dataclass(frozen=True)
 class IndexInfo:
     """Metadata for a single index on a collection."""
@@ -415,14 +448,15 @@ class MappingResolver:
                 fields = tuple(str(f) for f in fields)
             else:
                 continue
+            index_type = str(idx.get("type", "persistent"))
             result.append(
                 IndexInfo(
-                    type=str(idx.get("type", "persistent")),
+                    type=index_type,
                     fields=fields,
                     unique=bool(idx.get("unique", False)),
                     sparse=bool(idx.get("sparse", False)),
                     name=str(idx.get("name", "")),
-                    vci=bool(idx.get("vci", False)),
+                    vci=bool(idx.get("vci", False)) or _is_structural_vci(index_type, fields),
                     deduplicate=bool(idx.get("deduplicate", False)),
                 )
             )

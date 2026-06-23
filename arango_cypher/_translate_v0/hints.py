@@ -55,7 +55,14 @@ def _build_vci_options(
         if not edge_coll:
             continue
         direction_key = h.direction.lower() if h.direction in ("OUTBOUND", "INBOUND") else "outbound"
-        idx_name = vci_indexes[0].name
+        # A traversal anchors on _from for OUTBOUND and _to for INBOUND, so
+        # prefer the VCI whose leading field matches that anchor; fall back to
+        # the first VCI when no direction-specific index exists.
+        anchor = "_to" if direction_key == "inbound" else "_from"
+        idx_name = next(
+            (idx.name for idx in vci_indexes if idx.fields and idx.fields[0] == anchor),
+            vci_indexes[0].name,
+        )
         hints.setdefault(edge_coll, {})[direction_key] = idx_name
 
     if not hints:

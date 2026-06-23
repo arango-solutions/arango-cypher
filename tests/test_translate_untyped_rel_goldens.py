@@ -214,3 +214,80 @@ class TestUntypedTraversalTranslation:
         )
         assert out.bind_vars["@edgeCollection"] == "follows"
         assert "REMOVE" in out.aql.upper()
+
+
+class TestEdgeOnlyScanFastPath:
+    """Fully-anonymous single hops (``MATCH ()-[r]->()``) must compile to a
+    direct edge-collection scan, not a vertex-anchored traversal.
+
+    Regression: a meta query like ``RETURN type(r), count(r)`` over a
+    multi-million-edge graph previously anchored on ``FOR u IN @@uCollection``
+    and traversed OUTBOUND from every node, which never returned in time.
+    Scanning the edge collection directly is equivalent (no endpoint is
+    constrained) and orders of magnitude faster.
+    """
+
+    def test_anonymous_untyped_scans_edge_collection_directly(self):
+        out = translate("MATCH ()-[r]->() RETURN r LIMIT 5", mapping=mapping_bundle_for("lpg"))
+        assert out.aql.startswith("FOR r IN @@edgeCollection")
+        assert out.bind_vars["@edgeCollection"] == "edges"
+        # No vertex anchor, no traversal of any direction.
+        assert "@uCollection" not in out.bind_vars
+        for kw in ("OUTBOUND", "INBOUND", "ANY", "@@uCollection"):
+            assert kw not in out.aql
+
+    def test_relationship_type_histogram_uses_edge_scan(self):
+        out = translate(
+            "MATCH ()-[r]->() RETURN type(r) AS t, count(r) AS c ORDER BY c DESC LIMIT 30",
+            mapping=mapping_bundle_for("lpg"),
+        )
+        assert out.aql.startswith("FOR r IN @@edgeCollection")
+        assert "COLLECT" in out.aql
+        assert "OUTBOUND" not in out.aql
+        # No spurious "29 collections excluded" warning from the node path.
+        assert _warns(out) == []
+
+    def test_anonymous_typed_scans_with_discriminator_filter(self):
+        out = translate("MATCH ()-[r:FOLLOWS]->() RETURN r LIMIT 5", mapping=mapping_bundle_for("lpg"))
+        assert out.aql.startswith("FOR r IN @@edgeCollection")
+        assert out.bind_vars["@edgeCollection"] == "edges"
+        assert out.bind_vars["relTypeValue"] == "FOLLOWS"
+        assert "FILTER r[@relTypeField] == @relTypeValue" in out.aql
+        assert "OUTBOUND" not in out.aql
+
+    def test_anonymous_any_direction_scans_edge_collection(self):
+        out = translate("MATCH ()-[r]-() RETURN r LIMIT 5", mapping=mapping_bundle_for("lpg"))
+        assert out.aql.startswith("FOR r IN @@edgeCollection")
+        assert "ANY" not in out.aql
+
+    def test_named_endpoints_still_use_traversal(self):
+        # A named (even unlabeled) endpoint may be referenced, so the
+        # vertex-anchored path is retained for correctness.
+        out = translate("MATCH (a)-[r]->(b) RETURN r LIMIT 3", mapping=mapping_bundle_for("lpg"))
+        assert "@@uCollection" in out.aql
+        assert "OUTBOUND" in out.aql
+
+    def test_labeled_endpoint_still_uses_traversal(self):
+        # A labelled endpoint constrains the pattern; keep the traversal.
+        out = translate("MATCH ()-[r:FOLLOWS]->(v:User) RETURN v LIMIT 3", mapping=mapping_bundle_for("lpg"))
+        assert "OUTBOUND" in out.aql
+
+    def test_edge_property_filter_preserved_in_scan(self):
+        out = translate(
+            "MATCH ()-[r:FOLLOWS {weight: 5}]->() RETURN r LIMIT 3",
+            mapping=mapping_bundle_for("lpg"),
+        )
+        assert out.aql.startswith("FOR r IN @@edgeCollection")
+        assert "r.weight == 5" in out.aql
+
+    def test_where_on_edge_preserved_in_scan(self):
+        out = translate(
+            "MATCH ()-[r:FOLLOWS]->() WHERE r.weight > 3 RETURN r LIMIT 3",
+            mapping=mapping_bundle_for("lpg"),
+        )
+        assert out.aql.startswith("FOR r IN @@edgeCollection")
+        assert "r.weight > 3" in out.aql
+
+    def test_named_path_still_uses_traversal(self):
+        out = translate("MATCH p = ()-[r]->() RETURN p LIMIT 3", mapping=mapping_bundle_for("lpg"))
+        assert "@@uCollection" in out.aql

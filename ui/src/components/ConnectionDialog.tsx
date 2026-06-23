@@ -177,11 +177,15 @@ export default function ConnectionDialog({ connection, introspecting, analyzing,
   if (connection.status === "connected") {
     return (
       <div className="flex items-center gap-3 text-sm">
-        <span className="flex items-center gap-1.5">
+        <span className="flex items-center gap-1.5" title={connection.url}>
           <span className="inline-block w-2 h-2 rounded-full bg-emerald-400" />
-          <span className="text-gray-400 text-xs truncate max-w-[200px]" title={connection.url}>
-            {connection.url.replace(/^https?:\/\//, "")}/
+          <span className="text-[10px] text-gray-500 uppercase tracking-wide">Cluster</span>
+          <span className="text-gray-300 text-xs truncate max-w-[220px]">
+            {connection.url.replace(/^https?:\/\//, "").replace(/\/$/, "")}
           </span>
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="text-[10px] text-gray-500 uppercase tracking-wide">Database</span>
           {connection.databases.length > 1 ? (
             <select
               value={connection.database}

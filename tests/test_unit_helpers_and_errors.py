@@ -50,7 +50,9 @@ def test_translate_v0_requires_mapping():
 @pytest.mark.parametrize(
     "cypher,code,msg_sub",
     [
-        ("RETURN 1", "UNSUPPORTED", "MATCH is required"),
+        # Bare ``RETURN <literal>`` is now supported (→ AQL ``RETURN <expr>``);
+        # only the row-stream-only forms remain rejected without a source.
+        ("RETURN *", "UNSUPPORTED", "MATCH"),
         ("MATCH (n) RETURN n", "UNSUPPORTED", "label is required"),
         (
             "MATCH (u:User)-[u:FOLLOWS]->(v:User) RETURN u",

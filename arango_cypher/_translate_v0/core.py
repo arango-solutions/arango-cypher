@@ -215,7 +215,11 @@ def _translate_single_query(
     # Gather reading clauses and return.
     reading_clauses = spq.oC_ReadingClause() or []
     if not reading_clauses:
-        raise CoreError("MATCH is required in v0 subset", code="UNSUPPORTED")
+        # A bare RETURN of constant/computed expressions (no MATCH/UNWIND/CALL)
+        # maps directly to a top-level AQL ``RETURN <expr>``.
+        from .returns import _translate_standalone_return
+
+        return _translate_standalone_return(spq, bind_vars=bind_vars)
 
     mandatory_matches: list[CypherParser.OC_MatchContext] = []
     optional_matches: list[CypherParser.OC_MatchContext] = []
@@ -708,6 +712,115 @@ def _emit_prune_and_filter(
     lines.append(f"{indent}FILTER {filter_expr}")
 
 
+def _try_compile_edge_only_scan(
+    *,
+    spq: CypherParser.OC_SinglePartQueryContext,
+    match_ctx: CypherParser.OC_MatchContext,
+    node: CypherParser.OC_NodePatternContext,
+    u_labels: list[str],
+    u_prop_filters: list[str],
+    chains: list,
+    path_var_name: str | None,
+    optional_matches: list[CypherParser.OC_MatchContext],
+    resolver: MappingResolver,
+    bind_vars: dict[str, Any],
+) -> AqlQuery | None:
+    """Compile a fully-anonymous single hop as a direct edge-collection scan.
+
+    For patterns where *both* endpoints are anonymous and unconstrained — e.g.
+    ``MATCH ()-[r]->()`` or ``MATCH ()-[r:TYPE]->()`` — the relationship is the
+    only thing the query references. Anchoring such a pattern on a vertex
+    (``FOR u IN @@uCollection FOR v, r IN 1..1 OUTBOUND u @@edge``) forces a
+    full traversal over every start node, which is catastrophically slow on
+    large graphs (e.g. meta-queries like ``RETURN type(r), count(r)`` over
+    millions of edges). Scanning the edge collection directly is equivalent
+    here because neither endpoint is filtered, and it is dramatically faster.
+
+    Returns the compiled :class:`AqlQuery` when the pattern qualifies, or
+    ``None`` to fall back to the normal vertex-anchored compilation. All
+    validation happens before ``bind_vars`` is mutated so a fall-through never
+    leaves stray (unused) bind parameters behind.
+    """
+    if path_var_name is not None:
+        return None
+    if optional_matches:
+        return None
+    if len(chains) != 1:
+        return None
+    # Start node must be anonymous and unconstrained.
+    if node.oC_Variable() is not None or u_labels or u_prop_filters:
+        return None
+
+    chain = chains[0]
+    rel_pat = chain.oC_RelationshipPattern()
+    v_node = chain.oC_NodePattern()
+    if rel_pat is None or v_node is None:
+        return None
+    # End node must also be anonymous and unconstrained.
+    if v_node.oC_Variable() is not None:
+        return None
+    _, v_labels = _extract_node_var_and_labels(v_node, default_var="v")
+    if v_labels:
+        return None
+    # Probe end-node inline properties without mutating the real bind_vars.
+    if _compile_node_pattern_properties(v_node, var="v", bind_vars={}):
+        return None
+
+    rel_type, rel_var, rel_range = _extract_relationship_type_and_var(rel_pat, default_var="r")
+    if rel_range != (1, 1):
+        return None
+
+    r_map = _resolve_relationship_for_pattern(resolver, rel_type)
+    r_style = r_map.get("style")
+    if r_style not in ("GENERIC_WITH_TYPE", "DEDICATED_COLLECTION"):
+        return None
+    edge_collection = r_map.get("edgeCollectionName") or r_map.get("collectionName") or ""
+    if not isinstance(edge_collection, str) or not edge_collection:
+        return None
+
+    # --- Committed: from here on we may mutate bind_vars. ---
+    edge_key = _pick_bind_key("@edgeCollection", bind_vars)
+    bind_vars[edge_key] = edge_collection
+
+    lines: list[str] = [f"FOR {rel_var} IN {_aql_collection_ref(edge_key)}"]
+    rel_type_exprs: dict[str, str] = {}
+
+    if r_style == "GENERIC_WITH_TYPE":
+        rtf_key = _pick_bind_key("relTypeField", bind_vars)
+        rtv_key = _pick_bind_key("relTypeValue", bind_vars)
+        bind_vars[rtf_key] = r_map.get("typeField")
+        bind_vars[rtv_key] = r_map.get("typeValue")
+        lines.append(f"  FILTER {rel_var}[@{rtf_key}] == @{rtv_key}")
+        rel_type_exprs[rel_var] = f"{rel_var}[@{rtf_key}]"
+    else:  # DEDICATED_COLLECTION
+        rel_type_exprs[rel_var] = (
+            _aql_string_literal(rel_type)
+            if rel_type is not None
+            else _untyped_rel_type_expr(rel_var, resolver)
+        )
+
+    for f in _compile_relationship_pattern_properties(rel_pat, var=rel_var, bind_vars=bind_vars):
+        lines.append(f"  FILTER {f}")
+
+    where_ctx = match_ctx.oC_Where()
+    user_filter = _compile_where(where_ctx.oC_Expression(), bind_vars) if where_ctx is not None else None
+    if user_filter:
+        lines.append(f"  FILTER {user_filter}")
+
+    ret = spq.oC_Return()
+    if ret is None:
+        raise CoreError("RETURN is required in v0 subset", code="UNSUPPORTED")
+    _append_return(
+        ret.oC_ProjectionBody(),
+        lines=lines,
+        bind_vars=bind_vars,
+        var_env={},
+        rel_type_exprs=rel_type_exprs,
+    )
+    lines = _eliminate_dead_lets(lines)
+    return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
+
+
 def _translate_match_body(
     match_ctxs: list[CypherParser.OC_MatchContext],
     *,
@@ -841,6 +954,24 @@ def _translate_match_body(
     # Case B: relationship pattern (1+ hops)
     u_var, u_labels = _extract_node_var_and_labels(node, default_var="u")
     u_prop_filters = _compile_node_pattern_properties(node, var=u_var, bind_vars=bind_vars)
+
+    # Fast path: a fully-anonymous single hop (e.g. ``MATCH ()-[r]->()``) is an
+    # edge-only query. Scan the edge collection directly instead of traversing
+    # from every start node — orders of magnitude faster on large graphs.
+    edge_only = _try_compile_edge_only_scan(
+        spq=spq,
+        match_ctx=match_ctx,
+        node=node,
+        u_labels=u_labels,
+        u_prop_filters=u_prop_filters,
+        chains=chains,
+        path_var_name=path_var_name,
+        optional_matches=optional_matches,
+        resolver=resolver,
+        bind_vars=bind_vars,
+    )
+    if edge_only is not None:
+        return edge_only
 
     u_filters: list[str] = []
     if not u_labels:
