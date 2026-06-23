@@ -455,6 +455,35 @@ class TestCaching:
 
         shape.assert_called()
 
+    def test_read_cached_returns_mem_entry_without_building(self):
+        # read_cached_mapping must serve a warm in-memory entry and never call
+        # the analyzer or fingerprint functions (the catalog request-path read).
+        from arango_cypher.schema_acquire import _cache_key, read_cached_mapping
+
+        db = _make_mock_db(
+            doc_collections=["users"],
+            docs_by_collection={"users": [{"name": "A"}]},
+        )
+        bundle1 = get_mapping(db, strategy="heuristic", cache_collection=None)
+        assert _cache_key(db) in _mapping_cache
+
+        with (
+            patch("arango_cypher.schema_acquire._shape_fingerprint") as shape,
+            patch("arango_cypher.schema_acquire._build_fresh_bundle") as build,
+        ):
+            served = read_cached_mapping(db, cache_collection=None)
+
+        assert served is bundle1
+        shape.assert_not_called()
+        build.assert_not_called()
+
+    def test_read_cached_returns_none_on_miss(self):
+        # No cache entry and persistence disabled -> a true catalog miss.
+        from arango_cypher.schema_acquire import read_cached_mapping
+
+        db = _make_mock_db(doc_collections=["users"])
+        assert read_cached_mapping(db, cache_collection=None) is None
+
     def test_cache_key_deterministic(self):
         db = _make_mock_db(doc_collections=["a", "b", "c"])
         db.name = "testdb"

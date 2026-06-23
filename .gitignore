@@ -54,6 +54,11 @@ htmlcov/
 ui/node_modules/
 ui/dist/
 
+# Schema-catalog sidecar registry (may carry connection details). The
+# committed configs/catalog.example.yml is the template; the real file stays
+# local. Secrets must still come from env vars, never this file.
+configs/catalog.yml
+
 # Local runtime state (corrections learning SQLite DB + WAL)
 corrections.db
 corrections.db-shm

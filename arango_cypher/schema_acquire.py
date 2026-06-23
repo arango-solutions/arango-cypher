@@ -1686,6 +1686,57 @@ def _fresh_cached_bundle(
     return bundle
 
 
+def read_cached_mapping(
+    db: StandardDatabase,
+    *,
+    cache_collection: str | None = DEFAULT_CACHE_COLLECTION,
+    cache_key: str = DEFAULT_CACHE_KEY,
+    graph_name: str | None = None,
+) -> MappingBundle | None:
+    """Read a mapping from the catalog (cache) only — never build or fingerprint.
+
+    This is the request-path accessor for the catalog architecture: schema
+    analysis is performed out of band by the sidecar
+    (:mod:`arango_cypher.catalog`), which writes the analyzed bundle to the
+    shared persistent cache. The service serves whatever the catalog holds, with
+    freshness owned by the sidecar's schedule — so a user request never triggers
+    the expensive analyzer/fingerprint work that made introspection block for
+    tens of seconds.
+
+    Returns the cached :class:`MappingBundle` (in-memory tier first, then the
+    persistent cache), or ``None`` on a true miss (the database has not been
+    analyzed yet). Callers translate ``None`` into a "schema pending" response
+    and may kick off an out-of-band warm.
+
+    Unlike :func:`get_mapping`, this never computes a fingerprint, never calls
+    the analyzer, and never writes a freshly built bundle — it is read-only and
+    cheap (worst case: one persistent-cache document read).
+    """
+    key = _graph_scoped_cache_key(_cache_key(db), graph_name)
+    if not key:
+        return None
+
+    mem = _mapping_cache.get(key)
+    if mem is not None:
+        bundle, _ts, _shape_fp, _full_fp = mem
+        return bundle
+
+    if not cache_collection:
+        return None
+    effective_cache_key = _graph_scoped_cache_key(cache_key, graph_name)
+    persistent = ArangoSchemaCache(
+        collection_name=cache_collection, cache_key=effective_cache_key
+    )
+    hit = persistent.get(db)
+    if hit is None:
+        return None
+    bundle, shape_fp, full_fp = hit
+    # Hydrate the in-memory tier so subsequent reads in this process skip the
+    # persistent round-trip entirely.
+    _mapping_cache[key] = (bundle, time.time(), shape_fp, full_fp)
+    return bundle
+
+
 def get_mapping(
     db: StandardDatabase,
     *,

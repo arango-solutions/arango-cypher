@@ -103,42 +103,19 @@ def _infer_edge_endpoints(
         return None, None
 
 
-@app.get("/schema/introspect")
-def schema_introspect(
-    sample: int = 50,
-    force: bool = False,
-    _: None = Depends(_check_compute_rate_limit),
-    session: _Session = Depends(_get_session),
-):
-    """Discover collections, edge collections, and their properties from the connected database.
+def _summarize_bundle(db: StandardDatabase, bundle: Any) -> dict[str, Any]:
+    """Build the introspect summary (entities/relationships) from a bundle.
 
-    Delegates to ``get_mapping(db)`` which uses the 3-tier strategy:
-    analyzer first (all schema types), heuristic fallback if the analyzer
-    is not installed.
-
-    Pass ``force=true`` to bypass *both* mapping cache tiers (in-process
-    and persistent ``_schemas`` collection). Previously this only
-    popped the in-process tier, which meant a stale entry in the
-    persistent cache would keep getting served forever — the user's
-    only recourse was to manually call ``/schema/invalidate-cache``,
-    which is non-discoverable. Forwarding ``force_refresh=True`` to
-    ``get_mapping`` makes the flag do what its name says.
+    For PG schemas the analyzer may leave a relationship's domain/range blank;
+    we backfill those by sampling ``_from``/``_to`` on the edge collection.
     """
-    t0 = time.perf_counter()
-    db = session.db
-    from ...schema_acquire import get_mapping as _get_mapping
-
-    bundle = _get_mapping(db, force_refresh=force, graph_name=getattr(session, "graph_name", None))
-
     resolver = MappingResolver(bundle)
     result = resolver.schema_summary()
 
-    # Build collection→label lookup from entities
     col_to_label: dict[str, str] = {}
     for ent in result.get("entities", []):
         col_to_label[ent.get("collection", "")] = ent.get("label", "")
 
-    # For PG schemas, fill in missing domain/range by sampling _from/_to
     for rel in result.get("relationships", []):
         if rel.get("domain") and rel.get("range"):
             continue
@@ -152,10 +129,84 @@ def schema_introspect(
             rel["range"] = col_to_label.get(to_col, to_col)
 
     result["warnings"] = (bundle.metadata or {}).get("warnings") or []
+    return result
+
+
+@app.get("/schema/introspect")
+def schema_introspect(
+    sample: int = 50,
+    force: bool = False,
+    _: None = Depends(_check_compute_rate_limit),
+    session: _Session = Depends(_get_session),
+):
+    """Serve the analyzed schema for the connected database from the catalog.
+
+    Catalog model (PRD §"Schema catalog sidecar"): schema analysis is performed
+    out of band by the sidecar (:mod:`arango_cypher.catalog`) and persisted to
+    the shared cache. This endpoint is **read-only by default** — it returns
+    whatever the catalog holds without ever running the analyzer or a fingerprint
+    walk on the request path, so it responds in milliseconds instead of blocking
+    for tens of seconds.
+
+    Responses carry a ``status``:
+
+    * ``"ready"`` — a mapping was served (``entities`` / ``relationships``
+      populated).
+    * ``"pending"`` — the database has not been analyzed yet; an out-of-band
+      warm has been kicked off and the client should retry shortly. Returned
+      with empty ``entities`` / ``relationships`` so the UI can show a
+      "preparing schema" state instead of an error.
+
+    Pass ``force=true`` ("Refresh schema" / "Analyze now") to rebuild
+    synchronously, bypassing the catalog. This is the opt-in slow path for power
+    users who need an immediate refresh.
+    """
+    t0 = time.perf_counter()
+    db = session.db
+    graph_name = getattr(session, "graph_name", None)
+    from ...schema_acquire import get_mapping as _get_mapping
+    from ...schema_acquire import read_cached_mapping as _read_cached
+
+    if force:
+        bundle = _get_mapping(db, force_refresh=True, graph_name=graph_name)
+    else:
+        bundle = _read_cached(db, graph_name=graph_name)
+
+    if bundle is None:
+        # True catalog miss: the sidecar has not analyzed this database yet.
+        # Tell the client to retry (the sidecar will populate it) or to force an
+        # immediate analysis via "Refresh schema". We deliberately do not analyze
+        # inline here — keeping the request path free of the expensive analyzer
+        # is the whole point of the catalog model.
+        log_endpoint_timing(
+            "/schema/introspect",
+            round((time.perf_counter() - t0) * 1000, 1),
+            force=force,
+            status="pending",
+        )
+        return {
+            "status": "pending",
+            "entities": [],
+            "relationships": [],
+            "warnings": [
+                {
+                    "code": "SCHEMA_PENDING",
+                    "message": (
+                        "Schema for this database has not been analyzed yet. The "
+                        "catalog sidecar will populate it shortly — retry in a "
+                        'moment, or use "Refresh schema" to analyze it now.'
+                    ),
+                }
+            ],
+        }
+
+    result = _summarize_bundle(db, bundle)
+    result["status"] = "ready"
     log_endpoint_timing(
         "/schema/introspect",
         round((time.perf_counter() - t0) * 1000, 1),
         force=force,
+        status="ready",
         entities=len(result.get("entities") or []),
         relationships=len(result.get("relationships") or []),
         warnings=len(result["warnings"]),
@@ -215,18 +266,31 @@ def schema_statistics(
     fan-out/fan-in metrics, cardinality patterns, and selectivity ratios.
     """
     from ...schema_acquire import compute_statistics as _compute_stats
-    from ...schema_acquire import get_mapping as _get_mapping
+    from ...schema_acquire import read_cached_mapping as _read_cached
 
     t0 = time.perf_counter()
-    bundle = _get_mapping(session.db, graph_name=getattr(session, "graph_name", None))
+    graph_name = getattr(session, "graph_name", None)
+    # Catalog model: read the analyzed mapping from the cache rather than build
+    # it inline. A miss returns pending so this never blocks on the analyzer;
+    # the sidecar (or "Refresh schema") populates the catalog.
+    bundle = _read_cached(session.db, graph_name=graph_name)
+    if bundle is None:
+        log_endpoint_timing(
+            "/schema/statistics",
+            round((time.perf_counter() - t0) * 1000, 1),
+            status="pending",
+        )
+        return {"status": "pending", "statistics": {}, "elapsed_seconds": 0.0}
+
     stats = _compute_stats(session.db, bundle)
     elapsed = round(time.perf_counter() - t0, 3)
     log_endpoint_timing(
         "/schema/statistics",
         round(elapsed * 1000, 1),
+        status="ready",
         elapsed_seconds=elapsed,
     )
-    return {"statistics": stats, "elapsed_seconds": elapsed}
+    return {"status": "ready", "statistics": stats, "elapsed_seconds": elapsed}
 
 
 @app.get("/schema/status")

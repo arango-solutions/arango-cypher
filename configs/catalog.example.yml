@@ -1,0 +1,39 @@
+# Schema-catalog sidecar registry.
+#
+# Copy to configs/catalog.yml and edit. The sidecar
+# (scripts/catalog_sync.py) keeps the analyzed schema mapping for each listed
+# database warm in that database's shared `arango_cypher_schema_cache`
+# collection, so the FastAPI service never runs schema analysis on the request
+# path.
+#
+# SECURITY: never put passwords in this file. Reference an environment variable
+# with `password_env` (and optionally `username_env`). A referenced-but-unset
+# variable is a hard error so a misconfiguration fails loudly.
+#
+# If this file is absent, the sidecar falls back to a single entry built from
+# the standard ARANGO_URL / ARANGO_DB / ARANGO_USER / ARANGO_PASSWORD vars.
+
+sync:
+  # How often a long-running sidecar re-analyzes every entry, in seconds.
+  # Staleness is bounded by this interval; "Refresh schema" in the UI still
+  # forces an immediate per-database rebuild for power users.
+  interval_seconds: 1800   # 30 minutes
+
+databases:
+  - name: FinReflectKG
+    url: https://your-host.example/
+    database: FinReflectKG
+    username: root                 # or: username_env: ARANGO_USER
+    password_env: ARANGO_PASSWORD  # reads the password from $ARANGO_PASSWORD
+    verify_ssl: true
+    # Optional: also keep these named-graph scopes warm so scoped sessions
+    # (GraphSelector) are served from cache too. Omit or leave empty for none.
+    graphs:
+      - FinReflectKG
+
+  # - name: another-db
+  #   url: https://other-host.example/
+  #   database: analytics
+  #   username_env: ANALYTICS_DB_USER
+  #   password_env: ANALYTICS_DB_PASSWORD
+  #   verify_ssl: true

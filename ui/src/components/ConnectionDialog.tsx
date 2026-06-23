@@ -4,7 +4,9 @@ import {
   disconnect,
   getConnectDefaults,
   introspectSchema,
+  introspectSchemaUntilReady,
   introspectToMapping,
+  SCHEMA_PENDING_MESSAGE,
   type ConnectDefaults,
 } from "../api/client";
 import type { Action, ConnectionState } from "../api/store";
@@ -89,19 +91,23 @@ export default function ConnectionDialog({ connection, introspecting, dispatch }
 
       dispatch({ type: "INTROSPECT_START" });
       try {
-        // Use the cache on connect (force=false). get_mapping compares the
-        // live shape/full fingerprints against the cached bundle and only
-        // rebuilds when the schema actually changed, so a returning user
-        // gets an instant mapping instead of paying the full analyzer cost
-        // on every reconnect. The explicit "Refresh schema" button
-        // (handleReintrospect) is the escape hatch that forces a rebuild.
-        const schema = await introspectSchema(resp.token, 50);
-        const mapping = introspectToMapping(schema);
-        dispatch({
-          type: "INTROSPECT_SUCCESS",
-          mapping,
-          warnings: schema.warnings ?? [],
-        });
+        // Catalog model: read the analyzed schema from the cache (no force).
+        // The sidecar keeps registered databases warm, so this returns in
+        // milliseconds. A freshly-seen database may report "pending" while a
+        // background warm runs — poll briefly before giving up. The explicit
+        // "Refresh schema" button (handleReintrospect) forces a synchronous
+        // rebuild for an immediate refresh.
+        const schema = await introspectSchemaUntilReady(resp.token);
+        if (schema.status === "pending") {
+          dispatch({ type: "INTROSPECT_ERROR", error: SCHEMA_PENDING_MESSAGE });
+        } else {
+          const mapping = introspectToMapping(schema);
+          dispatch({
+            type: "INTROSPECT_SUCCESS",
+            mapping,
+            warnings: schema.warnings ?? [],
+          });
+        }
       } catch (introspectErr) {
         console.warn("Schema introspection failed:", introspectErr);
         dispatch({ type: "INTROSPECT_ERROR", error: introspectErr instanceof Error ? introspectErr.message : "Introspection failed" });

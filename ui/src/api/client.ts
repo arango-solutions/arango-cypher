@@ -596,6 +596,10 @@ export interface IntrospectResult {
   entities: IntrospectEntity[];
   relationships: IntrospectRelationship[];
   warnings?: SchemaWarning[];
+  // Catalog model: "ready" when a mapping was served; "pending" when the
+  // database has not been analyzed yet (the sidecar/background warm is working
+  // on it). Absent on older servers — treat undefined as "ready".
+  status?: "ready" | "pending";
 }
 
 export async function introspectSchema(
@@ -608,6 +612,46 @@ export async function introspectSchema(
   return request(`/schema/introspect?${params}`, {
     headers: authHeaders(token),
   });
+}
+
+export const SCHEMA_PENDING_MESSAGE =
+  "Schema is being analyzed in the background and isn't ready yet. " +
+  'Retry in a moment, or click "Refresh schema" to analyze it now.';
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Introspect, polling while the catalog reports "pending".
+ *
+ * Schema analysis runs out of band (catalog sidecar), so a freshly-seen
+ * database may report `status: "pending"` until the background warm finishes.
+ * This polls with a short backoff until the schema is ready or `maxAttempts`
+ * is exhausted, invoking `onPending` so the UI can show a "preparing" notice.
+ * The final result is returned regardless — callers should check `status` and
+ * surface a retry affordance if it is still "pending".
+ */
+export async function introspectSchemaUntilReady(
+  token: string,
+  opts: {
+    sample?: number;
+    force?: boolean;
+    maxAttempts?: number;
+    delayMs?: number;
+    onPending?: (attempt: number) => void;
+  } = {},
+): Promise<IntrospectResult> {
+  const { sample = 50, force = false, maxAttempts = 8, delayMs = 2000, onPending } = opts;
+  let last: IntrospectResult = await introspectSchema(token, sample, force);
+  let attempt = 1;
+  while (last.status === "pending" && attempt < maxAttempts) {
+    onPending?.(attempt);
+    await sleep(delayMs);
+    // Subsequent polls never force — we want to pick up the background warm's
+    // result from the catalog, not trigger another synchronous rebuild.
+    last = await introspectSchema(token, sample, false);
+    attempt += 1;
+  }
+  return last;
 }
 
 export interface ForceReacquireResult {

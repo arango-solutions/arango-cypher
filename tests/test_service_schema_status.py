@@ -359,15 +359,18 @@ class TestIntrospectWarnings:
             source=MappingSource(kind="heuristic"),
         )
 
+        # Catalog model: introspect reads the served bundle via
+        # read_cached_mapping (not get_mapping) on the non-force path.
         monkeypatch.setattr(
             schema_acquire,
-            "get_mapping",
+            "read_cached_mapping",
             lambda db, **kwargs: warned_bundle,
         )
 
         resp = client.get("/schema/introspect")
         assert resp.status_code == 200
         body = resp.json()
+        assert body["status"] == "ready"
         assert "warnings" in body
         assert body["warnings"] == [
             {
@@ -402,13 +405,36 @@ class TestIntrospectWarnings:
 
         monkeypatch.setattr(
             schema_acquire,
-            "get_mapping",
+            "read_cached_mapping",
             lambda db, **kwargs: clean_bundle,
         )
 
         resp = client.get("/schema/introspect")
         assert resp.status_code == 200
-        assert resp.json()["warnings"] == []
+        body = resp.json()
+        assert body["status"] == "ready"
+        assert body["warnings"] == []
+
+    def test_introspect_pending_when_catalog_miss(self, fake_session_factory, monkeypatch):
+        """A catalog miss returns status=pending, an empty schema, and a
+        SCHEMA_PENDING warning — without analyzing inline."""
+        from arango_cypher import schema_acquire
+
+        fake_session_factory(
+            collections=[{"name": "users", "type": 2}],
+            counts={"users": 3},
+            indexes={"users": []},
+        )
+
+        monkeypatch.setattr(schema_acquire, "read_cached_mapping", lambda db, **kwargs: None)
+
+        resp = client.get("/schema/introspect")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "pending"
+        assert body["entities"] == []
+        assert body["relationships"] == []
+        assert body["warnings"][0]["code"] == "SCHEMA_PENDING"
 
 
 # ---------------------------------------------------------------------------

@@ -30,8 +30,9 @@ import {
   bindTenant,
   listGraphs,
   bindGraph,
-  introspectSchema,
+  introspectSchemaUntilReady,
   introspectToMapping,
+  SCHEMA_PENDING_MESSAGE,
   isAuthError,
   isTranspileFallbackError,
   type CorrectionRecord,
@@ -702,17 +703,20 @@ export default function App() {
     async (token: string) => {
       dispatch({ type: "INTROSPECT_START" });
       try {
-        // force=false: the graph-scoped mapping has its own cache slot
-        // (keyed by graph name), so binding/rehydrating a scope hits the
-        // cache once it has been built. get_mapping still re-introspects
-        // automatically if the underlying schema shape changed.
-        const schema = await introspectSchema(token, 50);
-        const mapping = introspectToMapping(schema);
-        dispatch({
-          type: "INTROSPECT_SUCCESS",
-          mapping,
-          warnings: schema.warnings ?? [],
-        });
+        // Catalog model (read-only): the graph-scoped mapping has its own cache
+        // slot (keyed by graph name) kept warm by the sidecar. A first-seen
+        // scope may report "pending" while a background warm runs — poll briefly.
+        const schema = await introspectSchemaUntilReady(token);
+        if (schema.status === "pending") {
+          dispatch({ type: "INTROSPECT_ERROR", error: SCHEMA_PENDING_MESSAGE });
+        } else {
+          const mapping = introspectToMapping(schema);
+          dispatch({
+            type: "INTROSPECT_SUCCESS",
+            mapping,
+            warnings: schema.warnings ?? [],
+          });
+        }
       } catch (err) {
         dispatch({
           type: "INTROSPECT_ERROR",
