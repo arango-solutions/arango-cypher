@@ -3792,11 +3792,51 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
             if len(list_ops) != 1:
                 raise CoreError("Multiple list operators not supported in v0", code="UNSUPPORTED")
             lop = list_ops[0]
-            # Only support "expr IN listExpr"
+            # "expr IN listExpr"
             if lop.IN() is not None:
                 right = _compile_expression(lop.oC_PropertyOrLabelsExpression(), bind_vars)
                 return f"({base} IN {right})"
-            raise CoreError("Only IN operator is supported in v0", code="UNSUPPORTED")
+            # List subscript "expr[i]" and slice "expr[i..j]" / "[i..]" / "[..j]".
+            # The grammar's list operator covers both; distinguish by the ".."
+            # token in the operator's own text (it never includes the base).
+            lop_text = lop.getText()
+            exprs = lop.oC_Expression() or []
+            if ".." in lop_text:
+                # Half-open slice, Cypher semantics: [start, end). Map to AQL
+                # SLICE(array, start, length). Bounds are optional on either side.
+                inner = lop_text.strip()
+                if inner.startswith("[") and inner.endswith("]"):
+                    inner = inner[1:-1]
+                left_text, _, right_text = inner.partition("..")
+                has_start = left_text.strip() != ""
+                has_end = right_text.strip() != ""
+                start_ctx = end_ctx = None
+                if has_start and has_end:
+                    if len(exprs) >= 2:
+                        start_ctx, end_ctx = exprs[0], exprs[1]
+                elif has_start:
+                    if exprs:
+                        start_ctx = exprs[0]
+                elif has_end:
+                    if exprs:
+                        end_ctx = exprs[0]
+                start = _compile_expression(start_ctx, bind_vars) if start_ctx is not None else None
+                end = _compile_expression(end_ctx, bind_vars) if end_ctx is not None else None
+                if start is not None and end is not None:
+                    # length = end - start (valid for non-negative bounds, the
+                    # common case; negative-bound slices are a known limitation).
+                    return f"SLICE({base}, {start}, ({end}) - ({start}))"
+                if start is not None:
+                    return f"SLICE({base}, {start})"
+                if end is not None:
+                    return f"SLICE({base}, 0, {end})"
+                # "[..]" — whole list.
+                return f"{base}"
+            # Single subscript: AQL array access supports negative indices.
+            if len(exprs) != 1:
+                raise CoreError("list index expects 1 expression", code="UNSUPPORTED")
+            idx = _compile_expression(exprs[0], bind_vars)
+            return f"({base})[{idx}]"
 
         string_ops = ctx.oC_StringOperatorExpression()
         if string_ops:
@@ -3902,11 +3942,14 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
             if len(compiled_args) != 1:
                 raise CoreError("size expects 1 arg", code="UNSUPPORTED")
             return f"LENGTH({compiled_args[0]})"
-        if fn_norm == "tolower":
+        # ``toLower``/``toUpper`` are canonical openCypher; ``lower``/``upper``
+        # are common non-canonical aliases LLMs (and some dialects) emit. Accept
+        # both so generated queries don't fail on a casing-helper name mismatch.
+        if fn_norm in ("tolower", "lower"):
             if len(compiled_args) != 1:
                 raise CoreError("toLower expects 1 arg", code="UNSUPPORTED")
             return f"LOWER({compiled_args[0]})"
-        if fn_norm == "toupper":
+        if fn_norm in ("toupper", "upper"):
             if len(compiled_args) != 1:
                 raise CoreError("toUpper expects 1 arg", code="UNSUPPORTED")
             return f"UPPER({compiled_args[0]})"

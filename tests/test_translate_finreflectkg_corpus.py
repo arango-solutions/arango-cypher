@@ -46,8 +46,7 @@ CORPUS: list[CorpusEntry] = [
         "What are the 20 most common entity types in the knowledge graph?",
         "MATCH (n) RETURN labels(n)[0] AS entity_type, COUNT(n) AS count "
         "ORDER BY count DESC LIMIT 20",
-        supported=False,
-        gap="Only IN operator is supported",
+        supported=True,
     ),
     CorpusEntry(
         "q02_relationship_type_distribution",
@@ -63,8 +62,7 @@ CORPUS: list[CorpusEntry] = [
         "MATCH p = (a {id: 'CINF'})-[r:Has_Stake_In]->(b) "
         "WHERE b.id IS NOT NULL AND size(b.id) < 6 AND b.id = upper(b.id) "
         "AND b.id <> 'CINF' RETURN p LIMIT 50",
-        supported=False,
-        gap="upper",
+        supported=True,
     ),
     CorpusEntry(
         "q04_cinf_stakes_ticker_name",
@@ -73,8 +71,7 @@ CORPUS: list[CorpusEntry] = [
         "MATCH (a {id: 'CINF'})-[r:Has_Stake_In]->(b) "
         "WHERE b.id IS NOT NULL AND size(b.id) < 6 AND b.id = upper(b.id) "
         "AND b.id <> 'CINF' RETURN b.id AS ticker, b.name AS company_name LIMIT 50",
-        supported=False,
-        gap="upper",
+        supported=True,
     ),
     CorpusEntry(
         "q05_orgs_many_locations",
@@ -97,8 +94,7 @@ CORPUS: list[CorpusEntry] = [
         "-[:Discloses]->(c:FIN_METRIC) "
         "WHERE b.id IS NOT NULL AND size(b.id) < 6 AND b.id = upper(b.id) "
         "RETURN path LIMIT 25",
-        supported=False,
-        gap="upper",
+        supported=True,
     ),
     CorpusEntry(
         "q07_metrics_by_apple_held_by_cinf",
@@ -329,6 +325,16 @@ def test_known_gap_still_unsupported(entry: CorpusEntry, bundle) -> None:
 
 
 def test_current_coverage_ratio() -> None:
-    """Pin the baseline so progress is visible in CI (currently 15/22)."""
-    assert len(_SUPPORTED) == 15
-    assert len(_GAPS) == 7
+    """Pin coverage so progress is visible in CI.
+
+    Baseline was 15/22. WP-C1 (upper/lower aliases) promoted q03/q04/q06 → 18/22.
+    WP-C2 (list subscript/slice) promoted q01 → 19/22; only the three collect()
+    queries (q05/q09/q10) remain for WP-C3.
+    """
+    assert len(_SUPPORTED) == 19
+    assert len(_GAPS) == 3
+    assert {e.cid for e in _GAPS} == {
+        "q05_orgs_many_locations",
+        "q09_stakeholders_bigtech",
+        "q10_risk_dependency_disclosure",
+    }

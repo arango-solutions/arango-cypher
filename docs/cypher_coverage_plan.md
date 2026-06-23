@@ -123,11 +123,10 @@ which is the prompt to promote the entry).
 - **Closes:** q05, q09, q10.
 - **Tests:** dedicated aggregation goldens (grouping, DISTINCT, slice, filter).
 
-### WP-C4 — Group-by computed key (q01) · *M, ~2 days*
-- Support aggregation where the grouping key is a computed projection
-  (`RETURN labels(n)[0] AS k, count(n)`), not just a bare variable/property.
-- **Closes:** q01 (with WP-C2).
-- **Tests:** node-grouping goldens (parallels the existing edge `type(r)` path).
+### WP-C4 — Group-by computed key (q01) · *SUBSUMED by WP-C2*
+- The aggregation pipeline already supported a computed grouping key
+  (`COLLECT k = <expr> AGGREGATE …`); q01's only blocker was the list subscript
+  in `labels(n)[0]`. Once WP-C2 landed, q01 transpiles. No separate work needed.
 
 ### WP-S1 — NL "return a graph" intent · *M, ~2 days*
 - Detect graph/visual intent in the question ("as a graph", "show the network/
