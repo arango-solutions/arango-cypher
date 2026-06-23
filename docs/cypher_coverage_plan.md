@@ -153,13 +153,32 @@ which is the prompt to promote the entry).
   asserting the section reaches/omits from the live system prompt).
 - **Improves:** q03, q06 correctness; general "show me … graph" questions.
 
-### WP-S2 — Approximate entity matching · *M, ~2–3 days*
-- Resolver: when a string property's `valueShape` is token/short or the exact
-  probe misses, emit `CONTAINS`/`=~` (or ArangoSearch when available) instead of
-  equality; prefer ticker/`id` match when the mention contains a parenthesized
-  symbol like "(CINF)".
-- Surface `valueShape` (2.a) in the schema card so the LLM stops inventing legal
-  names for token-shaped fields.
+### WP-S2 — Approximate entity matching · ✅ DONE (S2c carved out)
+- **S2a — valueShape surfaced (done).** `_property_quality_hint` now renders
+  `shape: <…>` and `e.g. "…", "…"` from analyzer property metadata
+  (`valueShape`/`value_shape`, `examples`/`exampleValues`/`sampleValues`), and
+  `_build_schema_summary` appends a "Value-shape hints" block (only when present)
+  telling the LLM to match the real value form and prefer fuzzy/`CONTAINS` over
+  brittle exact equality — so it stops inventing legal names for token fields.
+- **S2b — symbol/ticker matching (done).** `extract_candidates` captures a
+  parenthesized symbol ("Cincinnati Financial **(CINF)**") *first*, and the
+  resolver's property set now includes `ticker`/`symbol`/`code`/`id`, so an exact
+  symbol match resolves even when the long name fuzzes. (The resolver already
+  emitted exact/contains/reverse/Levenshtein scoring; S2b feeds it better
+  candidates + fields.)
+- Tests: `TestValueShapeHints` (`tests/test_nl2cypher.py`),
+  `TestExtractCandidates`/`TestIdentifierPropertyCandidates`
+  (`tests/test_nl2cypher_entity_resolution.py`).
+- **Carved out → WP-S2c (label predicate on untyped var).** `MATCH (risk) …
+  WHERE risk:RISK_FACTOR` compiles to a no-op because the expression compiler
+  (`_compile_expression`, `core.py` line ~3956 "Ignore labels suffix in v0")
+  has no mapping/var→collection context to turn a label into a discriminator
+  filter. Fixing it well requires threading a per-variable label resolver into
+  expression compilation (e.g. stash a var→{collection,typeField} map in
+  `bind_vars` at each MATCH site, then emit `risk.<typeField> == "RISK_FACTOR"`
+  / `IS_SAME_COLLECTION(...)`). Deferred to keep the change incremental and avoid
+  a risky deep refactor of the recursive compiler. Affects q10/q11/q20 *semantic*
+  correctness only (they already transpile).
 - **Improves:** q03/q04/q06/q07 correctness.
 
 ### WP-S3 — ArangoSearch index advisory + one-click create (2.c) · *M, ~2–3 days*

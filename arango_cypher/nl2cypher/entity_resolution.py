@@ -114,6 +114,13 @@ _STRING_PROPERTY_CANDIDATES: tuple[str, ...] = (
     "company_name",
     "productName",
     "product_name",
+    # WP-S2b: identifier/symbol-style fields. A mention may be a ticker or code
+    # (often parenthesized, e.g. "Cincinnati Financial (CINF)"); probing these
+    # lets an exact symbol match resolve even when the long name doesn't.
+    "ticker",
+    "symbol",
+    "code",
+    "id",
 )
 """Property names that are likely to hold human-readable strings worth resolving.
 
@@ -429,6 +436,12 @@ class EntityResolver:
             if is_initial and first_low in _SENTENCE_INITIAL_FILLERS and len(tokens) > 1:
                 return " ".join(tokens[1:])
             return phrase
+
+        # Parenthesized ticker/symbol, e.g. "Cincinnati Financial (CINF)".
+        # Captured first (and thus probed first) because an exact symbol match
+        # is a stronger signal than a fuzzy long-name match (WP-S2b).
+        for m in re.finditer(r"\(([A-Z][A-Z0-9.&-]{0,9})\)", question):
+            _add(m.group(1))
 
         for m in re.finditer(r'"([^"]+)"|\'([^\']+)\'', question):
             _add(m.group(1) or m.group(2) or "")

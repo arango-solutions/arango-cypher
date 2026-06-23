@@ -250,3 +250,65 @@ class TestSchemaContext:
 
         summary = _build_schema_summary(movies_mapping)
         assert "ACTED_IN" in summary
+
+
+class TestValueShapeHints:
+    """WP-S2a: surface value-shape / example signals so the LLM stops
+    inventing legal names for token-shaped fields."""
+
+    def test_hint_renders_shape(self) -> None:
+        from arango_cypher.nl2cypher._core import _property_quality_hint
+
+        hint = _property_quality_hint({"valueShape": "ticker"})
+        assert "shape: ticker" in hint
+
+    def test_hint_renders_examples(self) -> None:
+        from arango_cypher.nl2cypher._core import _property_quality_hint
+
+        hint = _property_quality_hint({"exampleValues": ["cinf", "aapl", "msft"]})
+        assert 'e.g. "cinf", "aapl", "msft"' in hint
+
+    def test_hint_caps_examples_at_three(self) -> None:
+        from arango_cypher.nl2cypher._core import _property_quality_hint
+
+        hint = _property_quality_hint({"examples": ["a", "b", "c", "d", "e"]})
+        assert '"d"' not in hint
+
+    def test_hint_empty_without_signals(self) -> None:
+        from arango_cypher.nl2cypher._core import _property_quality_hint
+
+        assert _property_quality_hint({"type": "string"}) == ""
+        assert _property_quality_hint(None) == ""
+
+    def test_schema_summary_includes_value_shape_block(self) -> None:
+        from arango_cypher.nl2cypher import _build_schema_summary
+        from arango_query_core.mapping import MappingBundle
+
+        bundle = MappingBundle(
+            conceptual_schema={"entityTypes": ["ORG"]},
+            physical_mapping={
+                "entities": {
+                    "ORG": {
+                        "collectionName": "Node",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "valueShape": "ticker",
+                                "exampleValues": ["cinf", "aapl"],
+                            }
+                        },
+                    }
+                }
+            },
+            metadata={},
+        )
+        summary = _build_schema_summary(bundle)
+        assert "shape: ticker" in summary
+        assert 'e.g. "cinf", "aapl"' in summary
+        assert "Value-shape hints:" in summary
+
+    def test_schema_summary_omits_block_without_shapes(self, movies_mapping) -> None:
+        from arango_cypher.nl2cypher import _build_schema_summary
+
+        summary = _build_schema_summary(movies_mapping)
+        assert "Value-shape hints:" not in summary

@@ -122,6 +122,44 @@ class TestExtractCandidates:
         cands = resolver.extract_candidates(noisy)
         assert len(cands) <= 2
 
+    def test_parenthesized_symbol_extracted(self, movies_mapping) -> None:
+        """WP-S2b: a ticker in parentheses is captured as a candidate."""
+        resolver = EntityResolver(mapping=movies_mapping)
+        cands = resolver.extract_candidates(
+            "companies that Cincinnati Financial (CINF) has a stake in"
+        )
+        assert "CINF" in cands
+        assert "Cincinnati Financial" in cands
+
+    def test_parenthesized_symbol_probed_first(self, movies_mapping) -> None:
+        """The symbol should precede the long name so an exact match wins."""
+        resolver = EntityResolver(mapping=movies_mapping)
+        cands = resolver.extract_candidates("Cincinnati Financial (CINF) stake")
+        assert cands.index("CINF") < cands.index("Cincinnati Financial")
+
+    def test_dotted_symbol_extracted(self, movies_mapping) -> None:
+        resolver = EntityResolver(mapping=movies_mapping)
+        cands = resolver.extract_candidates("Berkshire Hathaway (BRK.B) holdings")
+        assert "BRK.B" in cands
+
+    def test_year_in_parens_not_a_symbol(self, movies_mapping) -> None:
+        # "(2020)" is not an uppercase-letter-led symbol.
+        resolver = EntityResolver(mapping=movies_mapping)
+        cands = resolver.extract_candidates("movies from (2020) onward")
+        assert "2020" not in cands
+
+
+class TestIdentifierPropertyCandidates:
+    """WP-S2b: identifier/symbol fields are part of the probe property set."""
+
+    def test_symbol_fields_present(self) -> None:
+        from arango_cypher.nl2cypher.entity_resolution import (
+            _STRING_PROPERTY_CANDIDATES,
+        )
+
+        for field_name in ("ticker", "symbol", "code", "id"):
+            assert field_name in _STRING_PROPERTY_CANDIDATES
+
 
 class TestResolveWithMockedDb:
     def test_typo_corrected(self, movies_mapping) -> None:

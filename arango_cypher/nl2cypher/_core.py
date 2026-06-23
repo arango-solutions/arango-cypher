@@ -72,6 +72,22 @@ def _property_quality_hint(prop_meta: dict[str, Any] | None) -> str:
         parts.append(f"sentinels: {quoted}")
     if prop_meta.get("numericLike") or prop_meta.get("numeric_like"):
         parts.append("numeric-like string")
+    # WP-S2a: value-shape signal. When the analyzer reports the *shape* of a
+    # property's values (e.g. a short ticker/code rather than a legal name) and/
+    # or example values, surface them so the LLM filters against the real value
+    # form instead of inventing a full legal name for a token-shaped field.
+    shape = prop_meta.get("valueShape") or prop_meta.get("value_shape")
+    if isinstance(shape, str) and shape.strip():
+        parts.append(f"shape: {shape.strip()}")
+    examples = (
+        prop_meta.get("examples")
+        or prop_meta.get("exampleValues")
+        or prop_meta.get("sampleValues")
+        or prop_meta.get("sample_values")
+    )
+    if isinstance(examples, list | tuple) and examples:
+        quoted = ", ".join(f'"{e}"' for e in list(examples)[:3])
+        parts.append(f"e.g. {quoted}")
     if not parts:
         return ""
     return f" [{'; '.join(parts)}]"
@@ -125,6 +141,37 @@ _DATA_QUALITY_BLOCK_CYPHER = (
     "  - For 'top-N by numeric field X', combine both: filter out the "
     "sentinels, then ORDER BY the cast numeric value."
 )
+
+
+_VALUE_SHAPE_BLOCK_CYPHER = (
+    "\nValue-shape hints:\n"
+    "  - When a property shows 'shape: ...' or 'e.g. \"...\"', match against "
+    "that value form. Do NOT invent a full legal/long name for a token- or "
+    "code-shaped field (e.g. filter `WHERE o.name = \"cinf\"`, not "
+    "`\"Cincinnati Financial Corporation\"`).\n"
+    "  - If unsure of the exact stored value, prefer a case-insensitive or "
+    "CONTAINS match over a brittle exact equality."
+)
+
+
+def _has_value_shape_hints(
+    labeled_props: dict[str, dict[str, dict[str, Any]]],
+) -> bool:
+    """True when any property carries a valueShape / example-values signal."""
+    for props in labeled_props.values():
+        for meta in props.values():
+            if not isinstance(meta, dict):
+                continue
+            if meta.get("valueShape") or meta.get("value_shape"):
+                return True
+            if (
+                meta.get("examples")
+                or meta.get("exampleValues")
+                or meta.get("sampleValues")
+                or meta.get("sample_values")
+            ):
+                return True
+    return False
 
 
 # Pre-WP-29 the schema card emitted raw labels like ``Node :Compliance.rst``
@@ -379,6 +426,8 @@ def _build_schema_summary(bundle: MappingBundle) -> str:
     labeled_ent_props = {label: _pm_entity_props(label, pm) for label in entities_emitted}
     if _flagged_properties(labeled_ent_props):
         lines.append(_DATA_QUALITY_BLOCK_CYPHER)
+    if _has_value_shape_hints(labeled_ent_props):
+        lines.append(_VALUE_SHAPE_BLOCK_CYPHER)
 
     return "\n".join(lines)
 
