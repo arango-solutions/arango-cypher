@@ -270,6 +270,118 @@ def _filter_bundle_to_graph(
     )
 
 
+def _reconstruct_graph_membership(physical_mapping: dict[str, Any]) -> dict[str, dict[str, list[str]]]:
+    """Build a ``graphMembership`` summary from per-entry ``graphs`` tags.
+
+    The schema analyzer's *analyze* response carries ``metadata.graphMembership``,
+    but the CSI export (what we consume via ``export_mapping``) does not — it
+    only carries the per-entry ``physicalMapping[*].graphs`` annotation. Per the
+    analyzer's transpiler-integration contract, CSI consumers reconstruct the
+    summary from those per-entry tags, which is what this does.
+
+    Returns ``{graph_name: {"vertexCollections": [...], "edgeCollections": [...]}}``
+    with sorted, de-duplicated collection lists. Returns an empty dict when no
+    entry carries a graph tag (an ungraphed database, or a pre-tagging analyzer
+    build) so callers can treat the bundle as un-scopeable and fall back to a
+    live graph lookup.
+    """
+    pm = physical_mapping or {}
+    entities = pm.get("entities") if isinstance(pm.get("entities"), dict) else {}
+    rels = pm.get("relationships") if isinstance(pm.get("relationships"), dict) else {}
+
+    vertex_by_graph: dict[str, set[str]] = {}
+    edge_by_graph: dict[str, set[str]] = {}
+
+    for emap in entities.values():
+        if not isinstance(emap, dict):
+            continue
+        coll = emap.get("collectionName")
+        for g in emap.get("graphs") or []:
+            vertex_by_graph.setdefault(g, set())
+            if coll:
+                vertex_by_graph[g].add(coll)
+            edge_by_graph.setdefault(g, set())
+
+    for rmap in rels.values():
+        if not isinstance(rmap, dict):
+            continue
+        coll = rmap.get("edgeCollectionName") or rmap.get("collectionName")
+        for g in rmap.get("graphs") or []:
+            edge_by_graph.setdefault(g, set())
+            if coll:
+                edge_by_graph[g].add(coll)
+            vertex_by_graph.setdefault(g, set())
+
+    names = set(vertex_by_graph) | set(edge_by_graph)
+    return {
+        g: {
+            "vertexCollections": sorted(vertex_by_graph.get(g, set())),
+            "edgeCollections": sorted(edge_by_graph.get(g, set())),
+        }
+        for g in sorted(names)
+    }
+
+
+def _graph_membership_collections(
+    bundle: MappingBundle, graph_name: str
+) -> tuple[set[str], set[str]] | None:
+    """Resolve a named graph's collection membership from the bundle itself.
+
+    Reads ``metadata.graphMembership`` (populated by :func:`acquire_mapping_bundle`
+    from the analyzer) so a scoped view can be derived without a live database
+    round-trip. Returns ``(vertex_collections, edge_collections)`` when the graph
+    is represented in the membership summary, or ``None`` when the bundle is not
+    graph-aware or does not know this graph (caller falls back to the live
+    :func:`graph_collections` lookup).
+
+    Two shapes are accepted:
+
+    * **Analyzer-native** — per-graph entries nested under a ``graphs`` key, with
+      sibling ``status`` / ``graphCount`` / ``ungraphed`` metadata::
+
+        {"graphs": {"<name>": {"vertexCollections": [...], "edgeCollections": [...]}}, ...}
+
+    * **Reconstructed fallback** (:func:`_reconstruct_graph_membership`) — a flat
+      ``{"<name>": {"vertexCollections": [...], "edgeCollections": [...]}}`` map.
+    """
+    meta = bundle.metadata or {}
+    gm = meta.get("graphMembership") or meta.get("graph_membership")
+    if not isinstance(gm, dict):
+        return None
+
+    # Analyzer-native shape: per-graph entries live under "graphs"; the sibling
+    # "status"/"graphCount"/"ungraphed" keys are NOT graphs, so never fall back
+    # to top-level lookup when the nested structure is present.
+    nested = gm.get("graphs")
+    entry = nested.get(graph_name) if isinstance(nested, dict) else gm.get(graph_name)
+    if not isinstance(entry, dict):
+        return None
+
+    vertex = set(entry.get("vertexCollections") or entry.get("vertex_collections") or [])
+    edges = set(entry.get("edgeCollections") or entry.get("edge_collections") or [])
+    return vertex, edges
+
+
+def _scope_bundle_to_graph(
+    db: StandardDatabase, bundle: MappingBundle, graph_name: str
+) -> MappingBundle:
+    """Filter ``bundle`` to a named graph, preferring embedded membership.
+
+    When the bundle carries analyzer-provided graph membership the scope is
+    derived entirely in memory (no database call); otherwise we resolve the
+    graph's membership live via :func:`graph_collections` (which raises
+    ``CoreError(code="UNKNOWN_GRAPH")`` for a non-existent graph). Both paths
+    funnel through the same :func:`_filter_bundle_to_graph` so the result shape
+    is identical regardless of how membership was obtained.
+    """
+    mem = _graph_membership_collections(bundle, graph_name)
+    if mem is not None:
+        vertex, edges = mem
+    else:
+        vertex, edges = graph_collections(db, graph_name)
+    return _filter_bundle_to_graph(bundle, vertex, edges)
+
+
 def _fallback_fingerprint(db: StandardDatabase, *, include_counts: bool) -> str:
     """Coarse local fingerprint used only when ``schema_analyzer`` is unavailable.
 
@@ -1360,10 +1472,27 @@ def acquire_mapping_bundle(db: StandardDatabase, *, include_owl: bool = False) -
     if include_owl:
         owl_turtle = export_conceptual_model_as_owl_turtle(analysis_dict)
 
+    metadata = export.get("metadata", {})
+    # Named-graph membership (analyzer transpiler-integration contract): the
+    # analyze response carries ``metadata.graphMembership`` but the CSI export we
+    # consume here does not — it only carries the per-entry ``graphs`` tags. Lift
+    # the summary from the raw analysis metadata when present, otherwise
+    # reconstruct it from the per-entry tags, so downstream graph scoping can
+    # resolve a named graph's collections from the bundle alone (no live graph
+    # lookup). Older, pre-tagging analyzer builds yield an empty summary, which
+    # we omit so the bundle is correctly treated as not graph-aware.
+    graph_membership = (
+        metadata.get("graphMembership")
+        or (analysis_dict.get("metadata") or {}).get("graphMembership")
+        or _reconstruct_graph_membership(pm)
+    )
+    if graph_membership:
+        metadata = {**metadata, "graphMembership": graph_membership}
+
     bundle = MappingBundle(
         conceptual_schema=export.get("conceptualSchema", {}),
         physical_mapping=pm,
-        metadata=export.get("metadata", {}),
+        metadata=metadata,
         owl_turtle=owl_turtle,
         source=MappingSource(
             kind="schema_analyzer_export",
@@ -1686,6 +1815,36 @@ def _fresh_cached_bundle(
     return bundle
 
 
+def _read_cached_slot(
+    db: StandardDatabase,
+    mem_key: str,
+    cache_collection: str | None,
+    persistent_cache_key: str,
+) -> MappingBundle | None:
+    """Read one cache slot: in-memory tier first, then the persistent tier.
+
+    Returns the cached bundle, or ``None`` on a miss. On a persistent-tier hit
+    the in-memory tier is hydrated so subsequent reads in this process skip the
+    persistent round-trip. Never builds or fingerprints — pure read.
+    """
+    if not mem_key:
+        return None
+    mem = _mapping_cache.get(mem_key)
+    if mem is not None:
+        return mem[0]
+    if not cache_collection:
+        return None
+    persistent = ArangoSchemaCache(
+        collection_name=cache_collection, cache_key=persistent_cache_key
+    )
+    hit = persistent.get(db)
+    if hit is None:
+        return None
+    bundle, shape_fp, full_fp = hit
+    _mapping_cache[mem_key] = (bundle, time.time(), shape_fp, full_fp)
+    return bundle
+
+
 def read_cached_mapping(
     db: StandardDatabase,
     *,
@@ -1711,30 +1870,39 @@ def read_cached_mapping(
     Unlike :func:`get_mapping`, this never computes a fingerprint, never calls
     the analyzer, and never writes a freshly built bundle — it is read-only and
     cheap (worst case: one persistent-cache document read).
+
+    Graph scoping (PRD §17) is satisfied without a separately-warmed scoped
+    cache slot: a scoped mapping is just a *filtered view* of the full-DB
+    mapping, so on a scoped miss we derive it from the cached unscoped bundle by
+    intersecting with the named graph's collections (a cheap metadata read + an
+    in-memory filter, no analyzer). This means selecting a named graph in the UI
+    works the moment the database has been analyzed once — the sidecar only has
+    to warm the unscoped view per database, not every (database, graph) pair.
     """
-    key = _graph_scoped_cache_key(_cache_key(db), graph_name)
+    base_key = _cache_key(db)
+    key = _graph_scoped_cache_key(base_key, graph_name)
     if not key:
         return None
 
-    mem = _mapping_cache.get(key)
-    if mem is not None:
-        bundle, _ts, _shape_fp, _full_fp = mem
+    persistent_key = _graph_scoped_cache_key(cache_key, graph_name)
+    bundle = _read_cached_slot(db, key, cache_collection, persistent_key)
+    if bundle is not None:
         return bundle
 
-    if not cache_collection:
-        return None
-    effective_cache_key = _graph_scoped_cache_key(cache_key, graph_name)
-    persistent = ArangoSchemaCache(
-        collection_name=cache_collection, cache_key=effective_cache_key
-    )
-    hit = persistent.get(db)
-    if hit is None:
-        return None
-    bundle, shape_fp, full_fp = hit
-    # Hydrate the in-memory tier so subsequent reads in this process skip the
-    # persistent round-trip entirely.
-    _mapping_cache[key] = (bundle, time.time(), shape_fp, full_fp)
-    return bundle
+    # Scoped miss: derive the scope from the cached full-DB mapping instead of
+    # reporting "pending". We deliberately do not hydrate the derived bundle so
+    # it always reflects the current cached full mapping (no stale scoped slot
+    # to invalidate when the full mapping is refreshed).
+    if graph_name:
+        full = _read_cached_slot(db, base_key, cache_collection, cache_key)
+        if full is not None:
+            try:
+                return _scope_bundle_to_graph(db, full, graph_name)
+            except CoreError:
+                # Unknown graph (live fallback could not resolve it): treat as a
+                # miss so the caller reports "pending" rather than 500-ing.
+                return None
+    return None
 
 
 def get_mapping(
@@ -1915,13 +2083,13 @@ def _build_fresh_bundle(
             )
 
     if graph_name:
-        vertex_colls, edge_colls = graph_collections(db, graph_name)
-        bundle = _filter_bundle_to_graph(bundle, vertex_colls, edge_colls)
+        bundle = _scope_bundle_to_graph(db, bundle, graph_name)
+        pm = bundle.physical_mapping or {}
         logger.info(
-            "Scoped mapping to named graph %r: %d vertex collection(s), %d edge collection(s)",
+            "Scoped mapping to named graph %r: %d entit(y/ies), %d relationship(s)",
             graph_name,
-            len(vertex_colls),
-            len(edge_colls),
+            len(pm.get("entities") or {}),
+            len(pm.get("relationships") or {}),
         )
 
     return bundle

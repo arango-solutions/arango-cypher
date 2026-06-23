@@ -153,3 +153,191 @@ class TestGetMappingGraphScoping:
         scoped_bundle = sa._mapping_cache["testdb::graph::G"][0]
         assert set(full_bundle.physical_mapping["entities"]) == {"Node", "Chunk"}
         assert set(scoped_bundle.physical_mapping["entities"]) == {"Node"}
+
+
+class TestReadCachedMappingGraphScoping:
+    """``read_cached_mapping`` (the catalog request-path read) must satisfy a
+    scoped request from the cached *unscoped* bundle, so selecting a named graph
+    works without separately warming a (database, graph) cache slot.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        sa._mapping_cache.clear()
+        yield
+        sa._mapping_cache.clear()
+
+    def _db(self) -> Any:
+        db = MagicMock()
+        db.name = "testdb"
+        return db
+
+    def test_scoped_miss_derives_from_cached_full_bundle(self, monkeypatch):
+        db = self._db()
+        monkeypatch.setattr(sa, "graph_collections", lambda _db, _name: ({"Node"}, {"relations"}))
+        # Only the unscoped slot is warm (e.g. what the sidecar populated).
+        sa._mapping_cache[sa._cache_key(db)] = (_full_bundle(), 0.0, "shape", "full")
+
+        scoped = sa.read_cached_mapping(db, cache_collection=None, graph_name="G")
+        assert scoped is not None
+        assert set(scoped.physical_mapping["entities"]) == {"Node"}
+        assert set(scoped.physical_mapping["relationships"]) == {"REL"}
+        # Derived view is not persisted as its own slot — it always reflects the
+        # current cached full mapping rather than a stale scoped copy.
+        assert "testdb::graph::G" not in sa._mapping_cache
+
+    def test_scoped_miss_with_no_full_cache_returns_none(self, monkeypatch):
+        db = self._db()
+        monkeypatch.setattr(sa, "graph_collections", lambda _db, _name: ({"Node"}, {"relations"}))
+        assert sa.read_cached_mapping(db, cache_collection=None, graph_name="G") is None
+
+    def test_unknown_graph_on_scoped_miss_returns_none(self, monkeypatch):
+        db = self._db()
+
+        def _raise(_db, _name):
+            raise CoreError("nope", code="UNKNOWN_GRAPH")
+
+        monkeypatch.setattr(sa, "graph_collections", _raise)
+        sa._mapping_cache[sa._cache_key(db)] = (_full_bundle(), 0.0, "shape", "full")
+        assert sa.read_cached_mapping(db, cache_collection=None, graph_name="ghost") is None
+
+    def test_warm_scoped_slot_is_served_directly(self, monkeypatch):
+        db = self._db()
+        # If a scoped slot *is* warm, it is served without deriving/filtering.
+        sentinel = _full_bundle()
+        sa._mapping_cache[sa._graph_scoped_cache_key(sa._cache_key(db), "G")] = (
+            sentinel,
+            0.0,
+            "shape",
+            "full",
+        )
+
+        def _boom(_db, _name):  # pragma: no cover - must not be called
+            raise AssertionError("graph_collections should not run on a scoped hit")
+
+        monkeypatch.setattr(sa, "graph_collections", _boom)
+        assert sa.read_cached_mapping(db, cache_collection=None, graph_name="G") is sentinel
+
+
+def _tagged_bundle() -> MappingBundle:
+    """A full bundle carrying analyzer-provided named-graph signals: per-entry
+    ``graphs`` tags plus a ``metadata.graphMembership`` summary for graph ``G``,
+    in the analyzer-native *nested* shape (per-graph entries under ``graphs``,
+    with sibling ``status`` / ``graphCount`` / ``ungraphed``).
+    """
+    b = _full_bundle()
+    b.physical_mapping["entities"]["Node"]["graphs"] = ["G"]
+    b.physical_mapping["relationships"]["REL"]["graphs"] = ["G"]
+    b.metadata["graphMembership"] = {
+        "status": "ok",
+        "graphCount": 1,
+        "graphs": {
+            "G": {
+                "entities": ["Node"],
+                "relationships": ["REL"],
+                "vertexCollections": ["Node"],
+                "edgeCollections": ["relations"],
+            }
+        },
+        "ungraphed": {"entities": ["Chunk"], "relationships": ["OTHER"]},
+    }
+    return b
+
+
+class TestReconstructGraphMembership:
+    def test_builds_summary_from_per_entry_tags(self):
+        pm = {
+            "entities": {
+                "Node": {"collectionName": "Node", "graphs": ["G", "H"]},
+                "Chunk": {"collectionName": "chunks"},  # ungraphed
+            },
+            "relationships": {
+                "REL": {"edgeCollectionName": "relations", "graphs": ["G"]},
+            },
+        }
+        gm = sa._reconstruct_graph_membership(pm)
+        assert set(gm) == {"G", "H"}
+        assert gm["G"] == {"vertexCollections": ["Node"], "edgeCollections": ["relations"]}
+        assert gm["H"] == {"vertexCollections": ["Node"], "edgeCollections": []}
+
+    def test_empty_when_no_tags(self):
+        pm = {"entities": {"Node": {"collectionName": "Node"}}, "relationships": {}}
+        assert sa._reconstruct_graph_membership(pm) == {}
+
+
+class TestGraphMembershipCollections:
+    def test_reads_native_nested_membership_without_db(self):
+        vertex, edges = sa._graph_membership_collections(_tagged_bundle(), "G")
+        assert vertex == {"Node"}
+        assert edges == {"relations"}
+
+    def test_reads_flat_reconstructed_membership(self):
+        # The reconstruction fallback emits a flat name -> entry map.
+        b = _full_bundle()
+        b.metadata["graphMembership"] = {
+            "G": {"vertexCollections": ["Node"], "edgeCollections": ["relations"]}
+        }
+        assert sa._graph_membership_collections(b, "G") == ({"Node"}, {"relations"})
+
+    def test_returns_none_for_unknown_graph(self):
+        assert sa._graph_membership_collections(_tagged_bundle(), "nope") is None
+
+    def test_returns_none_for_ungraphed_pseudo_key(self):
+        # "ungraphed"/"status"/"graphCount" siblings must not resolve as graphs.
+        assert sa._graph_membership_collections(_tagged_bundle(), "ungraphed") is None
+        assert sa._graph_membership_collections(_tagged_bundle(), "status") is None
+
+    def test_returns_none_when_not_graph_aware(self):
+        assert sa._graph_membership_collections(_full_bundle(), "G") is None
+
+
+class TestScopePrefersEmbeddedMembership:
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        sa._mapping_cache.clear()
+        yield
+        sa._mapping_cache.clear()
+
+    def _db(self) -> Any:
+        db = MagicMock()
+        db.name = "testdb"
+        return db
+
+    def test_scope_bundle_uses_membership_not_db(self, monkeypatch):
+        db = self._db()
+
+        def _boom(_db, _name):  # pragma: no cover - must not be called
+            raise AssertionError("graph_collections must not run for a graph-aware bundle")
+
+        monkeypatch.setattr(sa, "graph_collections", _boom)
+        scoped = sa._scope_bundle_to_graph(db, _tagged_bundle(), "G")
+        assert set(scoped.physical_mapping["entities"]) == {"Node"}
+        assert set(scoped.physical_mapping["relationships"]) == {"REL"}
+
+    def test_read_cached_prefers_membership_no_db_call(self, monkeypatch):
+        db = self._db()
+
+        def _boom(_db, _name):  # pragma: no cover - must not be called
+            raise AssertionError("graph_collections must not run for a graph-aware bundle")
+
+        monkeypatch.setattr(sa, "graph_collections", _boom)
+        sa._mapping_cache[sa._cache_key(db)] = (_tagged_bundle(), 0.0, "shape", "full")
+
+        scoped = sa.read_cached_mapping(db, cache_collection=None, graph_name="G")
+        assert scoped is not None
+        assert set(scoped.physical_mapping["entities"]) == {"Node"}
+
+    def test_falls_back_to_db_when_not_graph_aware(self, monkeypatch):
+        db = self._db()
+        called: list[str] = []
+
+        def _live(_db, name):
+            called.append(name)
+            return ({"Node"}, {"relations"})
+
+        monkeypatch.setattr(sa, "graph_collections", _live)
+        sa._mapping_cache[sa._cache_key(db)] = (_full_bundle(), 0.0, "shape", "full")
+
+        scoped = sa.read_cached_mapping(db, cache_collection=None, graph_name="G")
+        assert scoped is not None
+        assert called == ["G"]  # live lookup was used as the fallback
