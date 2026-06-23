@@ -2429,10 +2429,85 @@ def _compile_agg_expr(expr_text: str) -> tuple[str, str] | None:
         return ("aggregate", f"MIN({inner})")
     if fn == "max":
         return ("aggregate", f"MAX({inner})")
-    if fn == "collect":
-        # Use COLLECT ... INTO for list collection; ArangoDB 3.11 doesn't accept PUSH() in AGGREGATE.
-        return ("into", inner)
+    # ``collect`` (incl. DISTINCT and trailing slice/index) is handled separately
+    # by :func:`_parse_collect`, because it may be wrapped in a list operator
+    # (``collect(x)[0..5]``) that this bare-call matcher cannot see.
     return None
+
+
+def _parse_collect(expr_text: str) -> dict[str, Any] | None:
+    """Parse a ``collect(...)`` projection, including ``DISTINCT`` and an
+    optional trailing subscript/slice (``collect(DISTINCT x)[0..5]``).
+
+    Returns ``{"inner", "distinct", "slice"}`` where ``slice`` is ``None``,
+    ``("index", expr_text)``, or ``("slice", start_text|None, end_text|None)``.
+    Returns ``None`` if *expr_text* is not a collect call.
+    """
+    t = expr_text.strip()
+    if not t[:7].lower() == "collect":
+        return None
+    i = 7
+    while i < len(t) and t[i].isspace():
+        i += 1
+    if i >= len(t) or t[i] != "(":
+        return None
+    depth = 0
+    j = i
+    while j < len(t):
+        if t[j] == "(":
+            depth += 1
+        elif t[j] == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    if depth != 0:
+        return None
+    inner = t[i + 1 : j].strip()
+    rest = t[j + 1 :].strip()
+    distinct = False
+    if inner.lower().startswith("distinct"):
+        tail = inner[len("distinct") :]
+        if tail == "" or tail[0].isspace():
+            distinct = True
+            inner = tail.strip()
+    slice_spec: tuple[Any, ...] | None = None
+    if rest:
+        if not (rest.startswith("[") and rest.endswith("]")):
+            return None
+        sub = rest[1:-1]
+        if ".." in sub:
+            left, _, right = sub.partition("..")
+            slice_spec = ("slice", left.strip() or None, right.strip() or None)
+        else:
+            slice_spec = ("index", sub.strip())
+    return {"inner": inner, "distinct": distinct, "slice": slice_spec}
+
+
+def _collect_post_expr(raw_var: str, spec: dict[str, Any]) -> str:
+    """Build the AQL value expression for a parsed collect projection.
+
+    ``raw_var`` holds the list gathered by ``COLLECT ... INTO raw_var = inner``.
+    Applies DISTINCT (``UNIQUE``) then any slice/index. Slice bounds are emitted
+    verbatim, which is correct for the common non-negative literal bounds; a
+    negative slice bound is a known limitation (documented in the coverage plan).
+    """
+    e = raw_var
+    if spec.get("distinct"):
+        e = f"UNIQUE({e})"
+    sl = spec.get("slice")
+    if sl is not None:
+        if sl[0] == "index":
+            e = f"({e})[{sl[1]}]"
+        else:
+            _, start, end = sl
+            if start is not None and end is not None:
+                e = f"SLICE({e}, {start}, ({end}) - ({start}))"
+            elif start is not None:
+                e = f"SLICE({e}, {start})"
+            elif end is not None:
+                e = f"SLICE({e}, 0, {end})"
+    return e
 
 
 def _apply_with(
@@ -2453,7 +2528,7 @@ def _apply_with(
 
     compiled_nonagg: list[tuple[str, str, str]] = []  # (cypher_var, aql_var, expr)
     compiled_agg: list[tuple[str, str, str]] = []  # (cypher_var, aql_var, agg_expr)
-    compiled_into: tuple[str, str, str] | None = None  # (cypher_var, aql_var, expr)
+    compiled_into: tuple[str, str, dict[str, Any]] | None = None  # (cypher_var, aql_var, spec)
     pre_existing = set(forbidden_vars)
 
     def pick_name(cypher_var: str) -> str:
@@ -2470,6 +2545,16 @@ def _apply_with(
         expr_txt_for_agg = _rewrite_vars(expr_txt, incoming_env) if incoming_env else expr_txt
         alias = it.oC_Variable().getText().strip() if it.oC_Variable() is not None else None
 
+        collect_spec = _parse_collect(expr_txt_for_agg)
+        if collect_spec is not None:
+            if compiled_into is not None:
+                raise CoreError("Only one collect(...) is supported in v0", code="NOT_IMPLEMENTED")
+            cypher_var = alias or "collected"
+            aql_var = pick_name(cypher_var)
+            forbidden_vars.add(aql_var)
+            compiled_into = (cypher_var, aql_var, collect_spec)
+            continue
+
         agg = _compile_agg_expr(expr_txt_for_agg)
         if agg is not None:
             kind, agg_expr = agg
@@ -2478,12 +2563,7 @@ def _apply_with(
             )
             aql_var = pick_name(cypher_var)
             forbidden_vars.add(aql_var)
-            if kind == "into":
-                if compiled_into is not None:
-                    raise CoreError("Only one collect(...) is supported in v0", code="NOT_IMPLEMENTED")
-                compiled_into = (cypher_var, aql_var, agg_expr)
-            else:
-                compiled_agg.append((cypher_var, aql_var, agg_expr))
+            compiled_agg.append((cypher_var, aql_var, agg_expr))
             continue
 
         expr = _compile_expression(expr_ctx, bind_vars)
@@ -2520,32 +2600,36 @@ def _apply_with(
 
     env: dict[str, str] = {cy: aql for cy, aql, _ in compiled_nonagg}
     env.update({cy: aql for cy, aql, _ in compiled_agg})
-    if compiled_into is not None:
-        cy, aql, _expr = compiled_into
-        env[cy] = aql
 
-    # Aggregation path (AGGREGATE and/or INTO)
+    # Aggregation path (AGGREGATE and/or collect INTO). collect() may now
+    # coexist with AGGREGATE aggregates via a single COLLECT ... AGGREGATE ...
+    # INTO ... clause; DISTINCT/slice on the collect become a post-COLLECT LET.
     if compiled_agg or compiled_into is not None:
         group_parts = ", ".join(f"{aql} = {expr}" for _, aql, expr in compiled_nonagg)
+        agg_parts = ", ".join(f"{aql} = {expr}" for _, aql, expr in compiled_agg)
 
+        collect_line = "  COLLECT"
+        if group_parts:
+            collect_line += f" {group_parts}"
+        if agg_parts:
+            collect_line += f" AGGREGATE {agg_parts}"
+
+        post_let: tuple[str, str] | None = None
         if compiled_into is not None:
-            if compiled_agg:
-                raise CoreError(
-                    "collect(...) cannot be mixed with other aggregates in v0", code="NOT_IMPLEMENTED"
-                )
-            cy, aql, expr = compiled_into
-            if group_parts:
-                lines.append(f"  COLLECT {group_parts} INTO {aql} = {expr}")
+            cy, aql, spec = compiled_into
+            needs_post = bool(spec.get("distinct")) or spec.get("slice") is not None
+            if needs_post:
+                temp = pick_name(f"_{aql}_grp")
+                forbidden_vars.add(temp)
+                collect_line += f" INTO {temp} = {spec['inner']}"
+                post_let = (aql, _collect_post_expr(temp, spec))
             else:
-                lines.append(f"  COLLECT INTO {aql} = {expr}")
-        else:
-            agg_parts = ", ".join(f"{aql} = {expr}" for _, aql, expr in compiled_agg)
-            if group_parts and agg_parts:
-                lines.append(f"  COLLECT {group_parts} AGGREGATE {agg_parts}")
-            elif agg_parts:
-                lines.append(f"  COLLECT AGGREGATE {agg_parts}")
-            else:
-                lines.append(f"  COLLECT {group_parts}")
+                collect_line += f" INTO {aql} = {spec['inner']}"
+            env[cy] = aql
+
+        lines.append(collect_line)
+        if post_let is not None:
+            lines.append(f"  LET {post_let[0]} = {post_let[1]}")
 
         with_filter = _rewrite_vars(with_filter_raw, env) if with_filter_raw else None
         if with_filter:
@@ -2624,7 +2708,7 @@ def _append_return(
         expr_txt = it.oC_Expression().getText().strip()
         if var_env:
             expr_txt = _rewrite_vars(expr_txt, var_env)
-        if _compile_agg_expr(expr_txt) is not None:
+        if _compile_agg_expr(expr_txt) is not None or _parse_collect(expr_txt) is not None:
             has_agg = True
             break
 
@@ -2696,7 +2780,7 @@ def _append_return_aggregation(
 ) -> None:
     compiled_nonagg: list[tuple[str, str]] = []
     compiled_agg: list[tuple[str, str]] = []
-    compiled_into: tuple[str, str] | None = None
+    compiled_into: tuple[str, dict[str, Any]] | None = None
 
     for it in items:
         expr_ctx = it.oC_Expression()
@@ -2705,18 +2789,18 @@ def _append_return_aggregation(
         if var_env:
             expr_txt = _rewrite_vars(expr_txt, var_env)
 
+        collect_spec = _parse_collect(expr_txt)
+        if collect_spec is not None:
+            idx = len(compiled_nonagg) + len(compiled_agg) + 1
+            var_name = alias or f"expr{idx}"
+            if compiled_into is not None:
+                raise CoreError("Only one collect() is supported in RETURN", code="NOT_IMPLEMENTED")
+            compiled_into = (var_name, collect_spec)
+            continue
+
         agg = _compile_agg_expr(expr_txt)
         if agg is not None:
-            kind, agg_expr = agg
-            if kind == "into":
-                fn_match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\(", expr_txt)
-                fn_key = fn_match.group(1).lower() if fn_match else None
-                idx = len(compiled_nonagg) + len(compiled_agg) + 1
-                var_name = alias or fn_key or f"expr{idx}"
-                if compiled_into is not None:
-                    raise CoreError("Only one collect() is supported in RETURN", code="NOT_IMPLEMENTED")
-                compiled_into = (var_name, agg_expr)
-                continue
+            _kind, agg_expr = agg
             fn_match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\(", expr_txt)
             fn_key = fn_match.group(1).lower() if fn_match else None
             idx = len(compiled_nonagg) + len(compiled_agg) + 1
@@ -2742,22 +2826,26 @@ def _append_return_aggregation(
     group_parts = ", ".join(f"{v} = {e}" for v, e in compiled_nonagg)
     agg_parts = ", ".join(f"{v} = {e}" for v, e in compiled_agg)
 
+    collect_line = "  COLLECT"
+    if group_parts:
+        collect_line += f" {group_parts}"
+    if agg_parts:
+        collect_line += f" AGGREGATE {agg_parts}"
+
+    post_let: tuple[str, str] | None = None
     if compiled_into is not None:
-        if compiled_agg:
-            raise CoreError(
-                "collect() cannot be mixed with other aggregates in RETURN", code="NOT_IMPLEMENTED"
-            )
-        into_var, into_expr = compiled_into
-        if group_parts:
-            lines.append(f"  COLLECT {group_parts} INTO {into_var} = {into_expr}")
+        into_var, spec = compiled_into
+        needs_post = bool(spec.get("distinct")) or spec.get("slice") is not None
+        if needs_post:
+            temp = f"_{into_var}_grp"
+            collect_line += f" INTO {temp} = {spec['inner']}"
+            post_let = (into_var, _collect_post_expr(temp, spec))
         else:
-            lines.append(f"  COLLECT INTO {into_var} = {into_expr}")
-    elif group_parts and agg_parts:
-        lines.append(f"  COLLECT {group_parts} AGGREGATE {agg_parts}")
-    elif agg_parts:
-        lines.append(f"  COLLECT AGGREGATE {agg_parts}")
-    else:
-        lines.append(f"  COLLECT {group_parts}")
+            collect_line += f" INTO {into_var} = {spec['inner']}"
+
+    lines.append(collect_line)
+    if post_let is not None:
+        lines.append(f"  LET {post_let[0]} = {post_let[1]}")
 
     agg_env = {v: v for v, _ in compiled_nonagg}
     agg_env.update({v: v for v, _ in compiled_agg})

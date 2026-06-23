@@ -1,6 +1,6 @@
 # Cypher Coverage Completion Plan
 
-**Status:** Draft for review (no implementation yet)
+**Status:** In progress — transpiler coverage (M1+M2) **complete: 22/22**. Semantics phase (M3+) pending.
 **Owner:** transpiler / NL→Cypher
 **Date:** 2026-06-23
 
@@ -17,20 +17,32 @@ knowledge-graph benchmark (22 NL/Cypher/AQL queries), now living in the repo as
 Transpiler result on the 22-query benchmark (LPG: `Node` + `relations`, both
 `type`-discriminated):
 
-| Result | Count | Queries |
+| Result | Original baseline | After WP-C1…C3 |
 | --- | --- | --- |
-| ✅ Transpiles today | 15 / 22 (68%) | q02, q07, q08, q11–q22 |
-| ❌ Coverage gap | 7 / 22 | q01, q03, q04, q05, q06, q09, q10 |
+| ✅ Transpiles | 15 / 22 (68%) | **22 / 22 (100%)** |
+| ❌ Coverage gap | 7 / 22 | 0 / 22 |
 
-The 7 failures collapse into **three transpiler gaps** plus a **cross-cutting
-NL→Cypher semantic issue**:
+The 7 original failures collapsed into **three transpiler gaps** plus a
+**cross-cutting NL→Cypher semantic issue**; the transpiler gaps are now closed:
 
-| Gap | Error | Queries | Severity |
+| Gap | Error | Queries | Status |
 | --- | --- | --- | --- |
-| **A. `collect()` aggregation** | `Unsupported function in v0: COLLECT` | q05, q09, q10 | High |
-| **B. List subscript / slice `x[i]`, `x[i..j]`** | `Only IN operator is supported in v0` | q01, q05, q09, q10 | High |
-| **C. Scalar fn aliases `upper`/`lower`** | `Unsupported function in v0: upper` | q03, q04, q06 | Low (trivial) |
-| **S. NL semantics: "as a graph" + fuzzy match** | (transpiles, wrong intent) | q03, q06 | High (UX) |
+| **A. `collect()` aggregation** | `Unsupported function in v0: COLLECT` | q05, q09, q10 | ✅ WP-C3 (DISTINCT, slice, mixed-with-aggregate) |
+| **B. List subscript / slice `x[i]`, `x[i..j]`** | `Only IN operator is supported in v0` | q01, q05, q09, q10 | ✅ WP-C2 |
+| **C. Scalar fn aliases `upper`/`lower`** | `Unsupported function in v0: upper` | q03, q04, q06 | ✅ WP-C1 |
+| **S. NL semantics: "as a graph" + fuzzy match** | (transpiles, wrong intent) | q03, q06 | ⏳ WP-S1/S2 |
+
+### Remaining *semantic* gaps (transpile ✅, correctness ⏳)
+
+100% transpile-success is **not** 100% semantic correctness. Tracked for the
+WP-S phase:
+
+- **Label predicate on an untyped variable.** `MATCH (risk) … WHERE risk:RISK_FACTOR
+  OR risk:EVENT` (q10/q11/q20) compiles to a no-op `(risk OR risk)` because `risk`
+  has no label in the pattern, so the discriminator collection/field is unknown at
+  compile time. Should resolve to a `risk.type IN [...]`-style filter once the
+  resolver can attribute a collection to the bare variable. → folds into **WP-S2**.
+- **"as a graph" intent + approximate entity match** (the CINF query). → **WP-S1/S2**.
 
 What already works and must stay working (regression guard): anonymous edge
 scans (`MATCH ()-[r]->()`), `type(r)`/`labels(n)` discriminator mapping,

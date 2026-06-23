@@ -83,8 +83,7 @@ CORPUS: list[CorpusEntry] = [
         "WHERE location_count > 3 "
         "RETURN org.name AS organization, location_count, sample_locations "
         "ORDER BY location_count DESC LIMIT 15",
-        supported=False,
-        gap="COLLECT",
+        supported=True,
     ),
     CorpusEntry(
         "q06_metrics_of_cinf_holdings_paths",
@@ -128,8 +127,7 @@ CORPUS: list[CorpusEntry] = [
         "RETURN company.name AS organization, stakeholder.name AS stakeholder, "
         "disclosed_metrics, SIZE(disclosed_metrics) AS metric_count "
         "ORDER BY stakeholder LIMIT 15",
-        supported=False,
-        gap="COLLECT",
+        supported=True,
     ),
     CorpusEntry(
         "q10_risk_dependency_disclosure",
@@ -143,8 +141,7 @@ CORPUS: list[CorpusEntry] = [
         "COUNT(DISTINCT metric) AS metric_count WHERE metric_count > 0 "
         "RETURN risk_name, impacted_org, dependent_org, disclosed_metrics, metric_count "
         "ORDER BY metric_count DESC LIMIT 10",
-        supported=False,
-        gap="COLLECT",
+        supported=True,
     ),
     CorpusEntry(
         "q11_geo_risk_3hop",
@@ -328,13 +325,14 @@ def test_current_coverage_ratio() -> None:
     """Pin coverage so progress is visible in CI.
 
     Baseline was 15/22. WP-C1 (upper/lower aliases) promoted q03/q04/q06 → 18/22.
-    WP-C2 (list subscript/slice) promoted q01 → 19/22; only the three collect()
-    queries (q05/q09/q10) remain for WP-C3.
+    WP-C2 (list subscript/slice) promoted q01 → 19/22. WP-C3 (collect with
+    DISTINCT/slice, mixed with aggregates) promoted q05/q09/q10 → 22/22.
+
+    NOTE: transpile-success is not full semantic correctness. Known remaining
+    semantic gaps (tracked in docs/cypher_coverage_plan.md, WP-S phase): label
+    predicates on untyped variables (``WHERE risk:RISK_FACTOR`` on ``MATCH (risk)``
+    in q10/q11/q20) currently compile to a no-op, and the NL "return a graph"/
+    approximate-match issues.
     """
-    assert len(_SUPPORTED) == 19
-    assert len(_GAPS) == 3
-    assert {e.cid for e in _GAPS} == {
-        "q05_orgs_many_locations",
-        "q09_stakeholders_bigtech",
-        "q10_risk_dependency_disclosure",
-    }
+    assert len(_SUPPORTED) == 22
+    assert len(_GAPS) == 0
