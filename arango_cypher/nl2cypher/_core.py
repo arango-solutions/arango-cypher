@@ -464,6 +464,7 @@ class PromptBuilder:
     tenant_context: TenantContext | None = None
     tenant_manifest: TenantScopeManifest | None = None
     retry_context: str = ""
+    graph_intent: bool = False
 
     def render_system(self) -> str:
         base = _SYSTEM_PROMPT.replace("{schema}", self.schema_summary)
@@ -479,6 +480,10 @@ class PromptBuilder:
             # a tenant-scoped example in the corpus, may otherwise
             # dominate the output shape).
             extensions.append(tenant_block)
+        if self.graph_intent:
+            # Appended (not baked into the cacheable prefix) so it only costs
+            # tokens when the question actually asks for a graph.
+            extensions.append(self._render_graph_intent_section())
         if self.few_shot_examples:
             extensions.append(self._render_few_shot_section())
         if self.resolved_entities:
@@ -504,6 +509,24 @@ class PromptBuilder:
             lines.append(cypher.strip())
             lines.append("```")
         return "\n".join(lines)
+
+    def _render_graph_intent_section(self) -> str:
+        return (
+            "## Output shape: return a graph\n"
+            "The user asked to see the result AS A GRAPH (a visualization of "
+            "nodes and relationships). Bind the matched pattern to a PATH "
+            "variable and return the path, so the client can render nodes and "
+            "edges. Do NOT return only scalar properties.\n"
+            "Example:\n"
+            "```cypher\n"
+            "MATCH p = (a)-[:REL]->(b)\n"
+            "RETURN p\n"
+            "LIMIT 50\n"
+            "```\n"
+            "If multiple hops are implied, return the full path "
+            "(`MATCH p = (a)-[*1..3]->(b) RETURN p`). Prefer returning `p` "
+            "(or the bound nodes and relationships) over `b.name`."
+        )
 
     def _render_resolved_entities_section(self) -> str:
         lines = ["## Resolved entities"]
@@ -640,6 +663,7 @@ def _call_llm_with_retry(
     tenant_context: TenantContext | None = None,
     tenant_manifest: TenantScopeManifest | None = None,
     retry_context: str | None = None,
+    graph_intent: bool = False,
 ) -> NL2CypherResult | None:
     """Call the LLM provider with parse + execution-grounded validation and retry.
 
@@ -667,6 +691,7 @@ def _call_llm_with_retry(
         tenant_context=tenant_context,
         tenant_manifest=tenant_manifest,
         retry_context=retry_context or "",
+        graph_intent=graph_intent,
     )
     # Resolve once per call: passed through to every check_tenant_scope
     # invocation so the resulting violation carries the upstream
@@ -1388,6 +1413,36 @@ def _detect_literal_return(question: str) -> str | None:
     return f"RETURN {value}"
 
 
+# Explicit visualization intent: the user wants to *see the graph* (nodes +
+# relationships), not a scalar projection. Kept deliberately conservative — it
+# must fire on "show me, as a graph, …" / "visualize …" / "graph of …" but not
+# on incidental mentions like "how many graphs are there".
+_GRAPH_INTENT_RE = re.compile(
+    r"""
+        \bas\s+a\s+(?:graph|network|subgraph)\b
+      | \bas\s+graph\b
+      | \bvisuali[sz]e\b
+      | \bvisuali[sz]ation\b
+      | \b(?:show|draw|render|display|plot)\b[^.?!]*\b(?:graph|network|subgraph|relationships?|connections?)\b
+      | \b(?:graph|network|subgraph)\s+of\b
+      | \bgraph\s+view\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _detect_graph_intent(question: str) -> bool:
+    """True when the question explicitly asks for a graph/visualization result.
+
+    Drives WP-S1: such questions should produce a path-returning Cypher
+    (``MATCH p = (…)-[…]->(…) RETURN p``) so the UI can render nodes and edges,
+    rather than a scalar like ``RETURN x.name``.
+    """
+    if not question or not question.strip():
+        return False
+    return _GRAPH_INTENT_RE.search(question) is not None
+
+
 def nl_to_cypher(
     question: str,
     *,
@@ -1474,6 +1529,10 @@ def nl_to_cypher(
     # noise on the cold path.
     tenant_manifest = analyze_tenant_scope(bundle) if tenant_context else None
 
+    # WP-S1: detect "show me … as a graph" intent once and let it steer the
+    # prompt toward path-returning Cypher (used by the LLM path below).
+    graph_intent = _detect_graph_intent(question)
+
     if use_llm:
         provider = llm_provider or _get_default_provider()
         if provider is not None:
@@ -1520,6 +1579,7 @@ def nl_to_cypher(
                 tenant_context=tenant_context,
                 tenant_manifest=tenant_manifest,
                 retry_context=retry_context,
+                graph_intent=graph_intent,
             )
             # Fail-closed methods (`tenant_guardrail_blocked` for tenant
             # scope violations, `validation_failed` for retry-budget

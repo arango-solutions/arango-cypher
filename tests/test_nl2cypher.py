@@ -4,9 +4,104 @@ from __future__ import annotations
 
 import pytest
 
-from arango_cypher.nl2cypher import NL2CypherResult, nl_to_cypher
-from arango_cypher.nl2cypher._core import _detect_literal_return
+from arango_cypher.nl2cypher import NL2CypherResult, PromptBuilder, nl_to_cypher
+from arango_cypher.nl2cypher._core import _detect_graph_intent, _detect_literal_return
 from tests.helpers.mapping_fixtures import mapping_bundle_for
+
+
+class TestGraphIntentDetection:
+    """WP-S1: explicit graph/visualization intent steers toward path returns."""
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "Show me, as a graph, the companies CINF has a stake in",
+            "show the companies as a graph",
+            "Visualize the supply chain of Apple",
+            "visualise connections between people",
+            "Draw the network of dependencies",
+            "graph of stakeholders for MSFT",
+            "render the relationships around this org",
+            "display the network around node 5",
+            "show me the subgraph for these risks",
+        ],
+    )
+    def test_detects_graph_intent(self, question) -> None:
+        assert _detect_graph_intent(question) is True
+
+    @pytest.mark.parametrize(
+        "question",
+        [
+            "",
+            "   ",
+            "How many graphs are there?",
+            "list the companies CINF has a stake in",
+            "count the people who acted in a movie",
+            "what is the name of the company",
+            "return the stakeholders",
+        ],
+    )
+    def test_ignores_non_graph_intent(self, question) -> None:
+        assert _detect_graph_intent(question) is False
+
+    def test_builder_includes_graph_section_when_intent(self) -> None:
+        rendered = PromptBuilder(schema_summary="S", graph_intent=True).render_system()
+        assert "Output shape: return a graph" in rendered
+        assert "RETURN p" in rendered
+
+    def test_builder_omits_graph_section_without_intent(self) -> None:
+        rendered = PromptBuilder(schema_summary="S", graph_intent=False).render_system()
+        assert "Output shape: return a graph" not in rendered
+
+    def test_graph_intent_reaches_llm_system_prompt(self, movies_mapping) -> None:
+        class _RecordingProvider:
+            def __init__(self) -> None:
+                self.systems: list[str] = []
+
+            def generate(self, system: str, user: str):  # noqa: ARG002
+                self.systems.append(system)
+                return "```cypher\nMATCH p = (n)-[r]->(m) RETURN p LIMIT 50\n```", {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                    "cached_tokens": 0,
+                }
+
+        provider = _RecordingProvider()
+        nl_to_cypher(
+            "Show me, as a graph, the movies and their actors",
+            mapping=movies_mapping,
+            llm_provider=provider,
+            use_fewshot=False,
+            use_entity_resolution=False,
+        )
+        assert provider.systems, "provider was not called"
+        assert any("Output shape: return a graph" in s for s in provider.systems)
+
+    def test_no_graph_intent_keeps_system_prompt_clean(self, movies_mapping) -> None:
+        class _RecordingProvider:
+            def __init__(self) -> None:
+                self.systems: list[str] = []
+
+            def generate(self, system: str, user: str):  # noqa: ARG002
+                self.systems.append(system)
+                return "```cypher\nMATCH (n) RETURN n.name\n```", {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                    "cached_tokens": 0,
+                }
+
+        provider = _RecordingProvider()
+        nl_to_cypher(
+            "list the movie titles",
+            mapping=movies_mapping,
+            llm_provider=provider,
+            use_fewshot=False,
+            use_entity_resolution=False,
+        )
+        assert provider.systems
+        assert all("Output shape: return a graph" not in s for s in provider.systems)
 
 
 class TestLiteralReturnGuardrail:

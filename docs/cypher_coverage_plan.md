@@ -140,11 +140,17 @@ which is the prompt to promote the entry).
   (`COLLECT k = <expr> AGGREGATE …`); q01's only blocker was the list subscript
   in `labels(n)[0]`. Once WP-C2 landed, q01 transpiles. No separate work needed.
 
-### WP-S1 — NL "return a graph" intent · *M, ~2 days*
-- Detect graph/visual intent in the question ("as a graph", "show the network/
-  paths/connections") → generate a **path-returning** Cypher (`MATCH p = … RETURN p`)
-  instead of scalar projections.
-- Prompt rule + few-shot examples + an NL eval-gate case.
+### WP-S1 — NL "return a graph" intent · ✅ DONE
+- `_detect_graph_intent` (conservative regex: "as a graph/network/subgraph",
+  "visualize/visualise", "show/draw/render/display/plot … graph/network/
+  relationships/connections", "graph of …") in `nl2cypher/_core.py`.
+- On a hit, `PromptBuilder.graph_intent=True` appends an "Output shape: return a
+  graph" section instructing a **path-returning** Cypher (`MATCH p = … RETURN p`)
+  with an inline example — appended (not baked into the cacheable prefix) so it
+  costs tokens only when relevant. Threaded through `_call_llm_with_retry`.
+- Tests: `TestGraphIntentDetection` in `tests/test_nl2cypher.py` (detector
+  positives/negatives, builder rendering, and recording-provider integration
+  asserting the section reaches/omits from the live system prompt).
 - **Improves:** q03, q06 correctness; general "show me … graph" questions.
 
 ### WP-S2 — Approximate entity matching · *M, ~2–3 days*
