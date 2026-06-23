@@ -328,11 +328,33 @@ def test_current_coverage_ratio() -> None:
     WP-C2 (list subscript/slice) promoted q01 → 19/22. WP-C3 (collect with
     DISTINCT/slice, mixed with aggregates) promoted q05/q09/q10 → 22/22.
 
-    NOTE: transpile-success is not full semantic correctness. Known remaining
-    semantic gaps (tracked in docs/cypher_coverage_plan.md, WP-S phase): label
-    predicates on untyped variables (``WHERE risk:RISK_FACTOR`` on ``MATCH (risk)``
-    in q10/q11/q20) currently compile to a no-op, and the NL "return a graph"/
-    approximate-match issues.
+    NOTE: transpile-success is not full semantic correctness. WP-S2c closed the
+    label-predicate-on-untyped-variable gap (``WHERE risk:RISK_FACTOR`` on
+    ``MATCH (risk)`` in q10/q11/q20 now emits the type-discriminator filter
+    instead of a no-op — see ``test_label_predicate_on_untyped_var_emits_filter``).
+    Remaining WP-S items tracked in docs/cypher_coverage_plan.md are the NL
+    "return a graph" / approximate-match concerns.
     """
     assert len(_SUPPORTED) == 22
     assert len(_GAPS) == 0
+
+
+@pytest.mark.parametrize(
+    "cid",
+    ["q10_risk_dependency_disclosure", "q11_geo_risk_3hop", "q20_location_risk_disclosure"],
+)
+def test_label_predicate_on_untyped_var_emits_filter(cid: str, bundle) -> None:
+    """WP-S2c regression guard.
+
+    These three queries carry ``WHERE risk:RISK_FACTOR [OR risk:EVENT]`` over an
+    untyped ``risk`` variable. Pre-WP-S2c the label suffix was dropped and the
+    predicate became a no-op (returning every row). Assert the discriminator
+    filter now materialises in the AQL + bind vars.
+    """
+    entry = next(e for e in CORPUS if e.cid == cid)
+    result = translate(entry.cypher, mapping=bundle)
+    assert "riskLabel" in "".join(result.bind_vars.keys()), (
+        f"{cid}: label predicate produced no discriminator bind var"
+    )
+    assert "RISK_FACTOR" in result.bind_vars.values()
+    assert "risk[@" in result.aql and "Label" in result.aql

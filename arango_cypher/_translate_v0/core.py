@@ -3002,6 +3002,74 @@ def _extra_label_filters(var: str, labels: list[str], primary: str) -> list[str]
     return out
 
 
+def _compile_label_predicate(
+    var: str,
+    labels_ctx: Any,
+    bind_vars: dict[str, Any],
+) -> str | None:
+    """Compile a label predicate (``n:Label`` / ``n:A:B``) to an AQL boolean.
+
+    Cypher allows a label test in expression position — most commonly a WHERE
+    clause over a variable that carries no label in the MATCH pattern, e.g.
+    ``MATCH (risk) WHERE risk:RISK_FACTOR``. Previously the ``:Label`` suffix
+    was dropped and the predicate collapsed to a no-op (``risk``), silently
+    returning every row. Each label is resolved against the active mapping to
+    the same discriminator filter the MATCH binder emits:
+
+    - ``LABEL`` / ``GENERIC_WITH_TYPE`` (LPG / type-discriminated collection)
+      → ``var[@typeField] == @typeValue``.
+    - ``COLLECTION`` (dedicated collection per label) → ``IS_SAME_COLLECTION``.
+
+    Multiple labels (``n:A:B``) are ANDed, matching Cypher's "has all labels"
+    semantics. Returns ``None`` when no resolver is bound so callers degrade to
+    the prior (suffix-ignoring) behaviour rather than crash.
+    """
+    resolver = _active_resolver.get()
+    if resolver is None:
+        return None
+    node_labels = labels_ctx.oC_NodeLabel() or []
+    parts: list[str] = []
+    for nl in node_labels:
+        label = nl.oC_LabelName().getText().strip()
+        if not label:
+            raise CoreError("Invalid label in predicate", code="UNSUPPORTED")
+        mapping = resolver.resolve_entity(_strip_label_backticks(label))
+        style = mapping.get("style")
+        if style in ("LABEL", "GENERIC_WITH_TYPE"):
+            tf = mapping.get("typeField")
+            tv = mapping.get("typeValue")
+            if not (isinstance(tf, str) and tf):
+                raise CoreError(
+                    f"Label predicate '{label}' has no type field in mapping",
+                    code="INVALID_MAPPING",
+                )
+            tf_key = _pick_bind_key(f"{var}LabelField", bind_vars)
+            tv_key = _pick_bind_key(f"{var}LabelValue", bind_vars)
+            bind_vars[tf_key] = tf
+            bind_vars[tv_key] = tv
+            parts.append(f"{var}[@{tf_key}] == @{tv_key}")
+        elif style == "COLLECTION":
+            coll = mapping.get("collectionName")
+            if not (isinstance(coll, str) and coll):
+                raise CoreError(
+                    f"Label predicate '{label}' has no collection in mapping",
+                    code="INVALID_MAPPING",
+                )
+            coll_key = _pick_bind_key(f"{var}LabelColl", bind_vars)
+            bind_vars[coll_key] = coll
+            parts.append(f"IS_SAME_COLLECTION(@{coll_key}, {var})")
+        else:
+            raise CoreError(
+                f"Unsupported entity mapping style for label predicate: {style}",
+                code="INVALID_MAPPING",
+            )
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return f"({parts[0]})"
+    return "(" + " AND ".join(parts) + ")"
+
+
 def _shared_type_field(resolver: MappingResolver | None, kind: str) -> str | None:
     """Return the common type-discriminator field across a mapping section.
 
@@ -3953,7 +4021,17 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
         for lk in lookups or []:
             key = lk.oC_PropertyKeyName().getText().strip()
             atom = f"{atom}.{key}"
-        # Ignore labels suffix in v0
+        labels_ctx = ctx.oC_NodeLabels()
+        if labels_ctx is not None and not lookups:
+            # Label predicate on a bare variable (`n:Label`, `n:A:B`), e.g.
+            # `WHERE risk:RISK_FACTOR`. Translate to the mapping's discriminator
+            # filter instead of dropping it (which made the predicate a no-op).
+            # Only the pure-variable case is handled — `n.prop:Label` is
+            # degenerate Cypher and keeps the legacy suffix-ignoring behaviour.
+            pred = _compile_label_predicate(atom, labels_ctx, bind_vars)
+            if pred is not None:
+                return pred
+        # No resolver bound (or property+label combo): ignore the labels suffix.
         return atom
 
     if isinstance(ctx, CypherParser.OC_AtomContext):
