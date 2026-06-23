@@ -367,6 +367,15 @@ function reducer(state: AppState, action: Action): AppState {
           url: action.url,
           database: action.database,
           username: action.username,
+          // Drop the previous token the moment a (re)connect starts. On a
+          // database switch the old token is about to be (or already is)
+          // server-side invalidated; keeping it here causes the token+database
+          // keyed effects (tenant discovery, graph catalog) to re-fire against
+          // the NEW database with the DEAD token → spurious 401s, and a late
+          // 401 from one of those in-flight calls could even DISCONNECT the
+          // freshly-issued session. Nulling it makes those effects bail
+          // (`if (!token) return`) until CONNECT_SUCCESS installs the new token.
+          token: null,
           error: null,
         },
       };

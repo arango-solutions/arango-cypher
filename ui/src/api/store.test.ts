@@ -426,6 +426,66 @@ describe("reducer: TRANSLATE_ERROR preserves provenance (WP-30)", () => {
   });
 });
 
+describe("reducer: CONNECT_START token lifecycle (db-switch 401 fix)", () => {
+  function connected(): AppState {
+    return apply(initialState, {
+      type: "CONNECT_SUCCESS",
+      token: "old-token",
+      databases: ["a", "b"],
+      url: "https://cluster",
+      database: "a",
+      username: "root",
+      password: "pw",
+    });
+  }
+
+  it("CONNECT_START drops the previous token so db-keyed effects bail", () => {
+    // Switching to database "b" while connected to "a": the old token is
+    // about to be invalidated. If the reducer kept it, the tenant/graph
+    // effects (keyed on token+database) would re-fire against "b" with the
+    // dead token and 401. Nulling the token makes them `if (!token) return`.
+    const s = apply(connected(), {
+      type: "CONNECT_START",
+      url: "https://cluster",
+      database: "b",
+      username: "root",
+    });
+    expect(s.connection.status).toBe("connecting");
+    expect(s.connection.token).toBeNull();
+    expect(s.connection.database).toBe("b");
+  });
+
+  it("CONNECT_SUCCESS installs the fresh token after a switch", () => {
+    const s = apply(
+      connected(),
+      { type: "CONNECT_START", url: "https://cluster", database: "b", username: "root" },
+      {
+        type: "CONNECT_SUCCESS",
+        token: "new-token",
+        databases: ["a", "b"],
+        url: "https://cluster",
+        database: "b",
+        username: "root",
+        password: "pw",
+      },
+    );
+    expect(s.connection.status).toBe("connected");
+    expect(s.connection.token).toBe("new-token");
+    expect(s.connection.database).toBe("b");
+  });
+
+  it("CONNECT_ERROR after a switch leaves no stale token behind", () => {
+    const s = apply(
+      connected(),
+      { type: "CONNECT_START", url: "https://cluster", database: "b", username: "root" },
+      { type: "CONNECT_ERROR", error: "boom" },
+    );
+    expect(s.connection.status).toBe("disconnected");
+    expect(s.connection.token).toBeNull();
+    expect(s.connection.error).toBe("boom");
+  });
+});
+
 describe("reducer: schema catalog pending/analyzing state", () => {
   it("fresh state is neither pending nor analyzing", () => {
     expect(initialState.schemaPending).toBe(false);

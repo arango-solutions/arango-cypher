@@ -129,13 +129,28 @@ export default function ConnectionDialog({ connection, introspecting, analyzing,
   async function handleSwitchDb(newDb: string) {
     if (newDb === connection.database) return;
 
-    if (connection.token) {
-      try { await disconnect(connection.token); } catch { /* best-effort */ }
-    }
-
-    const f = { ...form, database: newDb };
+    // Switch within the SAME cluster: reuse the live connection's credentials
+    // rather than `form`. After the initial connect the dialog is closed and
+    // `form.password` may be stale/empty, which would turn a database switch
+    // into a 400 "Connection failed". `connection.*` is the source of truth
+    // for the active session (password is retained on CONNECT_SUCCESS).
+    const f = {
+      ...form,
+      url: connection.url || form.url,
+      username: connection.username || form.username,
+      password: connection.password || form.password,
+      database: newDb,
+    };
     setForm(f);
+
+    // Best-effort tear-down of the old session. doConnect() dispatches
+    // CONNECT_START, which nulls the token so the database-keyed effects bail
+    // instead of firing against the new DB with the old (now dead) token.
+    const oldToken = connection.token;
     await doConnect(f);
+    if (oldToken) {
+      try { await disconnect(oldToken); } catch { /* best-effort */ }
+    }
   }
 
   async function handleDisconnect() {
