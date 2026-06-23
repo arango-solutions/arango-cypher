@@ -41,28 +41,8 @@ import {
   type NamedGraph,
 } from "./api/client";
 
-const NL_SAMPLES_SEEN_KEY = "nl_samples_seen";
 const TENANT_CTX_KEY = "tenant_context";
 const GRAPH_SCOPE_KEY = "graph_scope";
-
-function loadSeenNlSamples(): Record<string, number> {
-  try {
-    const raw = localStorage.getItem(NL_SAMPLES_SEEN_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-
-function markSeenNlSamples(key: string) {
-  try {
-    const seen = loadSeenNlSamples();
-    seen[key] = Date.now();
-    localStorage.setItem(NL_SAMPLES_SEEN_KEY, JSON.stringify(seen));
-  } catch {
-    // ignore
-  }
-}
 
 function tenantCtxStoreKey(url: string, database: string): string {
   return `${TENANT_CTX_KEY}::${url}::${database}`;
@@ -236,6 +216,12 @@ export default function App() {
   const [nlHistory, setNlHistory] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("nl_history") || "[]"); } catch { return []; }
   });
+  // Auto-generated sample questions for the *current* (database, graph) scope.
+  // Kept separate from the user's persisted history so they regenerate (and
+  // replace, never accumulate) whenever the connected DB or named-graph scope
+  // changes, instead of going stale against a previously-connected database.
+  const [nlSamples, setNlSamples] = useState<string[]>([]);
+  const lastSampleKeyRef = useRef<string | null>(null);
   const [nlHistoryOpen, setNlHistoryOpen] = useState(false);
   const [autoTranslate, setAutoTranslate] = useState<boolean>(() => {
     try { return localStorage.getItem("auto_translate") === "1"; } catch { return false; }
@@ -479,17 +465,21 @@ export default function App() {
     });
   }, []);
 
-  const appendNlHistory = useCallback((queries: string[]) => {
-    if (!queries.length) return;
-    setNlHistory((prev) => {
-      const existing = new Set(prev);
-      const additions = queries.filter((q) => q && !existing.has(q));
-      if (additions.length === 0) return prev;
-      const next = [...prev, ...additions].slice(0, 100);
-      localStorage.setItem("nl_history", JSON.stringify(next));
-      return next;
-    });
-  }, []);
+  // Combined Ask-input suggestions: the user's own typed history first, then
+  // the freshly-generated samples for the current (database, graph) scope,
+  // de-duplicated. Samples live in their own state so a DB/graph switch
+  // replaces them rather than leaving stale entries behind.
+  const nlSuggestions = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const q of nlHistory) {
+      if (q && !seen.has(q)) { seen.add(q); out.push(q); }
+    }
+    for (const q of nlSamples) {
+      if (q && !seen.has(q)) { seen.add(q); out.push(q); }
+    }
+    return out;
+  }, [nlHistory, nlSamples]);
 
   // Seed the Ask-history with a representative set of NL queries the first
   // time we connect to a given database and finish schema introspection.
@@ -827,19 +817,20 @@ export default function App() {
     if (state.introspecting) return;
     if (mappingEntityCount === 0) return;
 
-    const key = `${state.connection.url}||${state.connection.database}`;
-    const seen = loadSeenNlSamples();
-    if (seen[key]) return;
+    // Regenerate samples whenever the (database, named-graph) scope changes.
+    // Including graphScope in the key means selecting/clearing a named graph
+    // re-derives samples against the scoped mapping; a per-session ref avoids
+    // re-calling the LLM on unrelated re-renders of the same scope.
+    const key = `${state.connection.url}||${state.connection.database}||${graphScope ?? ""}`;
+    if (lastSampleKeyRef.current === key) return;
 
     let cancelled = false;
     (async () => {
       try {
         const resp = await suggestNlQueries(state.mapping, 8);
         if (cancelled) return;
-        if (resp.queries && resp.queries.length > 0) {
-          appendNlHistory(resp.queries);
-        }
-        markSeenNlSamples(key);
+        lastSampleKeyRef.current = key;
+        setNlSamples(resp.queries ?? []);
       } catch (err) {
         console.warn("NL sample generation failed:", err);
       }
@@ -851,11 +842,20 @@ export default function App() {
     state.connection.status,
     state.connection.url,
     state.connection.database,
+    graphScope,
     state.introspecting,
     mappingEntityCount,
     state.mapping,
-    appendNlHistory,
   ]);
+
+  // When the connection drops, forget the generated samples so a reconnect
+  // (or a switch to a different database) starts from a clean slate.
+  useEffect(() => {
+    if (state.connection.status !== "connected") {
+      lastSampleKeyRef.current = null;
+      setNlSamples([]);
+    }
+  }, [state.connection.status]);
 
   useEffect(() => {
     const onClick = (e: MouseEvent) => {
@@ -1386,13 +1386,13 @@ export default function App() {
                 value={nlInput}
                 onChange={(e) => setNlInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") { handleNL(); setNlHistoryOpen(false); } }}
-                onFocus={() => { if (nlHistory.length > 0) setNlHistoryOpen(true); }}
+                onFocus={() => { if (nlSuggestions.length > 0) setNlHistoryOpen(true); }}
                 placeholder="Describe what you want in plain English..."
                 className="w-full bg-gray-800 text-gray-200 text-xs rounded px-2.5 py-1.5 border border-gray-700 focus:border-indigo-500 focus:outline-none placeholder-gray-600"
               />
-              {nlHistoryOpen && nlHistory.length > 0 && (
+              {nlHistoryOpen && nlSuggestions.length > 0 && (
                 <div className="absolute left-0 right-0 top-full mt-0.5 z-50 bg-gray-800 border border-gray-700 rounded shadow-xl max-h-48 overflow-y-auto">
-                  {nlHistory.map((q, i) => (
+                  {nlSuggestions.map((q, i) => (
                     <button
                       key={i}
                       className="w-full text-left px-2.5 py-1.5 text-xs text-gray-300 hover:bg-gray-700 hover:text-white truncate transition-colors"

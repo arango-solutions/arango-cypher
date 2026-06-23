@@ -1341,6 +1341,53 @@ def _get_default_fewshot_index() -> FewShotIndex | None:
     return _DEFAULT_FEWSHOT_INDEX
 
 
+# Literal/constant questions ("return hello", 'return "hello"', "return 42")
+# must not become database queries. Such questions reference no schema element,
+# so we short-circuit them to a bare ``RETURN <literal>`` which the transpiler's
+# standalone-RETURN path renders verbatim to AQL. This mirrors the transpiler
+# guardrail (arango_cypher/_translate_v0/returns.py) on the NL side.
+_LITERAL_RETURN_RE = re.compile(
+    r"""^\s*
+        (?:please\s+|just\s+|simply\s+|can\s+you\s+|could\s+you\s+)*
+        return\s+
+        (?P<value>
+            "(?:[^"\\]|\\.)*"        # double-quoted string
+          | '(?:[^'\\]|\\.)*'        # single-quoted string
+          | -?\d+(?:\.\d+)?          # integer or decimal
+          | true | false | null      # keyword literals
+        )
+        (?:\s+as\s+(?P<alias>[A-Za-z_]\w*))?
+        \s*[.!?]?\s*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _detect_literal_return(question: str) -> str | None:
+    """Return a bare ``RETURN <literal>`` Cypher for constant-only questions.
+
+    Recognizes questions whose entire intent is to echo a literal value
+    (string, number, boolean, or null) — optionally aliased — and which
+    therefore must *not* be turned into a graph query. Returns ``None`` for
+    anything that references the schema or is otherwise non-trivial.
+    """
+    if not question or not question.strip():
+        return None
+    m = _LITERAL_RETURN_RE.match(question)
+    if m is None:
+        return None
+    value = m.group("value")
+    # Normalize keyword literals to lowercase; leave string/number literals
+    # exactly as the user wrote them (single or double quotes are both valid
+    # Cypher, and the transpiler accepts either).
+    if value.lower() in {"true", "false", "null"}:
+        value = value.lower()
+    alias = m.group("alias")
+    if alias:
+        return f'RETURN {value} AS {alias}'
+    return f"RETURN {value}"
+
+
 def nl_to_cypher(
     question: str,
     *,
@@ -1384,6 +1431,22 @@ def nl_to_cypher(
             (and ``use_entity_resolution=True``) an :class:`EntityResolver`
             is constructed lazily against this connection.
     """
+    # NL-side guardrail: questions that merely ask to echo a literal/constant
+    # value must never become a database query, regardless of (or absence of)
+    # the schema. Short-circuit to a bare RETURN so the transpiler renders it
+    # verbatim (e.g. RETURN "hello") instead of inventing a graph lookup.
+    literal_cypher = _detect_literal_return(question)
+    if literal_cypher is not None:
+        return NL2CypherResult(
+            cypher=literal_cypher,
+            explanation=(
+                "Constant expression — returned directly without querying the "
+                "graph."
+            ),
+            confidence=1.0,
+            method="literal_return",
+        )
+
     if mapping is None:
         return NL2CypherResult(
             cypher="",

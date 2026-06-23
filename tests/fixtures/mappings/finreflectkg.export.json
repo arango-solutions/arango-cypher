@@ -1,0 +1,135 @@
+{
+  "conceptualSchema": {
+    "entities": [
+      {"name": "ORG", "labels": ["ORG"], "properties": [
+        {"name": "name", "type": "string"},
+        {"name": "id", "type": "string"},
+        {"name": "type", "type": "string"}
+      ]},
+      {"name": "COMP", "labels": ["COMP"], "properties": [
+        {"name": "name", "type": "string"},
+        {"name": "id", "type": "string"},
+        {"name": "type", "type": "string"}
+      ]},
+      {"name": "FIN_METRIC", "labels": ["FIN_METRIC"], "properties": [
+        {"name": "name", "type": "string"},
+        {"name": "id", "type": "string"},
+        {"name": "type", "type": "string"}
+      ]},
+      {"name": "GPE", "labels": ["GPE"], "properties": [
+        {"name": "name", "type": "string"},
+        {"name": "id", "type": "string"},
+        {"name": "type", "type": "string"}
+      ]},
+      {"name": "RISK_FACTOR", "labels": ["RISK_FACTOR"], "properties": [
+        {"name": "name", "type": "string"},
+        {"name": "id", "type": "string"},
+        {"name": "type", "type": "string"}
+      ]},
+      {"name": "EVENT", "labels": ["EVENT"], "properties": [
+        {"name": "name", "type": "string"},
+        {"name": "id", "type": "string"},
+        {"name": "type", "type": "string"}
+      ]},
+      {"name": "ORG_REG", "labels": ["ORG_REG"], "properties": [
+        {"name": "name", "type": "string"},
+        {"name": "id", "type": "string"},
+        {"name": "type", "type": "string"}
+      ]},
+      {"name": "PERSON", "labels": ["PERSON"], "properties": [
+        {"name": "name", "type": "string"},
+        {"name": "id", "type": "string"},
+        {"name": "type", "type": "string"}
+      ]}
+    ],
+    "properties": [],
+    "relationships": [
+      {"type": "Has_Stake_In", "fromEntity": "ORG", "toEntity": "COMP", "properties": [
+        {"name": "startDate", "type": "string"},
+        {"name": "extractionType", "type": "string"}
+      ]},
+      {"type": "Discloses", "fromEntity": "ORG", "toEntity": "FIN_METRIC", "properties": []},
+      {"type": "Operates_In", "fromEntity": "ORG", "toEntity": "GPE", "properties": []},
+      {"type": "Regulates", "fromEntity": "ORG_REG", "toEntity": "ORG", "properties": []},
+      {"type": "Negatively_Impacts", "fromEntity": "RISK_FACTOR", "toEntity": "ORG", "properties": [
+        {"name": "startDate", "type": "string"},
+        {"name": "extractionType", "type": "string"}
+      ]},
+      {"type": "Depends_On", "fromEntity": "ORG", "toEntity": "ORG", "properties": [
+        {"name": "startDate", "type": "string"},
+        {"name": "extractionType", "type": "string"}
+      ]},
+      {"type": "Supplies", "fromEntity": "ORG", "toEntity": "ORG", "properties": []}
+    ]
+  },
+  "physicalMapping": {
+    "entities": {
+      "ORG": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "ORG", "properties": {
+        "name": {"field": "name", "type": "string", "indexed": false, "sampleValues": ["cinf", "aapl", "msft"]},
+        "id": {"field": "id", "type": "string", "indexed": false},
+        "type": {"field": "type", "type": "string", "indexed": false}
+      }},
+      "COMP": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "COMP", "properties": {
+        "name": {"field": "name", "type": "string", "indexed": false, "sampleValues": ["aapl", "googl", "tsla"]},
+        "id": {"field": "id", "type": "string", "indexed": false},
+        "type": {"field": "type", "type": "string", "indexed": false}
+      }},
+      "FIN_METRIC": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "FIN_METRIC", "properties": {
+        "name": {"field": "name", "type": "string", "indexed": false},
+        "id": {"field": "id", "type": "string", "indexed": false},
+        "type": {"field": "type", "type": "string", "indexed": false}
+      }},
+      "GPE": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "GPE", "properties": {
+        "name": {"field": "name", "type": "string", "indexed": false},
+        "id": {"field": "id", "type": "string", "indexed": false},
+        "type": {"field": "type", "type": "string", "indexed": false}
+      }},
+      "RISK_FACTOR": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "RISK_FACTOR", "properties": {
+        "name": {"field": "name", "type": "string", "indexed": false},
+        "id": {"field": "id", "type": "string", "indexed": false},
+        "type": {"field": "type", "type": "string", "indexed": false}
+      }},
+      "EVENT": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "EVENT", "properties": {
+        "name": {"field": "name", "type": "string", "indexed": false},
+        "id": {"field": "id", "type": "string", "indexed": false},
+        "type": {"field": "type", "type": "string", "indexed": false}
+      }},
+      "ORG_REG": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "ORG_REG", "properties": {
+        "name": {"field": "name", "type": "string", "indexed": false},
+        "id": {"field": "id", "type": "string", "indexed": false},
+        "type": {"field": "type", "type": "string", "indexed": false}
+      }},
+      "PERSON": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "PERSON", "properties": {
+        "name": {"field": "name", "type": "string", "indexed": false},
+        "id": {"field": "id", "type": "string", "indexed": false},
+        "type": {"field": "type", "type": "string", "indexed": false}
+      }}
+    },
+    "relationships": {
+      "Has_Stake_In": {"edgeCollectionName": "relations", "style": "GENERIC_WITH_TYPE", "typeField": "type", "typeValue": "has_stake_in", "domain": "ORG", "range": "COMP", "fromTypeField": "_fromType", "toTypeField": "_toType", "properties": {
+        "startDate": {"field": "startDate", "type": "string", "indexed": false},
+        "extractionType": {"field": "extractionType", "type": "string", "indexed": false}
+      }},
+      "Discloses": {"edgeCollectionName": "relations", "style": "GENERIC_WITH_TYPE", "typeField": "type", "typeValue": "discloses", "domain": "ORG", "range": "FIN_METRIC", "fromTypeField": "_fromType", "toTypeField": "_toType", "properties": {}},
+      "Operates_In": {"edgeCollectionName": "relations", "style": "GENERIC_WITH_TYPE", "typeField": "type", "typeValue": "operates_in", "domain": "ORG", "range": "GPE", "fromTypeField": "_fromType", "toTypeField": "_toType", "properties": {}},
+      "Regulates": {"edgeCollectionName": "relations", "style": "GENERIC_WITH_TYPE", "typeField": "type", "typeValue": "regulates", "domain": "ORG_REG", "range": "ORG", "fromTypeField": "_fromType", "toTypeField": "_toType", "properties": {}},
+      "Negatively_Impacts": {"edgeCollectionName": "relations", "style": "GENERIC_WITH_TYPE", "typeField": "type", "typeValue": "negatively_impacts", "domain": "RISK_FACTOR", "range": "ORG", "fromTypeField": "_fromType", "toTypeField": "_toType", "properties": {
+        "startDate": {"field": "startDate", "type": "string", "indexed": false},
+        "extractionType": {"field": "extractionType", "type": "string", "indexed": false}
+      }},
+      "Depends_On": {"edgeCollectionName": "relations", "style": "GENERIC_WITH_TYPE", "typeField": "type", "typeValue": "depends_on", "domain": "ORG", "range": "ORG", "fromTypeField": "_fromType", "toTypeField": "_toType", "properties": {
+        "startDate": {"field": "startDate", "type": "string", "indexed": false},
+        "extractionType": {"field": "extractionType", "type": "string", "indexed": false}
+      }},
+      "Supplies": {"edgeCollectionName": "relations", "style": "GENERIC_WITH_TYPE", "typeField": "type", "typeValue": "supply", "domain": "ORG", "range": "ORG", "fromTypeField": "_fromType", "toTypeField": "_toType", "properties": {}}
+    }
+  },
+  "metadata": {
+    "provider": "fixture",
+    "model": null,
+    "timestamp": "2026-06-23T00:00:00Z",
+    "confidence": 1.0,
+    "reviewRequired": false,
+    "warnings": []
+  }
+}
