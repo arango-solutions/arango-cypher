@@ -30,9 +30,9 @@ import {
   bindTenant,
   listGraphs,
   bindGraph,
+  introspectSchema,
   introspectSchemaUntilReady,
   introspectToMapping,
-  SCHEMA_PENDING_MESSAGE,
   isAuthError,
   isTranspileFallbackError,
   type CorrectionRecord,
@@ -700,15 +700,20 @@ export default function App() {
   // has its own cache slot, so this is cheap on rehydrate. Shared by the
   // graph picker and the rehydrate path.
   const reintrospectScoped = useCallback(
-    async (token: string) => {
-      dispatch({ type: "INTROSPECT_START" });
+    async (token: string, opts: { force?: boolean } = {}) => {
+      const force = opts.force ?? false;
+      dispatch({ type: "INTROSPECT_START", analyzing: force });
       try {
-        // Catalog model (read-only): the graph-scoped mapping has its own cache
-        // slot (keyed by graph name) kept warm by the sidecar. A first-seen
-        // scope may report "pending" while a background warm runs — poll briefly.
-        const schema = await introspectSchemaUntilReady(token);
+        // Catalog model: a read serves the analyzed mapping the sidecar keeps
+        // warm (read-only, fast). When the catalog has nothing for this database
+        // yet, introspect reports status="pending"; we surface that as an
+        // actionable banner rather than spinning forever. "Analyze now" (force)
+        // bypasses the catalog and runs the full analyzer synchronously.
+        const schema = force
+          ? await introspectSchema(token, 50, true)
+          : await introspectSchemaUntilReady(token);
         if (schema.status === "pending") {
-          dispatch({ type: "INTROSPECT_ERROR", error: SCHEMA_PENDING_MESSAGE });
+          dispatch({ type: "INTROSPECT_PENDING" });
         } else {
           const mapping = introspectToMapping(schema);
           dispatch({
@@ -1141,6 +1146,7 @@ export default function App() {
           <ConnectionDialog
             connection={state.connection}
             introspecting={state.introspecting}
+            analyzing={state.schemaAnalyzing}
             dispatch={dispatch}
           />
         </div>
@@ -1261,6 +1267,47 @@ export default function App() {
         </div>
       )}
 
+      {/* Schema-pending banner — the catalog has no analyzed mapping for this
+          database yet (sidecar hasn't synced it, or the session expired). Give
+          the user a clear status and concrete next steps instead of an endless
+          spinner. */}
+      {state.schemaPending && isConnected && (
+        <div className="px-4 py-2 bg-amber-900/30 border-b border-amber-700/60 flex items-center justify-between gap-3">
+          <span className="text-sm text-amber-200 flex-1 break-words">
+            <strong className="font-semibold">Schema not ready.</strong>{" "}
+            The analyzed schema for{" "}
+            <span className="font-mono">{state.connection.database}</span>{" "}
+            isn&apos;t in the catalog yet. The background sidecar refreshes it on a
+            schedule — wait a moment and check again, analyze it now (slow), or
+            reconnect if your session may have expired.
+          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => {
+                const t = state.connection.token;
+                if (t) reintrospectScoped(t);
+              }}
+              disabled={state.introspecting}
+              title="Re-read the catalog (fast). Use this after the sidecar has synced."
+              className="px-2 py-1 text-xs font-medium rounded bg-amber-700 hover:bg-amber-600 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Check again
+            </button>
+            <button
+              onClick={() => {
+                const t = state.connection.token;
+                if (t) reintrospectScoped(t, { force: true });
+              }}
+              disabled={state.introspecting}
+              title="Bypass the catalog and run the full schema analysis now. This can take a minute on a large database."
+              className="px-2 py-1 text-xs font-medium rounded bg-gray-700 hover:bg-gray-600 text-gray-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Analyze now
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main content */}
       <div className="flex-1 min-h-0 flex">
         {/* Mapping sidebar */}
@@ -1274,11 +1321,18 @@ export default function App() {
               />
               {state.introspecting && (
                 <div className="absolute inset-0 bg-gray-950/70 flex items-center justify-center z-20 backdrop-blur-sm">
-                  <div className="flex flex-col items-center gap-2">
+                  <div className="flex flex-col items-center gap-2 px-4 text-center">
                     <svg className="w-6 h-6 text-indigo-400 animate-spin" viewBox="0 0 24 24" fill="none">
                       <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" strokeDasharray="42" strokeDashoffset="12" strokeLinecap="round" />
                     </svg>
-                    <span className="text-xs text-gray-300 font-medium">Extracting schema...</span>
+                    <span className="text-xs text-gray-300 font-medium">
+                      {state.schemaAnalyzing ? "Analyzing schema…" : "Loading schema…"}
+                    </span>
+                    <span className="text-[10px] text-gray-500">
+                      {state.schemaAnalyzing
+                        ? "Running full analysis — this can take up to a minute"
+                        : "Reading the schema catalog"}
+                    </span>
                   </div>
                 </div>
               )}

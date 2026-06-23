@@ -57,6 +57,16 @@ export interface AppState {
   activeResultTab: ResultTab;
   error: string | null;
   introspecting: boolean;
+  // True while a *full* schema analysis is running (the force/"Refresh schema"
+  // path), as opposed to a cheap read-only catalog read. Drives a distinct,
+  // honest spinner label ("Analyzing… can take a minute") so a multi-second
+  // wait doesn't look frozen.
+  schemaAnalyzing: boolean;
+  // True when the catalog has no analyzed mapping for this database yet
+  // (introspect returned status="pending"). Surfaced as an actionable banner —
+  // not a generic error — telling the user to reconnect, wait for the sidecar,
+  // or analyze now.
+  schemaPending: boolean;
   translating: boolean;
   executing: boolean;
   explaining: boolean;
@@ -223,6 +233,8 @@ export const initialState: AppState = {
   activeResultTab: "table",
   error: null,
   introspecting: false,
+  schemaAnalyzing: false,
+  schemaPending: false,
   translating: false,
   executing: false,
   explaining: false,
@@ -270,13 +282,14 @@ export type Action =
     }
   | { type: "CONNECT_ERROR"; error: string }
   | { type: "DISCONNECT" }
-  | { type: "INTROSPECT_START" }
+  | { type: "INTROSPECT_START"; analyzing?: boolean }
   | {
       type: "INTROSPECT_SUCCESS";
       mapping: Record<string, unknown>;
       warnings?: SchemaWarning[];
     }
   | { type: "INTROSPECT_ERROR"; error: string }
+  | { type: "INTROSPECT_PENDING" }
   | { type: "SCHEMA_WARNINGS_REPLACE"; warnings: SchemaWarning[] }
   | { type: "SCHEMA_WARNINGS_CLEAR" }
   | { type: "TRANSLATE_START" }
@@ -394,20 +407,42 @@ function reducer(state: AppState, action: Action): AppState {
         explainPlan: null,
         profileData: null,
         schemaWarnings: [],
+        schemaPending: false,
+        schemaAnalyzing: false,
         editorCypherSource: null,
         lastNlQuestion: null,
       };
     case "INTROSPECT_START":
-      return { ...state, introspecting: true };
+      return {
+        ...state,
+        introspecting: true,
+        schemaAnalyzing: action.analyzing ?? false,
+        schemaPending: false,
+      };
     case "INTROSPECT_SUCCESS":
       return {
         ...state,
         introspecting: false,
+        schemaAnalyzing: false,
+        schemaPending: false,
         mapping: action.mapping,
         schemaWarnings: action.warnings ?? [],
       };
     case "INTROSPECT_ERROR":
-      return { ...state, introspecting: false, error: action.error };
+      return {
+        ...state,
+        introspecting: false,
+        schemaAnalyzing: false,
+        schemaPending: false,
+        error: action.error,
+      };
+    case "INTROSPECT_PENDING":
+      return {
+        ...state,
+        introspecting: false,
+        schemaAnalyzing: false,
+        schemaPending: true,
+      };
     case "SCHEMA_WARNINGS_REPLACE":
       return { ...state, schemaWarnings: action.warnings };
     case "SCHEMA_WARNINGS_CLEAR":

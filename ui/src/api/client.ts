@@ -614,10 +614,6 @@ export async function introspectSchema(
   });
 }
 
-export const SCHEMA_PENDING_MESSAGE =
-  "Schema is being analyzed in the background and isn't ready yet. " +
-  'Retry in a moment, or click "Refresh schema" to analyze it now.';
-
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**

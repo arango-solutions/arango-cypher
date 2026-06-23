@@ -6,7 +6,6 @@ import {
   introspectSchema,
   introspectSchemaUntilReady,
   introspectToMapping,
-  SCHEMA_PENDING_MESSAGE,
   type ConnectDefaults,
 } from "../api/client";
 import type { Action, ConnectionState } from "../api/store";
@@ -14,10 +13,13 @@ import type { Action, ConnectionState } from "../api/store";
 interface Props {
   connection: ConnectionState;
   introspecting: boolean;
+  // True while the *full* analyzer is running (force/"Refresh schema"), so the
+  // status label can be honest about a multi-second wait.
+  analyzing: boolean;
   dispatch: (action: Action) => void;
 }
 
-export default function ConnectionDialog({ connection, introspecting, dispatch }: Props) {
+export default function ConnectionDialog({ connection, introspecting, analyzing, dispatch }: Props) {
   const [form, setForm] = useState({
     url: connection.url,
     database: connection.database,
@@ -99,7 +101,7 @@ export default function ConnectionDialog({ connection, introspecting, dispatch }
         // rebuild for an immediate refresh.
         const schema = await introspectSchemaUntilReady(resp.token);
         if (schema.status === "pending") {
-          dispatch({ type: "INTROSPECT_ERROR", error: SCHEMA_PENDING_MESSAGE });
+          dispatch({ type: "INTROSPECT_PENDING" });
         } else {
           const mapping = introspectToMapping(schema);
           dispatch({
@@ -150,15 +152,20 @@ export default function ConnectionDialog({ connection, introspecting, dispatch }
   // the analyzer LLM previously returned an incomplete mapping.
   async function handleReintrospect() {
     if (!connection.token) return;
-    dispatch({ type: "INTROSPECT_START" });
+    // Force path = full analysis; flag it so the status label says so.
+    dispatch({ type: "INTROSPECT_START", analyzing: true });
     try {
       const schema = await introspectSchema(connection.token, 50, true);
-      const mapping = introspectToMapping(schema);
-      dispatch({
-        type: "INTROSPECT_SUCCESS",
-        mapping,
-        warnings: schema.warnings ?? [],
-      });
+      if (schema.status === "pending") {
+        dispatch({ type: "INTROSPECT_PENDING" });
+      } else {
+        const mapping = introspectToMapping(schema);
+        dispatch({
+          type: "INTROSPECT_SUCCESS",
+          mapping,
+          warnings: schema.warnings ?? [],
+        });
+      }
     } catch (err) {
       dispatch({
         type: "INTROSPECT_ERROR",
@@ -194,7 +201,7 @@ export default function ConnectionDialog({ connection, introspecting, dispatch }
             <svg className="w-3 h-3 animate-spin" viewBox="0 0 16 16" fill="none">
               <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="2" strokeDasharray="28" strokeDashoffset="8" strokeLinecap="round" />
             </svg>
-            Loading schema...
+            {analyzing ? "Analyzing schema… (up to a minute)" : "Loading schema…"}
           </span>
         )}
         <button

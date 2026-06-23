@@ -425,3 +425,65 @@ describe("reducer: TRANSLATE_ERROR preserves provenance (WP-30)", () => {
     expect(s.editorCypherSource).toBe("user");
   });
 });
+
+describe("reducer: schema catalog pending/analyzing state", () => {
+  it("fresh state is neither pending nor analyzing", () => {
+    expect(initialState.schemaPending).toBe(false);
+    expect(initialState.schemaAnalyzing).toBe(false);
+  });
+
+  it("INTROSPECT_START defaults analyzing=false (catalog read)", () => {
+    const s = apply(initialState, { type: "INTROSPECT_START" });
+    expect(s.introspecting).toBe(true);
+    expect(s.schemaAnalyzing).toBe(false);
+    expect(s.schemaPending).toBe(false);
+  });
+
+  it("INTROSPECT_START with analyzing=true flags a full analysis", () => {
+    const s = apply(initialState, { type: "INTROSPECT_START", analyzing: true });
+    expect(s.introspecting).toBe(true);
+    expect(s.schemaAnalyzing).toBe(true);
+  });
+
+  it("INTROSPECT_PENDING surfaces a pending banner, not an error", () => {
+    const s = apply(
+      initialState,
+      { type: "INTROSPECT_START" },
+      { type: "INTROSPECT_PENDING" },
+    );
+    expect(s.introspecting).toBe(false);
+    expect(s.schemaPending).toBe(true);
+    expect(s.error).toBeNull();
+  });
+
+  it("INTROSPECT_SUCCESS clears pending + analyzing", () => {
+    const s = apply(
+      initialState,
+      { type: "INTROSPECT_PENDING" },
+      { type: "INTROSPECT_START", analyzing: true },
+      { type: "INTROSPECT_SUCCESS", mapping: { entities: {} } },
+    );
+    expect(s.schemaPending).toBe(false);
+    expect(s.schemaAnalyzing).toBe(false);
+    expect(s.mapping).toEqual({ entities: {} });
+  });
+
+  it("INTROSPECT_START clears a prior pending flag (Check again / Analyze now)", () => {
+    const s = apply(
+      initialState,
+      { type: "INTROSPECT_PENDING" },
+      { type: "INTROSPECT_START" },
+    );
+    expect(s.schemaPending).toBe(false);
+    expect(s.introspecting).toBe(true);
+  });
+
+  it("DISCONNECT clears pending so the banner doesn't linger", () => {
+    const s = apply(
+      initialState,
+      { type: "INTROSPECT_PENDING" },
+      { type: "DISCONNECT" },
+    );
+    expect(s.schemaPending).toBe(false);
+  });
+});
