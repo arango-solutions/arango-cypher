@@ -46,15 +46,42 @@ class _FakeAql:
         self._responder = responder
         self.calls: list[dict[str, Any]] = []
 
-    def execute(self, aql: str, *, bind_vars: dict[str, Any]) -> _FakeCursor:
-        self.calls.append({"aql": aql, "bind_vars": dict(bind_vars)})
+    def execute(
+        self,
+        aql: str,
+        *,
+        bind_vars: dict[str, Any],
+        max_runtime: float | None = None,
+        **_: Any,
+    ) -> _FakeCursor:
+        self.calls.append(
+            {"aql": aql, "bind_vars": dict(bind_vars), "max_runtime": max_runtime}
+        )
         rows = self._responder(aql, bind_vars)
         return _FakeCursor(rows or [])
 
 
+class _FakeCollection:
+    def __init__(self, count: int, indexes: list[dict[str, Any]]) -> None:
+        self._count = count
+        self._indexes = indexes
+
+    def count(self) -> int:
+        return self._count
+
+    def indexes(self) -> list[dict[str, Any]]:
+        return self._indexes
+
+
 class _FakeDb:
-    def __init__(self, responder):
+    def __init__(self, responder, collections: dict[str, _FakeCollection] | None = None):
         self.aql = _FakeAql(responder)
+        self._collections = collections or {}
+
+    def collection(self, name: str) -> _FakeCollection:
+        if name not in self._collections:
+            raise KeyError(name)
+        return self._collections[name]
 
 
 class TestExtractCandidates:
@@ -292,6 +319,159 @@ class TestOfflineFallback:
 
     def test_no_mapping_returns_empty(self) -> None:
         assert EntityResolver(db=object(), mapping=None).resolve("q") == []
+
+
+class TestProbeHardening:
+    """Per-probe safety limits that keep resolution from hanging on big data."""
+
+    def test_default_probe_timeout_passed_to_execute(self, movies_mapping) -> None:
+        db = _FakeDb(lambda a, b: [])
+        resolver = EntityResolver(db=db, mapping=movies_mapping)
+        resolver.resolve('find "The Matrix"')
+        assert db.aql.calls, "expected at least one probe"
+        assert all(c["max_runtime"] == 5.0 for c in db.aql.calls)
+
+    def test_probe_timeout_zero_disables_max_runtime(self, movies_mapping) -> None:
+        db = _FakeDb(lambda a, b: [])
+        resolver = EntityResolver(db=db, mapping=movies_mapping, probe_timeout=0)
+        resolver.resolve('find "The Matrix"')
+        assert db.aql.calls
+        assert all(c["max_runtime"] is None for c in db.aql.calls)
+
+    def test_explicit_probe_timeout_overrides_default(self, movies_mapping) -> None:
+        db = _FakeDb(lambda a, b: [])
+        resolver = EntityResolver(db=db, mapping=movies_mapping, probe_timeout=2.5)
+        resolver.resolve('find "The Matrix"')
+        assert all(c["max_runtime"] == 2.5 for c in db.aql.calls)
+
+    def test_value_length_filter_present_by_default(self, movies_mapping) -> None:
+        captured: list[str] = []
+        db = _FakeDb(lambda aql, b: captured.append(aql) or [])
+        resolver = EntityResolver(db=db, mapping=movies_mapping)
+        resolver.resolve('find "The Matrix"')
+        assert captured
+        assert "LENGTH(d[@field]) <= @max_value_length" in captured[0]
+        assert db.aql.calls[0]["bind_vars"]["max_value_length"] == 512
+
+    def test_value_length_zero_disables_filter(self, movies_mapping) -> None:
+        captured: list[str] = []
+        db = _FakeDb(lambda aql, b: captured.append(aql) or [])
+        resolver = EntityResolver(db=db, mapping=movies_mapping, max_value_length=0)
+        resolver.resolve('find "The Matrix"')
+        assert captured
+        assert "max_value_length" not in captured[0]
+        assert "max_value_length" not in db.aql.calls[0]["bind_vars"]
+
+    def test_env_overrides_apply(self, movies_mapping, monkeypatch) -> None:
+        monkeypatch.setenv("ARANGO_CYPHER_ER_PROBE_TIMEOUT_S", "1.5")
+        monkeypatch.setenv("ARANGO_CYPHER_ER_MAX_VALUE_LENGTH", "64")
+        monkeypatch.setenv("ARANGO_CYPHER_ER_MAX_SCAN_COLLECTION_SIZE", "9000")
+        resolver = EntityResolver(db=object(), mapping=movies_mapping)
+        assert resolver.probe_timeout == 1.5
+        assert resolver.max_value_length == 64
+        assert resolver.max_scan_collection_size == 9000
+
+    def test_invalid_env_falls_back_to_default(self, movies_mapping, monkeypatch) -> None:
+        monkeypatch.setenv("ARANGO_CYPHER_ER_PROBE_TIMEOUT_S", "not-a-number")
+        resolver = EntityResolver(db=object(), mapping=movies_mapping)
+        assert resolver.probe_timeout == 5.0
+
+    def test_size_gate_disabled_by_default_probes_large_collection(
+        self, movies_mapping
+    ) -> None:
+        seen: list[str] = []
+
+        def responder(aql, bind_vars):
+            seen.append(bind_vars.get("@c"))
+            return []
+
+        db = _FakeDb(
+            responder,
+            collections={"movies": _FakeCollection(count=10_000_000, indexes=[])},
+        )
+        resolver = EntityResolver(db=db, mapping=movies_mapping)
+        resolver.resolve('find "The Matrix"')
+        assert "movies" in seen, "gate off → large collection still probed"
+
+    def test_size_gate_skips_oversized_unindexed_collection(
+        self, movies_mapping
+    ) -> None:
+        seen: list[str] = []
+
+        def responder(aql, bind_vars):
+            seen.append(bind_vars.get("@c"))
+            return []
+
+        db = _FakeDb(
+            responder,
+            collections={"movies": _FakeCollection(count=10_000, indexes=[])},
+        )
+        resolver = EntityResolver(
+            db=db, mapping=movies_mapping, max_scan_collection_size=1000
+        )
+        resolver.resolve('find "The Matrix"')
+        assert "movies" not in seen, "oversized unindexed collection must be skipped"
+
+    def test_size_gate_allows_indexed_collection(self, movies_mapping) -> None:
+        seen: list[str] = []
+
+        def responder(aql, bind_vars):
+            seen.append(bind_vars.get("@c"))
+            return [{"value": "The Matrix", "score": 1.0}] if bind_vars.get("@c") == "movies" else []
+
+        db = _FakeDb(
+            responder,
+            collections={
+                "movies": _FakeCollection(
+                    count=10_000,
+                    indexes=[{"type": "persistent", "fields": ["title"]}],
+                )
+            },
+        )
+        resolver = EntityResolver(
+            db=db, mapping=movies_mapping, max_scan_collection_size=1000
+        )
+        hits = resolver.resolve('find "The Matrix"')
+        assert "movies" in seen, "indexed collection must still be probed"
+        assert any(h.value == "The Matrix" for h in hits)
+
+    def test_size_gate_does_not_skip_when_count_unknown(self, movies_mapping) -> None:
+        seen: list[str] = []
+
+        def responder(aql, bind_vars):
+            seen.append(bind_vars.get("@c"))
+            return []
+
+        # No collections registered → count() raises → count unknown → no skip.
+        db = _FakeDb(responder)
+        resolver = EntityResolver(
+            db=db, mapping=movies_mapping, max_scan_collection_size=1000
+        )
+        resolver.resolve('find "The Matrix"')
+        assert "movies" in seen, "unknown count must not skip the probe"
+
+    def test_total_budget_default_value(self, movies_mapping) -> None:
+        resolver = EntityResolver(db=object(), mapping=movies_mapping)
+        assert resolver.total_budget == 8.0
+
+    def test_total_budget_env_override(self, movies_mapping, monkeypatch) -> None:
+        monkeypatch.setenv("ARANGO_CYPHER_ER_TOTAL_BUDGET_S", "3")
+        resolver = EntityResolver(db=object(), mapping=movies_mapping)
+        assert resolver.total_budget == 3.0
+
+    def test_tiny_budget_short_circuits_before_any_probe(self, movies_mapping) -> None:
+        db = _FakeDb(lambda a, b: [])
+        # A sub-nanosecond budget is always exhausted before the first probe.
+        resolver = EntityResolver(db=db, mapping=movies_mapping, total_budget=1e-9)
+        result = resolver.resolve('find "The Matrix"')
+        assert result == []
+        assert db.aql.calls == [], "budget must stop probing before any DB call"
+
+    def test_zero_budget_disables_ceiling(self, movies_mapping) -> None:
+        db = _FakeDb(lambda a, b: [])
+        resolver = EntityResolver(db=db, mapping=movies_mapping, total_budget=0)
+        resolver.resolve('find "The Matrix"')
+        assert db.aql.calls, "budget=0 disables the ceiling → probes run"
 
 
 class TestFormatPromptSection:

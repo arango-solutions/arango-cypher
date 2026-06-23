@@ -22,13 +22,84 @@ to its pre-WP-25.2 shape.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from arango_query_core.mapping import MappingBundle, MappingResolver
 
 logger = logging.getLogger(__name__)
+
+
+# --- Resolution-probe safety limits (config over hardcoding) -----------------
+#
+# Entity resolution runs a per-(label × property) AQL probe that, in the
+# general case, full-scans a collection and computes ``LEVENSHTEIN_DISTANCE``
+# for every string value. Two pathologies make that catastrophic on real
+# databases:
+#
+#   1. Large free-text fields (e.g. a ``chunks.text`` document store): the
+#      Levenshtein cost is O(len²) per row, so a single probe can run for
+#      minutes and trip the driver's read timeout — surfacing to the user as
+#      a "stuck" NL→Cypher call.
+#   2. Very large collections that aren't even the entity the user means.
+#
+# These limits bound every probe so a mis-scoped or oversized lookup degrades
+# to "no match" in seconds instead of hanging. All three are overridable via
+# environment variables for dev/staging/prod tuning.
+_DEFAULT_PROBE_TIMEOUT_S = 5.0
+"""Per-probe AQL ``maxRuntime`` (seconds). A probe exceeding this is killed by
+the server and treated as "no match". ``0`` disables the cap."""
+
+_DEFAULT_MAX_VALUE_LENGTH = 512
+"""Stored string values longer than this are skipped *inside* the probe before
+the expensive Levenshtein step. Entity names/titles are short; this prunes
+free-text blobs cheaply. ``0`` disables the filter."""
+
+_DEFAULT_MAX_SCAN_COLLECTION_SIZE = 0
+"""When > 0, probes against collections larger than this are skipped *unless* a
+supporting index covers the field. ``0`` (default) disables the size gate so
+legitimate large entity collections (e.g. a multi-million-node vertex store)
+are still resolved — the timeout + value-length filter remain the safety net."""
+
+_DEFAULT_TOTAL_BUDGET_S = 8.0
+"""Wall-clock ceiling for an entire :meth:`EntityResolver.resolve` call. Once
+exceeded, probing stops and the best matches found so far are returned. This
+bounds aggregate latency even when an unscoped schema would otherwise fan out
+into dozens of full-collection probes (a non-exact hit doesn't early-exit, so
+without a budget it would scan every label). ``0`` disables the ceiling."""
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        logger.warning("Invalid %s=%r; falling back to %s", name, raw, default)
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("Invalid %s=%r; falling back to %s", name, raw, default)
+        return default
+
+
+_INDEXABLE_TYPES: frozenset[str] = frozenset(
+    {"persistent", "hash", "skiplist", "inverted", "arangosearch", "primary"}
+)
+"""Index types whose leading field can accelerate (or at least make tractable)
+an equality/prefix lookup on a property. Used by the optional size gate to
+decide whether a large collection is still cheap enough to probe."""
 
 
 _STRING_PROPERTY_CANDIDATES: tuple[str, ...] = (
@@ -187,6 +258,10 @@ class EntityResolver:
         max_candidates: int = 5,
         min_score: float = 0.5,
         fuzzy_threshold: float = 0.7,
+        probe_timeout: float | None = None,
+        max_value_length: int | None = None,
+        max_scan_collection_size: int | None = None,
+        total_budget: float | None = None,
     ) -> None:
         """Initialize a resolver.
 
@@ -208,13 +283,59 @@ class EntityResolver:
                 wholly unrelated strings.  The fuzzy contribution is
                 also down-weighted by ``0.9`` so an exact (1.00) or
                 substring (0.85) hit always wins when both fire.
+            probe_timeout: Per-probe AQL ``maxRuntime`` in seconds. A probe
+                that exceeds this is killed server-side and treated as
+                "no match", so a mis-scoped/oversized lookup degrades in
+                seconds instead of hanging on the driver read timeout.
+                ``None`` → env ``ARANGO_CYPHER_ER_PROBE_TIMEOUT_S`` →
+                default ``5.0``. ``0`` disables the cap.
+            max_value_length: Stored string values longer than this are
+                skipped inside the probe before the expensive Levenshtein
+                step, so free-text fields can't blow up the scan.
+                ``None`` → env ``ARANGO_CYPHER_ER_MAX_VALUE_LENGTH`` →
+                default ``512``. ``0`` disables the filter.
+            max_scan_collection_size: When > 0, probes against collections
+                larger than this are skipped unless a supporting index
+                covers the field. ``None`` → env
+                ``ARANGO_CYPHER_ER_MAX_SCAN_COLLECTION_SIZE`` → default
+                ``0`` (gate disabled; rely on timeout + value-length).
+            total_budget: Wall-clock ceiling (seconds) for the whole
+                :meth:`resolve` call; probing stops once exceeded and the
+                best-so-far matches are returned. ``None`` → env
+                ``ARANGO_CYPHER_ER_TOTAL_BUDGET_S`` → default ``8.0``.
+                ``0`` disables the ceiling.
         """
         self.db = db
         self.mapping = mapping
         self.max_candidates = max_candidates
         self.min_score = min_score
         self.fuzzy_threshold = fuzzy_threshold
+        self.probe_timeout = (
+            _env_float("ARANGO_CYPHER_ER_PROBE_TIMEOUT_S", _DEFAULT_PROBE_TIMEOUT_S)
+            if probe_timeout is None
+            else max(0.0, probe_timeout)
+        )
+        self.max_value_length = (
+            _env_int("ARANGO_CYPHER_ER_MAX_VALUE_LENGTH", _DEFAULT_MAX_VALUE_LENGTH)
+            if max_value_length is None
+            else max(0, max_value_length)
+        )
+        self.max_scan_collection_size = (
+            _env_int(
+                "ARANGO_CYPHER_ER_MAX_SCAN_COLLECTION_SIZE",
+                _DEFAULT_MAX_SCAN_COLLECTION_SIZE,
+            )
+            if max_scan_collection_size is None
+            else max(0, max_scan_collection_size)
+        )
+        self.total_budget = (
+            _env_float("ARANGO_CYPHER_ER_TOTAL_BUDGET_S", _DEFAULT_TOTAL_BUDGET_S)
+            if total_budget is None
+            else max(0.0, total_budget)
+        )
         self._cache: dict[tuple[int, str], list[ResolvedEntity]] = {}
+        self._count_cache: dict[str, int | None] = {}
+        self._indexed_fields_cache: dict[str, set[str]] = {}
         self._schema_labels: set[str] = self._collect_schema_labels(mapping)
         self._resolver: MappingResolver | None = MappingResolver(mapping) if mapping is not None else None
 
@@ -422,9 +543,19 @@ class EntityResolver:
             return []
 
         labels = self._entity_labels()
+        deadline = time.monotonic() + self.total_budget if self.total_budget > 0 else None
         resolved: list[ResolvedEntity] = []
         for mention in candidates:
-            best = self._resolve_single(mention, labels)
+            if deadline is not None and time.monotonic() >= deadline:
+                logger.info(
+                    "EntityResolver: total budget (%.1fs) exhausted; "
+                    "returning %d match(es) before resolving %r",
+                    self.total_budget,
+                    len(resolved),
+                    mention,
+                )
+                break
+            best = self._resolve_single(mention, labels, deadline=deadline)
             if best is not None and best.score >= self.min_score:
                 resolved.append(best)
 
@@ -435,11 +566,19 @@ class EntityResolver:
         self,
         mention: str,
         labels: list[str],
+        deadline: float | None = None,
     ) -> ResolvedEntity | None:
-        """Probe each ``label × property`` pair and return the best hit, if any."""
+        """Probe each ``label × property`` pair and return the best hit, if any.
+
+        Stops early when an exact (≥ 0.99) match is found or the optional
+        ``deadline`` (a :func:`time.monotonic` timestamp) is reached, in
+        which case the best match found so far is returned.
+        """
         best: ResolvedEntity | None = None
         for label in labels:
             for prop in self._resolve_properties_for(label):
+                if deadline is not None and time.monotonic() >= deadline:
+                    return best
                 hit = self._query_label_property(label, prop, mention)
                 if hit is None:
                     continue
@@ -455,6 +594,79 @@ class EntityResolver:
                 if best is not None and best.score >= 0.99:
                     return best
         return best
+
+    def _collection_count(self, collection: str) -> int | None:
+        """Return ``collection``'s document count (cached), or ``None``.
+
+        ArangoDB maintains the count as a O(1) counter, so this is cheap.
+        Any failure (missing handle, permission, mock without
+        ``.collection``) yields ``None`` — callers must treat that as
+        "unknown" and never block resolution on it.
+        """
+        if collection in self._count_cache:
+            return self._count_cache[collection]
+        count: int | None = None
+        try:
+            count = int(self.db.collection(collection).count())  # type: ignore[union-attr]
+        except Exception as exc:
+            logger.debug("count() unavailable for %r: %s", collection, exc)
+            count = None
+        self._count_cache[collection] = count
+        return count
+
+    def _indexed_fields(self, collection: str) -> set[str]:
+        """Return the set of leading index fields on ``collection`` (cached).
+
+        Only the *first* field of each lookup-capable index is reported,
+        since a compound index can only accelerate a single-field equality
+        on its leading attribute. Any failure yields an empty set, which
+        the size gate treats as "no supporting index".
+        """
+        if collection in self._indexed_fields_cache:
+            return self._indexed_fields_cache[collection]
+        fields: set[str] = set()
+        try:
+            for idx in self.db.collection(collection).indexes():  # type: ignore[union-attr]
+                if not isinstance(idx, dict):
+                    continue
+                if str(idx.get("type", "")).lower() not in _INDEXABLE_TYPES:
+                    continue
+                idx_fields = idx.get("fields") or []
+                if isinstance(idx_fields, list) and idx_fields:
+                    first = idx_fields[0]
+                    if isinstance(first, str):
+                        fields.add(first)
+        except Exception as exc:
+            logger.debug("indexes() unavailable for %r: %s", collection, exc)
+            fields = set()
+        self._indexed_fields_cache[collection] = fields
+        return fields
+
+    def _should_skip_collection(self, collection: str, field_name: str) -> bool:
+        """Decide whether to skip a probe on an oversized collection.
+
+        Returns ``True`` only when the optional size gate is enabled
+        (:attr:`max_scan_collection_size` > 0), the collection's known
+        count exceeds the threshold, AND no index covers ``field_name``.
+        Unknown counts (``None``) never skip — the per-probe timeout and
+        value-length filter remain the safety net for those.
+        """
+        if self.max_scan_collection_size <= 0:
+            return False
+        count = self._collection_count(collection)
+        if count is None or count <= self.max_scan_collection_size:
+            return False
+        if field_name in self._indexed_fields(collection):
+            return False
+        logger.info(
+            "EntityResolver: skipping probe on oversized collection %r "
+            "(%d docs > %d, no index on %r)",
+            collection,
+            count,
+            self.max_scan_collection_size,
+            field_name,
+        )
+        return True
 
     def _query_label_property(
         self,
@@ -506,12 +718,20 @@ class EntityResolver:
         meta = props_meta.get(prop, {}) if isinstance(props_meta, dict) else {}
         field_name = str(meta["field"]) if isinstance(meta, dict) and meta.get("field") else prop
 
+        if self._should_skip_collection(collection, field_name):
+            return None
+
         type_filter = "  FILTER d[@type_field] == @type_value\n" if type_field and type_value else ""
+        # Prune oversized free-text values *before* the O(len²) Levenshtein
+        # step so a ``text``-style field can't turn the probe into a
+        # multi-minute scan. Skipped when max_value_length == 0.
+        length_filter = "  FILTER LENGTH(d[@field]) <= @max_value_length\n" if self.max_value_length > 0 else ""
 
         aql = (
             f"FOR d IN @@c\n"
             f"{type_filter}"
             f"  FILTER HAS(d, @field) AND IS_STRING(d[@field])\n"
+            f"{length_filter}"
             f"  LET lv = LOWER(d[@field])\n"
             f"  LET lm = LOWER(@m)\n"
             f"  LET exact = lv == lm ? 1.0 : 0.0\n"
@@ -533,12 +753,18 @@ class EntityResolver:
             "m": mention,
             "fuzzy_threshold": self.fuzzy_threshold,
         }
+        if self.max_value_length > 0:
+            bind_vars["max_value_length"] = self.max_value_length
         if type_field and type_value:
             bind_vars["type_field"] = type_field
             bind_vars["type_value"] = type_value
 
+        exec_kwargs: dict[str, Any] = {"bind_vars": bind_vars}
+        if self.probe_timeout > 0:
+            exec_kwargs["max_runtime"] = self.probe_timeout
+
         try:
-            cursor = self.db.aql.execute(aql, bind_vars=bind_vars)
+            cursor = self.db.aql.execute(aql, **exec_kwargs)
             rows = list(cursor)
         except Exception as exc:
             logger.info(
