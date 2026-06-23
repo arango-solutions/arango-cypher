@@ -13,12 +13,14 @@ from arango_query_core import MappingResolver
 
 from ..app import app
 from ..mapping import _mapping_from_dict
-from ..models import TranslateRequest
+from ..models import CreateIndexRequest, TranslateRequest
 from ..observability import log_endpoint_timing
 from ..security import (
     _check_compute_rate_limit,
+    _COLLECTION_NAME_RE,
     _get_session,
     _Session,
+    _translate_errors,
 )
 
 
@@ -467,6 +469,76 @@ def schema_force_reacquire(
         warnings=len(warnings),
     )
     return payload
+
+
+@app.post("/schema/index/create")
+def create_index(
+    req: CreateIndexRequest,
+    session: _Session = Depends(_get_session),
+):
+    """WP-S3c: create an inverted index to accelerate fuzzy name matching.
+
+    Consumes an ``IndexAdvisory`` (collection + field) surfaced by the NL
+    entity resolver and creates an inverted index with a text analyzer on that
+    field. The index spec is reconstructed here from the validated fields — the
+    client never passes a free-form spec — so this endpoint can only create the
+    one shape the advisory recommends.
+
+    Idempotent: if an inverted index already covers the field it returns
+    ``created=False`` instead of erroring, so the UI's one-click button is safe
+    to press more than once (and safe after a background sidecar already added
+    the index).
+    """
+    coll = req.collection
+    field = req.field
+    if not _COLLECTION_NAME_RE.fullmatch(coll):
+        raise HTTPException(status_code=400, detail="Invalid collection name")
+    if not field.strip():
+        raise HTTPException(status_code=400, detail="Field name is required")
+    t0 = time.perf_counter()
+    db = session.db
+    with _translate_errors("Index creation failed"):
+        if not db.has_collection(coll):
+            raise HTTPException(status_code=404, detail=f"Collection '{coll}' not found")
+        collection = db.collection(coll)
+        # Idempotency guard: don't add a second inverted index over the same
+        # field. Mirrors the resolver's own index-coverage probe.
+        for idx in collection.indexes():
+            if str(idx.get("type", "")).lower() != "inverted":
+                continue
+            names = {
+                (f.get("name") if isinstance(f, dict) else f)
+                for f in (idx.get("fields") or [])
+            }
+            if field in names:
+                log_endpoint_timing(
+                    "/schema/index/create",
+                    round((time.perf_counter() - t0) * 1000, 1),
+                    collection=coll,
+                    field=field,
+                    created=False,
+                )
+                return {
+                    "created": False,
+                    "collection": coll,
+                    "field": field,
+                    "index": {"name": idx.get("name"), "id": idx.get("id")},
+                    "message": "An inverted index already covers this field.",
+                }
+        spec = {
+            "type": "inverted",
+            "name": req.name or f"idx_fuzzy_{field}",
+            "fields": [{"name": field, "analyzer": req.analyzer}],
+        }
+        created = collection.add_index(spec)
+    log_endpoint_timing(
+        "/schema/index/create",
+        round((time.perf_counter() - t0) * 1000, 1),
+        collection=coll,
+        field=field,
+        created=True,
+    )
+    return {"created": True, "collection": coll, "field": field, "index": created}
 
 
 # ---------------------------------------------------------------------------

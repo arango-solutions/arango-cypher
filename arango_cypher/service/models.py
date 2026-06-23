@@ -254,6 +254,22 @@ class NL2AqlRequest(BaseModel):
     cypher: str | None = Field(default=None, max_length=_MAX_FIELD_LENGTH)
 
 
+class CreateIndexRequest(BaseModel):
+    """WP-S3c: one-click creation of an inverted index for fuzzy matching.
+
+    Consumes the structured fields of an ``IndexAdvisory`` (collection + field)
+    emitted by the NL entity resolver. The index spec is reconstructed
+    server-side from these fields rather than accepting a free-form spec dict
+    from the client, so a session cannot create an arbitrary index shape on its
+    database through this endpoint.
+    """
+
+    collection: str = Field(..., max_length=_MAX_FIELD_LENGTH)
+    field: str = Field(..., max_length=_MAX_FIELD_LENGTH)
+    analyzer: str = Field(default="text_en", max_length=_MAX_FIELD_LENGTH)
+    name: str | None = Field(default=None, max_length=_MAX_FIELD_LENGTH)
+
+
 class OwlExportRequest(BaseModel):
     mapping: dict[str, Any]
 

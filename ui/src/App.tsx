@@ -22,6 +22,7 @@ import {
   profileCypher,
   nl2Cypher,
   nl2Aql,
+  createIndex,
   saveCorrection,
   listCorrections,
   deleteCorrection,
@@ -39,6 +40,7 @@ import {
   type TenantContext,
   type DiscoveredTenant,
   type NamedGraph,
+  type IndexAdvisory,
 } from "./api/client";
 
 const TENANT_CTX_KEY = "tenant_context";
@@ -200,6 +202,14 @@ export default function App() {
   // server's (empty) ``cypher`` into the editor — the pre-WP-29
   // behaviour silently dropped an invalid query into the editor.
   const [nlError, setNlError] = useState("");
+  // WP-S3c: inverted/ArangoSearch index advisories from the NL entity resolver
+  // (fuzzy probes that fell back to a full scan). Rendered as a one-click
+  // "Create index" affordance below the NL input. Keyed by `collection.field`
+  // to track per-advisory create status (idle/creating/created/error).
+  const [nlAdvisories, setNlAdvisories] = useState<IndexAdvisory[]>([]);
+  const [advisoryStatus, setAdvisoryStatus] = useState<
+    Record<string, { state: "creating" | "created" | "error"; message?: string }>
+  >({});
   const [nlMode, setNlMode] = useState<"cypher" | "aql">("cypher");
   // Holds the Cypher that failed to transpile with a recoverable
   // (UNSUPPORTED / NOT_IMPLEMENTED) error, enabling the "Generate AQL
@@ -635,9 +645,13 @@ export default function App() {
           setTenantCatalog([]);
           setTenantsDetected(false);
           setTenantResolution({ collection: null, source: null, error: msg });
-        }
-        if (isAuthError(err)) {
-          dispatch({ type: "DISCONNECT" });
+          // Only react to a 401 if this effect run is still current. During a
+          // database switch the previous run is cancelled (token/database
+          // changed); a late 401 from its in-flight request must NOT disconnect
+          // the freshly-established session.
+          if (isAuthError(err)) {
+            dispatch({ type: "DISCONNECT" });
+          }
         }
       } finally {
         if (!cancelled) setTenantsLoading(false);
@@ -772,8 +786,10 @@ export default function App() {
         if (!cancelled) {
           setGraphCatalog([]);
           setGraphError(msg);
+          // Stale-run guard: a 401 from a cancelled run (e.g. mid database
+          // switch) must not tear down the new session. See tenant effect.
+          if (isAuthError(err)) dispatch({ type: "DISCONNECT" });
         }
-        if (isAuthError(err)) dispatch({ type: "DISCONNECT" });
       } finally {
         if (!cancelled) setGraphsLoading(false);
       }
@@ -873,6 +889,8 @@ export default function App() {
     setNlLoading(true);
     setNlInfo("");
     setNlError("");
+    setNlAdvisories([]);
+    setAdvisoryStatus({});
     try {
       const tenantCtx = tenantContextRef.current;
       if (nlMode === "aql") {
@@ -900,6 +918,10 @@ export default function App() {
           sessionToken: state.connection.token ?? undefined,
           tenantContext: tenantCtx,
         });
+        // WP-S3c: surface any inverted-index advisories the entity resolver
+        // recorded (fuzzy probes that hit a full scan) regardless of whether
+        // a cypher came back — the missing index is worth flagging either way.
+        setNlAdvisories(resp.advisories ?? []);
         // WP-29: structured fail-closed methods produce an empty
         // ``cypher`` by design. Surface them as a red banner and
         // never write the server payload into the Cypher editor.
@@ -938,6 +960,40 @@ export default function App() {
       setNlLoading(false);
     }
   }, [nlInput, nlMode, dispatch, addNlHistory, autoTranslate, autoRun, state.connection.token, handleMaybeAuthError]);
+
+  // WP-S3c: one-click creation of the inverted index an advisory recommends.
+  // Authenticated (mutates the connected DB). Idempotent server-side. Tracks
+  // per-advisory status so the button can show creating/created/error inline.
+  const handleCreateIndex = useCallback(
+    async (advisory: IndexAdvisory) => {
+      const token = state.connection.token;
+      if (!token) return;
+      const key = `${advisory.collection}.${advisory.field}`;
+      setAdvisoryStatus((s) => ({ ...s, [key]: { state: "creating" } }));
+      try {
+        const resp = await createIndex(token, advisory);
+        setAdvisoryStatus((s) => ({
+          ...s,
+          [key]: {
+            state: "created",
+            message: resp.created
+              ? "Index created."
+              : resp.message || "Index already exists.",
+          },
+        }));
+      } catch (err) {
+        setAdvisoryStatus((s) => ({
+          ...s,
+          [key]: {
+            state: "error",
+            message: err instanceof Error ? err.message : "Index creation failed",
+          },
+        }));
+        handleMaybeAuthError(err);
+      }
+    },
+    [state.connection.token, handleMaybeAuthError],
+  );
 
   // WP-30: regenerate the Cypher from the last NL question, feeding
   // the current translate error back into the LLM as retry context.
@@ -1450,6 +1506,54 @@ export default function App() {
               >
                 dismiss
               </button>
+            </div>
+          )}
+
+          {/* WP-S3c: inverted-index advisories from the NL entity resolver.
+              A fuzzy name match fell back to a full collection scan; offer
+              one-click creation of an inverted (ArangoSearch) index. */}
+          {nlAdvisories.length > 0 && (
+            <div className="mx-2 mb-2 px-3 py-2 rounded border border-amber-700/50 bg-amber-950/30 text-amber-200 text-xs space-y-1.5">
+              <div className="flex items-center gap-2">
+                <span className="text-amber-400" aria-hidden>&#9888;</span>
+                <span className="font-semibold">Slow fuzzy match detected</span>
+                <button
+                  onClick={() => setNlAdvisories([])}
+                  className="ml-auto text-amber-300/80 hover:text-amber-100 text-[10px] uppercase tracking-wide"
+                  title="Dismiss"
+                >
+                  dismiss
+                </button>
+              </div>
+              {nlAdvisories.map((adv) => {
+                const key = `${adv.collection}.${adv.field}`;
+                const status = advisoryStatus[key];
+                return (
+                  <div key={key} className="flex items-center gap-2 flex-wrap">
+                    <span className="flex-1 min-w-[180px] break-words text-amber-300/90">
+                      Fuzzy matching on <code className="text-amber-200">{adv.collection}.{adv.field}</code> runs a
+                      full collection scan. An inverted index speeds it up.
+                    </span>
+                    {status?.state === "created" ? (
+                      <span className="text-emerald-400 text-[11px] shrink-0">
+                        &#10003; {status.message}
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => handleCreateIndex(adv)}
+                        disabled={!state.connection.token || status?.state === "creating"}
+                        className="px-2.5 py-1 text-[11px] font-medium rounded bg-amber-600 hover:bg-amber-500 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                        title={`Create an inverted index on ${adv.collection}.${adv.field}`}
+                      >
+                        {status?.state === "creating" ? "Creating..." : "Create index"}
+                      </button>
+                    )}
+                    {status?.state === "error" && (
+                      <span className="text-red-300 text-[11px] w-full">{status.message}</span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 

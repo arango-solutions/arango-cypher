@@ -104,6 +104,76 @@ class TestGraphIntentDetection:
         assert all("Output shape: return a graph" not in s for s in provider.systems)
 
 
+class TestIndexAdvisoryThreading:
+    """WP-S3c: advisories recorded by the entity resolver must be attached to
+    the NL2CypherResult so the service/UI can offer one-click index creation."""
+
+    def _provider(self):
+        class _RecordingProvider:
+            def generate(self, system: str, user: str):  # noqa: ARG002
+                return "```cypher\nMATCH (n) RETURN n\n```", {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2,
+                    "cached_tokens": 0,
+                }
+
+        return _RecordingProvider()
+
+    def _resolver_with_advisory(self):
+        from arango_cypher.nl2cypher import IndexAdvisory
+
+        class _FakeResolver:
+            def __init__(self) -> None:
+                self.advisories = [IndexAdvisory(collection="Node", field="name")]
+
+            def resolve(self, question: str):  # noqa: ARG002
+                return []
+
+            def format_prompt_section(self, hits):  # noqa: ARG002
+                return []
+
+        return _FakeResolver()
+
+    def test_result_carries_resolver_advisories(self, movies_mapping) -> None:
+        result = nl_to_cypher(
+            "companies cincinnati financial (CINF) has a stake in",
+            mapping=movies_mapping,
+            llm_provider=self._provider(),
+            use_fewshot=False,
+            use_entity_resolution=True,
+            entity_resolver=self._resolver_with_advisory(),
+        )
+        assert result.cypher  # LLM path produced cypher
+        assert len(result.advisories) == 1
+        adv = result.advisories[0]
+        assert adv["collection"] == "Node"
+        assert adv["field"] == "name"
+        assert adv["suggestedIndex"]["type"] == "inverted"
+
+    def test_no_advisories_when_resolver_clean(self, movies_mapping) -> None:
+        from arango_cypher.nl2cypher import IndexAdvisory  # noqa: F401
+
+        class _CleanResolver:
+            advisories: list = []
+
+            def resolve(self, question: str):  # noqa: ARG002
+                return []
+
+            def format_prompt_section(self, hits):  # noqa: ARG002
+                return []
+
+        result = nl_to_cypher(
+            "find the movies",
+            mapping=movies_mapping,
+            llm_provider=self._provider(),
+            use_fewshot=False,
+            use_entity_resolution=True,
+            entity_resolver=_CleanResolver(),
+        )
+        assert result.advisories == []
+
+
 class TestLiteralReturnGuardrail:
     """NL-side guardrail: constant-only questions must not become DB queries."""
 

@@ -196,6 +196,11 @@ def nl2cypher_endpoint(
         "total_tokens": result.total_tokens,
         "cached_tokens": result.cached_tokens,
         "retries": result.retries,
+        # WP-S3c: inverted/ArangoSearch index advisories from the entity
+        # resolver (fuzzy probes that fell back to a full scan). The UI offers
+        # one-click creation via POST /schema/index/create. ``getattr`` keeps
+        # older/mock result objects (and any non-LLM path) safe.
+        "advisories": getattr(result, "advisories", None) or [],
     }
 
 

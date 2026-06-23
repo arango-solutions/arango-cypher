@@ -174,6 +174,71 @@ class TestValidationFailedResponseShape:
         assert captured.get("db") is None
 
 
+class TestIndexAdvisoriesPassThrough:
+    """WP-S3c: the NL entity resolver's index advisories must survive the
+    ``nl_to_cypher`` → endpoint → JSON hop so the UI can offer one-click
+    index creation."""
+
+    def test_advisories_included_in_response(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        advisory = {
+            "collection": "Node",
+            "field": "name",
+            "reason": "fuzzy name matching falls back to a full collection scan",
+            "suggestedIndex": {
+                "type": "inverted",
+                "name": "idx_fuzzy_name",
+                "fields": [{"name": "name", "analyzer": "text_en"}],
+            },
+        }
+
+        def _fake_nl_to_cypher(*args: Any, **kwargs: Any):
+            return _fake_result(advisories=[advisory])
+
+        from arango_cypher import nl2cypher as nl_module
+
+        monkeypatch.setattr(nl_module, "nl_to_cypher", _fake_nl_to_cypher)
+
+        resp = client.post(
+            "/nl2cypher",
+            json={
+                "question": "companies cincinnati financial cinf has a stake in",
+                "mapping": {"conceptualSchema": {}, "physicalMapping": {}},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["advisories"] == [advisory]
+
+    def test_no_advisories_yields_empty_list(
+        self,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A result without advisories (or a mock lacking the attr) must
+        produce ``advisories: []``, never a 500 or a missing key."""
+
+        def _fake_nl_to_cypher(*args: Any, **kwargs: Any):
+            return _fake_result()  # SimpleNamespace without `advisories`
+
+        from arango_cypher import nl2cypher as nl_module
+
+        monkeypatch.setattr(nl_module, "nl_to_cypher", _fake_nl_to_cypher)
+
+        resp = client.post(
+            "/nl2cypher",
+            json={
+                "question": "find people",
+                "mapping": {"conceptualSchema": {}, "physicalMapping": {}},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["advisories"] == []
+
+
 # Make the `service` import a used symbol for ruff (keeps the module
 # reference explicit so future assertions on module state are easy).
 _ = service

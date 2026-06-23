@@ -54,6 +54,16 @@ class NL2CypherResult:
     Anthropic's ``cache_read_input_tokens``, …).  ``0`` for rule-based
     results and for providers that don't expose cache telemetry.
     """
+    advisories: list[dict[str, Any]] = field(default_factory=list)
+    """ArangoSearch/inverted-index advisories (WP-S3c).
+
+    Each entry is an :meth:`IndexAdvisory.as_dict` payload
+    (``{collection, field, reason, suggestedIndex}``) recorded when the
+    entity resolver ran a fuzzy name probe against a field with no
+    inverted/ArangoSearch coverage — i.e. a full collection scan. The
+    service forwards these so the UI can offer one-click index creation.
+    Empty for rule-based / literal / no-mapping results.
+    """
 
 
 def _property_quality_hint(prop_meta: dict[str, Any] | None) -> str:
@@ -1596,6 +1606,7 @@ def nl_to_cypher(
                         few_shot = []
 
             resolved_lines: list[str] = []
+            index_advisories: list[dict[str, Any]] = []
             if use_entity_resolution:
                 resolver = entity_resolver
                 if resolver is None and db is not None:
@@ -1614,6 +1625,16 @@ def nl_to_cypher(
                     except Exception as exc:
                         logger.info("EntityResolver.resolve failed: %s", exc)
                         resolved_lines = []
+                    # WP-S3c: forward any inverted/ArangoSearch advisories the
+                    # resolver recorded (fuzzy probes that fell back to a full
+                    # scan) so the UI can offer one-click index creation. Read
+                    # even when resolve() raised — partial probes may have
+                    # already flagged a missing index.
+                    try:
+                        index_advisories = [a.as_dict() for a in resolver.advisories]
+                    except Exception as exc:
+                        logger.info("Reading resolver advisories failed: %s", exc)
+                        index_advisories = []
 
             result = _call_llm_with_retry(
                 question,
@@ -1640,8 +1661,12 @@ def nl_to_cypher(
                 "tenant_guardrail_blocked",
                 "validation_failed",
             ):
+                if index_advisories:
+                    result.advisories = index_advisories
                 return result
             if result and result.cypher:
+                if index_advisories:
+                    result.advisories = index_advisories
                 return result
 
     # Rule-based fallback cannot enforce tenant scoping — if a tenant

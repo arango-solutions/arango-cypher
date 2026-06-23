@@ -260,6 +260,20 @@ export async function getSampleQueries(
   return request(`/sample-queries${qs}`);
 }
 
+// WP-S3c: an inverted/ArangoSearch index suggestion emitted by the NL entity
+// resolver when a fuzzy name probe fell back to a full collection scan. The UI
+// offers one-click creation via `createIndex`.
+export interface IndexAdvisory {
+  collection: string;
+  field: string;
+  reason: string;
+  suggestedIndex?: {
+    type: string;
+    name: string;
+    fields: Array<{ name: string; analyzer?: string }>;
+  };
+}
+
 export interface NL2CypherResponse {
   cypher: string;
   explanation: string;
@@ -269,6 +283,7 @@ export interface NL2CypherResponse {
   prompt_tokens?: number;
   completion_tokens?: number;
   total_tokens?: number;
+  advisories?: IndexAdvisory[];
 }
 
 export interface TenantContext {
@@ -310,6 +325,36 @@ export async function nl2Cypher(
   return request("/nl2cypher", {
     method: "POST",
     body: JSON.stringify(body),
+  });
+}
+
+export interface CreateIndexResponse {
+  created: boolean;
+  collection: string;
+  field: string;
+  message?: string;
+  index?: unknown;
+}
+
+// WP-S3c: create the inverted index an IndexAdvisory recommends. Authenticated
+// (uses the session token) since it mutates the connected database. The backend
+// reconstructs the index spec from collection+field+analyzer, so we only send
+// those validated fields. Idempotent server-side (`created:false` if it exists).
+export async function createIndex(
+  token: string,
+  advisory: IndexAdvisory,
+): Promise<CreateIndexResponse> {
+  const analyzer = advisory.suggestedIndex?.fields?.[0]?.analyzer ?? "text_en";
+  const name = advisory.suggestedIndex?.name;
+  return request("/schema/index/create", {
+    method: "POST",
+    headers: authHeaders(token),
+    body: JSON.stringify({
+      collection: advisory.collection,
+      field: advisory.field,
+      analyzer,
+      ...(name ? { name } : {}),
+    }),
   });
 }
 
