@@ -1,7 +1,7 @@
 # Cypher Coverage Completion Plan
 
 **Status:** Transpiler coverage (M1+M2) **complete: 22/22**. Semantics (M3): WP-S1
-done; WP-S2 done (S2c carved out); WP-S3 S3a/S3b done (S3c UI carved out).
+done; WP-S2 done (incl. S2c); WP-S3 done (incl. S3c).
 **Owner:** transpiler / NL→Cypher
 **Date:** 2026-06-23
 
@@ -38,11 +38,11 @@ The 7 original failures collapsed into **three transpiler gaps** plus a
 100% transpile-success is **not** 100% semantic correctness. Tracked for the
 WP-S phase:
 
-- **Label predicate on an untyped variable.** `MATCH (risk) … WHERE risk:RISK_FACTOR
-  OR risk:EVENT` (q10/q11/q20) compiles to a no-op `(risk OR risk)` because `risk`
-  has no label in the pattern, so the discriminator collection/field is unknown at
-  compile time. Should resolve to a `risk.type IN [...]`-style filter once the
-  resolver can attribute a collection to the bare variable. → folds into **WP-S2**.
+- ~~**Label predicate on an untyped variable.**~~ ✅ **WP-S2c (done).**
+  `MATCH (risk) … WHERE risk:RISK_FACTOR OR risk:EVENT` (q10/q11/q20) now compiles
+  the label suffix to the mapping's discriminator filter
+  (`risk[@typeField] == @typeValue` for LABEL/GENERIC_WITH_TYPE,
+  `IS_SAME_COLLECTION(...)` for COLLECTION) instead of dropping it to a no-op.
 - **"as a graph" intent + approximate entity match** (the CINF query). → **WP-S1/S2**.
 
 What already works and must stay working (regression guard): anonymous edge
@@ -154,7 +154,7 @@ which is the prompt to promote the entry).
   asserting the section reaches/omits from the live system prompt).
 - **Improves:** q03, q06 correctness; general "show me … graph" questions.
 
-### WP-S2 — Approximate entity matching · ✅ DONE (S2c carved out)
+### WP-S2 — Approximate entity matching · ✅ DONE (incl. S2c)
 - **S2a — valueShape surfaced (done).** `_property_quality_hint` now renders
   `shape: <…>` and `e.g. "…", "…"` from analyzer property metadata
   (`valueShape`/`value_shape`, `examples`/`exampleValues`/`sampleValues`), and
@@ -170,19 +170,21 @@ which is the prompt to promote the entry).
 - Tests: `TestValueShapeHints` (`tests/test_nl2cypher.py`),
   `TestExtractCandidates`/`TestIdentifierPropertyCandidates`
   (`tests/test_nl2cypher_entity_resolution.py`).
-- **Carved out → WP-S2c (label predicate on untyped var).** `MATCH (risk) …
-  WHERE risk:RISK_FACTOR` compiles to a no-op because the expression compiler
-  (`_compile_expression`, `core.py` line ~3956 "Ignore labels suffix in v0")
-  has no mapping/var→collection context to turn a label into a discriminator
-  filter. Fixing it well requires threading a per-variable label resolver into
-  expression compilation (e.g. stash a var→{collection,typeField} map in
-  `bind_vars` at each MATCH site, then emit `risk.<typeField> == "RISK_FACTOR"`
-  / `IS_SAME_COLLECTION(...)`). Deferred to keep the change incremental and avoid
-  a risky deep refactor of the recursive compiler. Affects q10/q11/q20 *semantic*
-  correctness only (they already transpile).
-- **Improves:** q03/q04/q06/q07 correctness.
+- **S2c — label predicate on untyped var (done).** `MATCH (risk) …
+  WHERE risk:RISK_FACTOR` no longer compiles to a no-op. `_compile_expression`'s
+  `OC_PropertyOrLabelsExpression` branch (`core.py`) now calls a new
+  `_compile_label_predicate(var, labels_ctx, bind_vars)` helper for the
+  pure-variable + labels case. It reads the active mapping via the existing
+  `_active_resolver` ContextVar (no parameter-threading refactor needed) and
+  emits, per label: `var[@typeField] == @typeValue` for LABEL/GENERIC_WITH_TYPE,
+  or `IS_SAME_COLLECTION(@coll, var)` for COLLECTION. Multiple labels (`n:A:B`)
+  AND together (Cypher "has all labels"); `OR` of label predicates composes
+  through the normal boolean compiler. Unknown labels raise `MAPPING_NOT_FOUND`
+  rather than silently passing. Tests: `tests/test_translate_label_predicate.py`
+  + corpus guard `test_label_predicate_on_untyped_var_emits_filter` (q10/q11/q20).
+- **Improves:** q10/q11/q20 semantic correctness (plus q03/q04/q06/q07).
 
-### WP-S3 — ArangoSearch index advisory + fuzzy compilers · ✅ S3a/S3b DONE (S3c UI carved out)
+### WP-S3 — ArangoSearch index advisory + fuzzy compilers · ✅ DONE (incl. S3c)
 - **S3a — `arango.*` fuzzy compilers (done).** Extended the *existing*
   registry-gated extension framework (`arango_cypher/extensions/search.py`,
   alongside `arango.bm25`/`tfidf`/`analyzer`) with a fuzzy/text family:
@@ -200,11 +202,21 @@ which is the prompt to promote the entry).
   UI-ready. Exposed via `EntityResolver.advisories`. Mirrors the missing-VCI
   advisory. Tests: `TestArangoSearchAdvisory` in
   `tests/test_nl2cypher_entity_resolution.py`.
-- **Carved out → WP-S3c (backend create endpoint + UI affordance).** A
-  `POST` endpoint that consumes `IndexAdvisory.as_dict()` to create the view/
-  inverted index, plus the one-click UI affordance (consistent with the VCI
-  "offer to create" UX). Deferred — the advisory data + spec it needs are now in
-  place; this is the remaining cross-stack wiring.
+- **S3c — create endpoint + UI affordance (done).** End-to-end wiring of the
+  advisory: (1) `NL2CypherResult` gained an `advisories: list[dict]` field;
+  `nl_to_cypher` reads `resolver.advisories` after resolution and attaches them
+  (even when `resolve()` raised — a partial probe may already have flagged a
+  missing index). (2) `POST /nl2cypher` forwards `advisories`. (3) New
+  `POST /schema/index/create` (session-authenticated) reconstructs the inverted-
+  index spec **server-side** from validated `collection`/`field`/`analyzer`
+  (the client never sends a free-form spec), is idempotent (`created:false` if
+  an inverted index already covers the field), and 404s on a missing collection
+  / 400s on a bad name. (4) UI: `client.ts` gains `IndexAdvisory` +
+  `createIndex`; `App.tsx` renders an amber "Slow fuzzy match detected" strip
+  below the NL input with a per-advisory "Create index" button (creating/
+  created/error states), mirroring the `SchemaWarningBanner` action pattern.
+  Tests: `tests/test_service_index_create.py`, advisory pass-through in
+  `tests/test_service_nl.py`, threading in `tests/test_nl2cypher.py`.
 
 ### WP-V1 — Broaden the corpus & guard semantics · *ongoing*
 - Add execution-grounded checks (not just transpile-success) for the corpus where
