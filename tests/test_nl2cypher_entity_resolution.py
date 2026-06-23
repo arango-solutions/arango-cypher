@@ -161,6 +161,62 @@ class TestIdentifierPropertyCandidates:
             assert field_name in _STRING_PROPERTY_CANDIDATES
 
 
+class TestArangoSearchAdvisory:
+    """WP-S3: fuzzy probes on un-indexed fields emit an IndexAdvisory."""
+
+    @staticmethod
+    def _gump_responder(aql: str, bind_vars: dict[str, Any]):
+        if bind_vars.get("@c") == "movies" and "gump" in bind_vars.get("m", "").lower():
+            return [{"value": "Forrest Gump", "score": 0.85}]
+        return []
+
+    def test_advisory_emitted_without_fuzzy_index(self, movies_mapping) -> None:
+        from arango_cypher.nl2cypher import IndexAdvisory
+
+        # No collections registered → indexes() unavailable → "no fuzzy coverage".
+        resolver = EntityResolver(db=_FakeDb(self._gump_responder), mapping=movies_mapping)
+        resolver.resolve('who acted in "Forest Gump"?')
+        assert resolver.advisories, "expected an ArangoSearch advisory"
+        assert all(isinstance(a, IndexAdvisory) for a in resolver.advisories)
+        # The resolver probes every label×property pair; the movies.title probe
+        # (the slow Levenshtein scan) must be among the advisories.
+        by_key = {(a.collection, a.field): a for a in resolver.advisories}
+        assert ("movies", "title") in by_key
+        spec = by_key[("movies", "title")].suggested_inverted_index()
+        assert spec["type"] == "inverted"
+        assert spec["fields"][0]["name"] == "title"
+
+    def test_no_advisory_when_field_has_inverted_index(self, movies_mapping) -> None:
+        collections = {
+            "movies": _FakeCollection(
+                count=10,
+                indexes=[
+                    {"type": "inverted", "fields": [{"name": "title", "analyzer": "text_en"}]}
+                ],
+            )
+        }
+        resolver = EntityResolver(
+            db=_FakeDb(self._gump_responder, collections=collections),
+            mapping=movies_mapping,
+        )
+        resolver.resolve('who acted in "Forest Gump"?')
+        assert all(a.field != "title" for a in resolver.advisories)
+
+    def test_advisory_deduped(self, movies_mapping) -> None:
+        resolver = EntityResolver(db=_FakeDb(self._gump_responder), mapping=movies_mapping)
+        resolver.resolve('who acted in "Forest Gump"?')
+        resolver._cache.clear()  # force re-probe
+        resolver.resolve('who acted in "Forest Gump"?')
+        keys = [(a.collection, a.field) for a in resolver.advisories]
+        assert len(keys) == len(set(keys)), keys
+
+    def test_advisory_as_dict_shape(self, movies_mapping) -> None:
+        resolver = EntityResolver(db=_FakeDb(self._gump_responder), mapping=movies_mapping)
+        resolver.resolve('who acted in "Forest Gump"?')
+        d = resolver.advisories[0].as_dict()
+        assert set(d) >= {"collection", "field", "reason", "suggestedIndex"}
+
+
 class TestResolveWithMockedDb:
     def test_typo_corrected(self, movies_mapping) -> None:
         """'Forest Gump' → 'Forrest Gump' via mocked contains-match."""

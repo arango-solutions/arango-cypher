@@ -248,6 +248,46 @@ class ResolvedEntity:
     score: float = 0.0
 
 
+_FUZZY_INDEX_TYPES: frozenset[str] = frozenset({"inverted", "arangosearch"})
+"""Index types that make fuzzy/text matching (``NGRAM_MATCH``, ``PHRASE``,
+``LEVENSHTEIN_MATCH`` via ``SEARCH``) tractable on a property. A property covered
+by one of these does not trigger an :class:`IndexAdvisory`."""
+
+
+@dataclass
+class IndexAdvisory:
+    """A suggestion to add an ArangoSearch/inverted index for fuzzy matching.
+
+    Emitted (WP-S3) when the resolver runs a fuzzy name probe against a property
+    that has no inverted/ArangoSearch coverage — i.e. the probe is a full
+    collection scan computing ``LEVENSHTEIN_DISTANCE`` per row. Mirrors the
+    transpiler's missing-VCI advisory: the service/UI can surface it and offer
+    one-click index creation.
+    """
+
+    collection: str
+    field: str
+    reason: str = "fuzzy name matching falls back to a full collection scan"
+
+    def suggested_inverted_index(self) -> dict[str, Any]:
+        """A python-arango ``add_index`` spec for an inverted index with a
+        text analyzer on :attr:`field` (the minimum that accelerates fuzzy
+        lookups)."""
+        return {
+            "type": "inverted",
+            "name": f"idx_fuzzy_{self.field}",
+            "fields": [{"name": self.field, "analyzer": "text_en"}],
+        }
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "collection": self.collection,
+            "field": self.field,
+            "reason": self.reason,
+            "suggestedIndex": self.suggested_inverted_index(),
+        }
+
+
 class EntityResolver:
     """Extracts entity mentions from a question and resolves them against the DB.
 
@@ -343,6 +383,12 @@ class EntityResolver:
         self._cache: dict[tuple[int, str], list[ResolvedEntity]] = {}
         self._count_cache: dict[str, int | None] = {}
         self._indexed_fields_cache: dict[str, set[str]] = {}
+        self._fuzzy_fields_cache: dict[str, set[str]] = {}
+        # WP-S3: ArangoSearch/inverted-index advisories collected during
+        # resolution (deduped by (collection, field)). Read by the service/UI
+        # to offer one-click index creation, mirroring the missing-VCI flow.
+        self.advisories: list[IndexAdvisory] = []
+        self._advisory_keys: set[tuple[str, str]] = set()
         self._schema_labels: set[str] = self._collect_schema_labels(mapping)
         self._resolver: MappingResolver | None = MappingResolver(mapping) if mapping is not None else None
 
@@ -655,6 +701,50 @@ class EntityResolver:
         self._indexed_fields_cache[collection] = fields
         return fields
 
+    def _fuzzy_index_fields(self, collection: str) -> set[str]:
+        """Fields covered by an inverted/ArangoSearch index on ``collection``.
+
+        These are the indexes that make ``SEARCH``-based fuzzy/text matching
+        tractable. A field in this set does not warrant an :class:`IndexAdvisory`.
+        Any failure yields an empty set ("no fuzzy coverage").
+        """
+        if collection in self._fuzzy_fields_cache:
+            return self._fuzzy_fields_cache[collection]
+        fields: set[str] = set()
+        try:
+            for idx in self.db.collection(collection).indexes():  # type: ignore[union-attr]
+                if not isinstance(idx, dict):
+                    continue
+                if str(idx.get("type", "")).lower() not in _FUZZY_INDEX_TYPES:
+                    continue
+                for f in idx.get("fields") or []:
+                    if isinstance(f, str):
+                        fields.add(f)
+                    elif isinstance(f, dict) and isinstance(f.get("name"), str):
+                        fields.add(f["name"])
+        except Exception as exc:
+            logger.debug("indexes() unavailable for %r: %s", collection, exc)
+            fields = set()
+        self._fuzzy_fields_cache[collection] = fields
+        return fields
+
+    def _maybe_advise_index(self, collection: str, field_name: str) -> None:
+        """Record an ArangoSearch advisory when ``collection.field_name`` has no
+        inverted/ArangoSearch coverage (so fuzzy matching scans the collection)."""
+        key = (collection, field_name)
+        if key in self._advisory_keys:
+            return
+        if field_name in self._fuzzy_index_fields(collection):
+            return
+        self._advisory_keys.add(key)
+        self.advisories.append(IndexAdvisory(collection=collection, field=field_name))
+        logger.info(
+            "EntityResolver: fuzzy probe on %r.%r has no inverted/ArangoSearch "
+            "index; emitting advisory",
+            collection,
+            field_name,
+        )
+
     def _should_skip_collection(self, collection: str, field_name: str) -> bool:
         """Decide whether to skip a probe on an oversized collection.
 
@@ -733,6 +823,11 @@ class EntityResolver:
 
         if self._should_skip_collection(collection, field_name):
             return None
+
+        # WP-S3: this probe computes LEVENSHTEIN_DISTANCE per row. If the field
+        # isn't backed by an inverted/ArangoSearch index, that's a full scan —
+        # record an advisory so the UI can offer one-click index creation.
+        self._maybe_advise_index(collection, field_name)
 
         type_filter = "  FILTER d[@type_field] == @type_value\n" if type_field and type_value else ""
         # Prune oversized free-text values *before* the O(len²) Levenshtein

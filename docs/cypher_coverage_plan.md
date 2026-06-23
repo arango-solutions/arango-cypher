@@ -1,6 +1,7 @@
 # Cypher Coverage Completion Plan
 
-**Status:** In progress — transpiler coverage (M1+M2) **complete: 22/22**. Semantics phase (M3+) pending.
+**Status:** Transpiler coverage (M1+M2) **complete: 22/22**. Semantics (M3): WP-S1
+done; WP-S2 done (S2c carved out); WP-S3 S3a/S3b done (S3c UI carved out).
 **Owner:** transpiler / NL→Cypher
 **Date:** 2026-06-23
 
@@ -181,12 +182,29 @@ which is the prompt to promote the entry).
   correctness only (they already transpile).
 - **Improves:** q03/q04/q06/q07 correctness.
 
-### WP-S3 — ArangoSearch index advisory + one-click create (2.c) · *M, ~2–3 days*
-- Detect when name-matching falls back to a scan and no analyzer/view exists;
-  emit a structured advisory (mirrors the VCI-missing advisory).
-- Backend endpoint + UI affordance to create an ArangoSearch View / inverted
-  index on the chosen property (consistent with the VCI "offer to create" UX).
-- Add `arango.search`/`arango.ngram_match` extension compilers for opt-in fuzzy.
+### WP-S3 — ArangoSearch index advisory + fuzzy compilers · ✅ S3a/S3b DONE (S3c UI carved out)
+- **S3a — `arango.*` fuzzy compilers (done).** Extended the *existing*
+  registry-gated extension framework (`arango_cypher/extensions/search.py`,
+  alongside `arango.bm25`/`tfidf`/`analyzer`) with a fuzzy/text family:
+  `arango.like`, `starts_with`, `in_range`, `levenshtein_distance`,
+  `levenshtein_match`, `ngram_match`, `ngram_similarity`, `phrase`, `boost`,
+  `min_match`, `tokens`, `soundex`, `regex_test`/`matches`/`replace` → the
+  identically-signatured AQL functions, arity-checked. Honors the existing
+  `ExtensionPolicy` gating (no registry → `EXTENSIONS_DISABLED`; allowlist/
+  denylist respected). Tests: `TestFuzzyTextFunctions` in `tests/test_extensions.py`.
+- **S3b — ArangoSearch advisory (done).** `EntityResolver` now records a
+  structured `IndexAdvisory(collection, field, …)` (deduped) whenever a fuzzy
+  name probe runs against a field with no inverted/ArangoSearch coverage — i.e.
+  a full Levenshtein scan. `IndexAdvisory.suggested_inverted_index()` returns a
+  ready `add_index` spec (`inverted`, `text_en` analyzer) and `.as_dict()` is
+  UI-ready. Exposed via `EntityResolver.advisories`. Mirrors the missing-VCI
+  advisory. Tests: `TestArangoSearchAdvisory` in
+  `tests/test_nl2cypher_entity_resolution.py`.
+- **Carved out → WP-S3c (backend create endpoint + UI affordance).** A
+  `POST` endpoint that consumes `IndexAdvisory.as_dict()` to create the view/
+  inverted index, plus the one-click UI affordance (consistent with the VCI
+  "offer to create" UX). Deferred — the advisory data + spec it needs are now in
+  place; this is the remaining cross-stack wiring.
 
 ### WP-V1 — Broaden the corpus & guard semantics · *ongoing*
 - Add execution-grounded checks (not just transpile-success) for the corpus where

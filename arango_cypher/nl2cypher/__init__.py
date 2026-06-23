@@ -47,7 +47,7 @@ from ._core import (
     nl_to_cypher,
     suggest_nl_queries,
 )
-from .entity_resolution import EntityResolver, ResolvedEntity
+from .entity_resolution import EntityResolver, IndexAdvisory, ResolvedEntity
 from .fewshot import BM25Retriever, FewShotIndex, Retriever
 from .providers import (
     AnthropicProvider,
@@ -74,6 +74,7 @@ __all__ = [
     "AnthropicProvider",
     "BM25Retriever",
     "EntityResolver",
+    "IndexAdvisory",
     "EntityScope",
     "EntityTenantRole",
     "FewShotIndex",
