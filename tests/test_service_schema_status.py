@@ -419,6 +419,7 @@ class TestIntrospectWarnings:
         """A catalog miss returns status=pending, an empty schema, and a
         SCHEMA_PENDING warning — without analyzing inline."""
         from arango_cypher import schema_acquire
+        from arango_cypher.catalog import warm
 
         fake_session_factory(
             collections=[{"name": "users", "type": 2}],
@@ -428,13 +429,57 @@ class TestIntrospectWarnings:
 
         monkeypatch.setattr(schema_acquire, "read_cached_mapping", lambda db, **kwargs: None)
 
+        # A.2: a catalog miss schedules a one-shot background warm. Stub the
+        # scheduler so the test never spawns a real analyzer thread.
+        scheduled: list[tuple[object, object]] = []
+
+        def _fake_schedule(db, graph_name=None):
+            scheduled.append((db, graph_name))
+            return True
+
+        monkeypatch.setattr(warm, "schedule_warm", _fake_schedule)
+
         resp = client.get("/schema/introspect")
         assert resp.status_code == 200
         body = resp.json()
         assert body["status"] == "pending"
+        assert body["warming"] is True
         assert body["entities"] == []
         assert body["relationships"] == []
         assert body["warnings"][0]["code"] == "SCHEMA_PENDING"
+        assert "background" in body["warnings"][0]["message"].lower()
+        # The miss must have scheduled exactly one warm for this session's db.
+        assert len(scheduled) == 1
+
+    def test_statistics_pending_schedules_warm(self, fake_session_factory, monkeypatch):
+        """A /schema/statistics catalog miss also self-heals via a warm."""
+        from arango_cypher import schema_acquire
+        from arango_cypher.catalog import warm
+
+        fake_session_factory(
+            collections=[{"name": "users", "type": 2}],
+            counts={"users": 3},
+            indexes={"users": []},
+        )
+
+        monkeypatch.setattr(
+            schema_acquire, "read_cached_mapping", lambda db, **kwargs: None
+        )
+
+        scheduled: list[tuple[object, object]] = []
+        monkeypatch.setattr(
+            warm,
+            "schedule_warm",
+            lambda db, graph_name=None: scheduled.append((db, graph_name)) or True,
+        )
+
+        resp = client.get("/schema/statistics")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["status"] == "pending"
+        assert body["warming"] is True
+        assert body["statistics"] == {}
+        assert len(scheduled) == 1
 
 
 # ---------------------------------------------------------------------------

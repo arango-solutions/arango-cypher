@@ -14,6 +14,7 @@ import GraphSelector from "./components/GraphSelector";
 import SchemaWarningBanner from "./components/SchemaWarningBanner";
 import { useAppState } from "./api/store";
 import { buildCorrespondenceMap, buildReverseMap } from "./utils/correspondenceMap";
+import { filterVisibleWarnings, warningsKey } from "./utils/warnings";
 import {
   translateCypher,
   executeCypher,
@@ -241,6 +242,29 @@ export default function App() {
   });
   const [pendingAutoTranslate, setPendingAutoTranslate] = useState(false);
   const [pendingAutoRun, setPendingAutoRun] = useState(false);
+
+  // Translate/execute warnings (e.g. the unlabeled-MATCH side-store notice) are
+  // surfaced in exactly one place — the AQL pane — and are dismissible per
+  // warning. A fresh translate/execute produces a new warning set, which clears
+  // prior dismissals so genuinely new warnings reappear.
+  const [dismissedWarnings, setDismissedWarnings] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const currentWarningsKey = warningsKey(state.warnings);
+  useEffect(() => {
+    setDismissedWarnings(new Set());
+  }, [currentWarningsKey]);
+  const visibleWarnings = useMemo(
+    () => filterVisibleWarnings(state.warnings, dismissedWarnings),
+    [state.warnings, dismissedWarnings],
+  );
+  const dismissWarning = useCallback((message: string) => {
+    setDismissedWarnings((prev) => {
+      const next = new Set(prev);
+      next.add(message);
+      return next;
+    });
+  }, []);
 
   const toggleAutoTranslate = useCallback(() => {
     setAutoTranslate((prev) => {
@@ -1783,12 +1807,20 @@ export default function App() {
                   )}
                 </div>
               )}
-              {state.warnings.length > 0 && (
+              {visibleWarnings.length > 0 && (
                 <div className="px-3 py-1.5 bg-amber-900/20 border-b border-amber-800/30 space-y-0.5">
-                  {state.warnings.map((w, i) => (
+                  {visibleWarnings.map((w, i) => (
                     <div key={i} className="flex items-start gap-2">
                       <span className="text-amber-500 text-xs mt-0.5 shrink-0">&#9888;</span>
-                      <span className="text-xs text-amber-400">{w.message}</span>
+                      <span className="flex-1 text-xs text-amber-400">{w.message}</span>
+                      <button
+                        type="button"
+                        onClick={() => dismissWarning(w.message)}
+                        title="Dismiss this warning"
+                        className="shrink-0 px-1.5 text-[11px] rounded text-amber-400/70 hover:text-amber-200 hover:bg-amber-800/30 transition-colors"
+                      >
+                        Dismiss
+                      </button>
                     </div>
                   ))}
                 </div>
@@ -1811,7 +1843,6 @@ export default function App() {
           <div className="h-64 border-t border-gray-800 flex-shrink-0">
             <ResultsPanel
               results={state.results}
-              warnings={state.warnings}
               explainPlan={state.explainPlan}
               profileData={state.profileData}
               activeTab={state.activeResultTab}

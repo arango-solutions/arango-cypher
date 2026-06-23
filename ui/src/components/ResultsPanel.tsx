@@ -5,7 +5,6 @@ import type { CyNode, CyEdge } from "./CytoscapeGraph";
 
 interface Props {
   results: unknown[] | null;
-  warnings: Array<{ message: string }>;
   explainPlan: unknown | null;
   profileData: { statistics: Record<string, unknown>; profile: unknown } | null;
   activeTab: ResultTab;
@@ -537,20 +536,6 @@ function GraphView({ data }: { data: unknown[] }) {
   );
 }
 
-function WarningsBanner({ warnings }: { warnings: Array<{ message: string }> }) {
-  if (warnings.length === 0) return null;
-  return (
-    <div className="px-3 py-1.5 bg-amber-900/20 border-b border-amber-800/30 flex items-start gap-2">
-      <span className="text-amber-500 text-xs mt-0.5">&#9888;</span>
-      <div className="flex-1">
-        {warnings.map((w, i) => (
-          <p key={i} className="text-xs text-amber-400">{w.message}</p>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function downloadBlob(content: string, filename: string, mime: string) {
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -587,7 +572,6 @@ function toCsv(data: unknown[]): string {
 
 export default function ResultsPanel({
   results,
-  warnings,
   explainPlan,
   profileData,
   activeTab,
@@ -656,8 +640,6 @@ export default function ResultsPanel({
           </div>
         )}
       </div>
-
-      <WarningsBanner warnings={warnings} />
 
       <div className="flex-1 min-h-0 overflow-auto">
         {!hasData ? (

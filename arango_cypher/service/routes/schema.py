@@ -176,27 +176,40 @@ def schema_introspect(
 
     if bundle is None:
         # True catalog miss: the sidecar has not analyzed this database yet.
-        # Tell the client to retry (the sidecar will populate it) or to force an
-        # immediate analysis via "Refresh schema". We deliberately do not analyze
-        # inline here — keeping the request path free of the expensive analyzer
-        # is the whole point of the catalog model.
+        # Kick off a one-shot background warm (deduped per database+graph) using
+        # the live session handle so an interactively-connected database that
+        # was never registered in the sidecar self-heals — the client's retry
+        # then finds a populated cache. We still return immediately; the
+        # expensive analyzer never runs on the request path.
+        from ...catalog.warm import schedule_warm
+
+        warming = schedule_warm(db, graph_name)
         log_endpoint_timing(
             "/schema/introspect",
             round((time.perf_counter() - t0) * 1000, 1),
             force=force,
             status="pending",
+            warming=warming,
         )
         return {
             "status": "pending",
+            "warming": warming,
             "entities": [],
             "relationships": [],
             "warnings": [
                 {
                     "code": "SCHEMA_PENDING",
                     "message": (
-                        "Schema for this database has not been analyzed yet. The "
-                        "catalog sidecar will populate it shortly — retry in a "
-                        'moment, or use "Refresh schema" to analyze it now.'
+                        "Schema for this database is being analyzed in the "
+                        "background — retry in a moment, or use "
+                        '"Refresh schema" to analyze it now.'
+                        if warming
+                        else (
+                            "Schema for this database has not been analyzed "
+                            "yet. The catalog sidecar will populate it shortly "
+                            '— retry in a moment, or use "Refresh schema" to '
+                            "analyze it now."
+                        )
                     ),
                 }
             ],
@@ -277,12 +290,24 @@ def schema_statistics(
     # the sidecar (or "Refresh schema") populates the catalog.
     bundle = _read_cached(session.db, graph_name=graph_name)
     if bundle is None:
+        # Mirror /schema/introspect: a catalog miss self-heals via a one-shot
+        # background warm (deduped, so introspect + statistics firing together
+        # share a single analysis pass) rather than staying pending forever.
+        from ...catalog.warm import schedule_warm
+
+        warming = schedule_warm(session.db, graph_name)
         log_endpoint_timing(
             "/schema/statistics",
             round((time.perf_counter() - t0) * 1000, 1),
             status="pending",
+            warming=warming,
         )
-        return {"status": "pending", "statistics": {}, "elapsed_seconds": 0.0}
+        return {
+            "status": "pending",
+            "warming": warming,
+            "statistics": {},
+            "elapsed_seconds": 0.0,
+        }
 
     stats = _compute_stats(session.db, bundle)
     elapsed = round(time.perf_counter() - t0, 3)
