@@ -64,6 +64,13 @@ supporting index covers the field. ``0`` (default) disables the size gate so
 legitimate large entity collections (e.g. a multi-million-node vertex store)
 are still resolved — the timeout + value-length filter remain the safety net."""
 
+_SCAN_TOPK = 200
+"""Rows returned by a single per-collection scan. The scan computes a score for
+every row and returns the top ``_SCAN_TOPK`` so the best match for each
+type-discriminator value (e.g. each LABEL sharing one collection) is captured in
+one pass. 200 comfortably covers the distinct exact/near matches for a mention
+without materialising a huge cursor."""
+
 _DEFAULT_TOTAL_BUDGET_S = 8.0
 """Wall-clock ceiling for an entire :meth:`EntityResolver.resolve` call. Once
 exceeded, probing stops and the best matches found so far are returned. This
@@ -246,6 +253,12 @@ class ResolvedEntity:
     property: str
     value: str
     score: float = 0.0
+    # Other labels that store the SAME value at an equally-strong (exact) match
+    # in the same physical collection. A token like "cinf" can exist as both
+    # COMP and ORG; surfacing the alternatives lets the LLM pick the label
+    # consistent with the relationships in its query (e.g. Has_Stake_In's
+    # domain) instead of being locked to whichever label sorted first.
+    alt_labels: tuple[str, ...] = ()
 
 
 _FUZZY_INDEX_TYPES: frozenset[str] = frozenset({"inverted", "arangosearch"})
@@ -384,6 +397,12 @@ class EntityResolver:
         self._count_cache: dict[str, int | None] = {}
         self._indexed_fields_cache: dict[str, set[str]] = {}
         self._fuzzy_fields_cache: dict[str, set[str]] = {}
+        # WP-S2 perf: cache one scan per (collection, field, mention) → best
+        # match bucketed by type-discriminator value. Many LABEL-style entities
+        # share a physical collection (e.g. 19 types on ``Node``); scanning it
+        # once per mention instead of once per label keeps resolution inside the
+        # time budget on large multi-type graphs.
+        self._scan_cache: dict[tuple[str, str, str], dict[str, tuple[str, float]]] = {}
         # WP-S3: ArangoSearch/inverted-index advisories collected during
         # resolution (deduped by (collection, field)). Read by the service/UI
         # to offer one-click index creation, mirroring the missing-VCI flow.
@@ -651,8 +670,55 @@ class EntityResolver:
                         score=score,
                     )
                 if best is not None and best.score >= 0.99:
+                    best.alt_labels = self._tied_labels(mention, best, labels)
                     return best
         return best
+
+    def _tied_labels(
+        self,
+        mention: str,
+        best: ResolvedEntity,
+        labels: list[str],
+    ) -> tuple[str, ...]:
+        """Other labels in ``best``'s physical collection that store the same
+        value at an exact match.
+
+        Cheap: the collection scan is already cached, so this is a series of
+        in-memory bucket look-ups — it never probes another collection, so the
+        early-stop budget protection is preserved.
+        """
+        if self._resolver is None:
+            return ()
+        try:
+            best_coll = (self._resolver.resolve_entity(best.label) or {}).get(
+                "collectionName"
+            ) or best.label
+        except Exception:
+            return ()
+        alts: list[str] = []
+        for label in labels:
+            if label == best.label:
+                continue
+            try:
+                emap = self._resolver.resolve_entity(label) or {}
+            except Exception:
+                continue
+            if (emap.get("collectionName") or label) != best_coll:
+                continue
+            if best.property not in self._resolve_properties_for(label):
+                continue
+            bucket = self._scan_collection_field(
+                best_coll, best.property, emap.get("typeField"), mention
+            )
+            type_value = emap.get("typeValue")
+            entry = (
+                bucket.get(str(type_value))
+                if emap.get("typeField") and type_value
+                else bucket.get("")
+            )
+            if entry and entry[0] == best.value and entry[1] >= 0.99:
+                alts.append(label)
+        return tuple(alts)
 
     def _collection_count(self, collection: str) -> int | None:
         """Return ``collection``'s document count (cached), or ``None``.
@@ -829,75 +895,157 @@ class EntityResolver:
         # record an advisory so the UI can offer one-click index creation.
         self._maybe_advise_index(collection, field_name)
 
-        type_filter = "  FILTER d[@type_field] == @type_value\n" if type_field and type_value else ""
-        # Prune oversized free-text values *before* the O(len²) Levenshtein
-        # step so a ``text``-style field can't turn the probe into a
-        # multi-minute scan. Skipped when max_value_length == 0.
-        length_filter = "  FILTER LENGTH(d[@field]) <= @max_value_length\n" if self.max_value_length > 0 else ""
+        # WP-S2 perf: scan the physical collection ONCE per (collection, field,
+        # mention), bucketed by type-discriminator, then pick this label's
+        # bucket. Many LABEL-style entities share a collection, so this turns N
+        # full scans into one and keeps resolution inside the time budget.
+        bucket = self._scan_collection_field(collection, field_name, type_field, mention)
+        if not bucket:
+            return None
+        if type_field and type_value:
+            hit = bucket.get(str(type_value))
+            if hit is not None:
+                return hit
+        # No-discriminator collections (and the unit-test mock, whose rows carry
+        # no type value) collapse to a single ``""`` bucket that applies to any
+        # label.
+        return bucket.get("")
 
-        aql = (
+    def _scan_collection_field(
+        self,
+        collection: str,
+        field_name: str,
+        type_field: str | None,
+        mention: str,
+    ) -> dict[str, tuple[str, float]]:
+        """Scan ``collection`` once for ``field_name`` ≈ ``mention``.
+
+        Returns the best ``(value, score)`` per type-discriminator value (keyed
+        by the ``type_field`` value, or ``""`` for collections without a
+        discriminator). Cached per ``(collection, field, mention)`` so every
+        label sharing a physical collection costs a single scan.
+        """
+        if self.db is None:
+            return {}
+        cache_key = (collection, field_name, mention)
+        cached = self._scan_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        type_return = "d[@type_field]" if type_field else "null"
+        length_filter = (
+            "  FILTER LENGTH(d[@field]) <= @max_value_length\n"
+            if self.max_value_length > 0
+            else ""
+        )
+        base_bind: dict[str, Any] = {
+            "@c": collection,
+            "field": field_name,
+            "m": mention,
+            "k": _SCAN_TOPK,
+        }
+        if self.max_value_length > 0:
+            base_bind["max_value_length"] = self.max_value_length
+        if type_field:
+            base_bind["type_field"] = type_field
+
+        # Pass 1 — cheap case-insensitive EXACT equality. No CONTAINS/Levenshtein
+        # per row, so even a full scan of a multi-million-row collection stays
+        # well inside the probe timeout. This resolves the common ticker/symbol/
+        # exact-name case (e.g. "CINF" → "cinf") and lets _resolve_single
+        # early-return before it ever probes unrelated collections.
+        exact_aql = (
             f"FOR d IN @@c\n"
-            f"{type_filter}"
+            f"  FILTER HAS(d, @field) AND IS_STRING(d[@field])\n"
+            f"{length_filter}"
+            f"  FILTER LOWER(d[@field]) == LOWER(@m)\n"
+            f"  LIMIT @k\n"
+            f"  RETURN {{t: {type_return}, value: d[@field], score: 1.0}}"
+        )
+        bucket = self._run_scan(exact_aql, dict(base_bind), collection, field_name, mention)
+        if bucket:
+            self._scan_cache[cache_key] = bucket
+            return bucket
+
+        # Pass 2 — fuzzy fallback (contains / reverse-contains / Levenshtein),
+        # only when no exact hit. Length-gate the O(len²) edit distance: a row
+        # can only clear ``fuzzy_threshold`` when its length is within these
+        # bounds of the mention (length difference ≤ edit distance), so the
+        # distance is computed only for length-plausible rows. Never prunes a
+        # true match.
+        lm_len = len(mention)
+        if self.fuzzy_threshold > 0:
+            lv_min = max(1, int(lm_len * self.fuzzy_threshold))
+            lv_max = int(lm_len / self.fuzzy_threshold) + 1
+        else:
+            lv_min, lv_max = 1, 10**9
+        fuzzy_aql = (
+            f"FOR d IN @@c\n"
             f"  FILTER HAS(d, @field) AND IS_STRING(d[@field])\n"
             f"{length_filter}"
             f"  LET lv = LOWER(d[@field])\n"
             f"  LET lm = LOWER(@m)\n"
-            f"  LET exact = lv == lm ? 1.0 : 0.0\n"
             f"  LET contains = CONTAINS(lv, lm) ? 0.85 : 0.0\n"
             f"  LET reverse = CONTAINS(lm, lv) ? 0.7 : 0.0\n"
             f"  LET maxlen = LENGTH(lv) > LENGTH(lm) ? LENGTH(lv) : LENGTH(lm)\n"
-            f"  LET fuzzy_raw = maxlen > 0 "
+            f"  LET fuzzy_raw = (maxlen > 0 AND LENGTH(lv) >= @lv_min "
+            f"AND LENGTH(lv) <= @lv_max) "
             f"? 1.0 - (LEVENSHTEIN_DISTANCE(lv, lm) * 1.0 / maxlen) : 0.0\n"
             f"  LET fuzzy = fuzzy_raw >= @fuzzy_threshold ? fuzzy_raw * 0.9 : 0.0\n"
-            f"  LET score = MAX([exact, contains, reverse, fuzzy])\n"
+            f"  LET score = MAX([contains, reverse, fuzzy])\n"
             f"  FILTER score > 0\n"
             f"  SORT score DESC\n"
-            f"  LIMIT 1\n"
-            f"  RETURN {{value: d[@field], score: score}}"
+            f"  LIMIT @k\n"
+            f"  RETURN {{t: {type_return}, value: d[@field], score: score}}"
         )
-        bind_vars: dict[str, Any] = {
-            "@c": collection,
-            "field": field_name,
-            "m": mention,
-            "fuzzy_threshold": self.fuzzy_threshold,
-        }
-        if self.max_value_length > 0:
-            bind_vars["max_value_length"] = self.max_value_length
-        if type_field and type_value:
-            bind_vars["type_field"] = type_field
-            bind_vars["type_value"] = type_value
+        fuzzy_bind = dict(base_bind)
+        fuzzy_bind.update(
+            {"fuzzy_threshold": self.fuzzy_threshold, "lv_min": lv_min, "lv_max": lv_max}
+        )
+        bucket = self._run_scan(fuzzy_aql, fuzzy_bind, collection, field_name, mention)
+        self._scan_cache[cache_key] = bucket
+        return bucket
 
+    def _run_scan(
+        self,
+        aql: str,
+        bind_vars: dict[str, Any],
+        collection: str,
+        field_name: str,
+        mention: str,
+    ) -> dict[str, tuple[str, float]]:
+        """Execute one scan query and group rows into a best-per-type bucket."""
         exec_kwargs: dict[str, Any] = {"bind_vars": bind_vars}
         if self.probe_timeout > 0:
             exec_kwargs["max_runtime"] = self.probe_timeout
-
         try:
-            cursor = self.db.aql.execute(aql, **exec_kwargs)
-            rows = list(cursor)
+            rows = list(self.db.aql.execute(aql, **exec_kwargs))  # type: ignore[union-attr]
         except Exception as exc:
             logger.info(
-                "EntityResolver query failed for %s.%s ~= %r: %s",
-                label,
+                "EntityResolver scan failed for %s.%s ~= %r: %s",
+                collection,
                 field_name,
                 mention,
                 exc,
             )
-            return None
-
-        if not rows:
-            return None
-        row = rows[0]
-        if not isinstance(row, dict):
-            return None
-        value = row.get("value")
-        score = row.get("score")
-        if not isinstance(value, str):
-            return None
-        try:
-            score_f = float(score)
-        except (TypeError, ValueError):
-            return None
-        return value, score_f
+            return {}
+        bucket: dict[str, tuple[str, float]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            value = row.get("value")
+            if not isinstance(value, str):
+                continue
+            try:
+                score_f = float(row.get("score"))
+            except (TypeError, ValueError):
+                continue
+            t = row.get("t")
+            key = str(t) if t is not None else ""
+            cur = bucket.get(key)
+            if cur is None or score_f > cur[1]:
+                bucket[key] = (value, score_f)
+        return bucket
 
     def format_prompt_section(self, resolved: list[ResolvedEntity]) -> list[str]:
         """Render resolved entities as individual bullet strings.
@@ -910,7 +1058,20 @@ class EntityResolver:
         """
         out: list[str] = []
         for r in resolved:
-            out.append(f'"{r.mention}" → {r.label}.{r.property} = "{r.value}" (similarity {r.score:.2f})')
+            line = (
+                f'"{r.mention}" → {r.label}.{r.property} = "{r.value}" '
+                f"(similarity {r.score:.2f})"
+            )
+            if r.alt_labels:
+                all_labels = ", ".join((r.label, *r.alt_labels))
+                line += (
+                    f" — this value exists under MULTIPLE labels ({all_labels}), "
+                    f"so do NOT pin a single label for it; anchor WITHOUT a label "
+                    f'using just the property filter, e.g. ({r.property[:1]} '
+                    f'{{{r.property}: "{r.value}"}}), so the match works whichever '
+                    f"label actually carries the relationship"
+                )
+            out.append(line)
         return out
 
 

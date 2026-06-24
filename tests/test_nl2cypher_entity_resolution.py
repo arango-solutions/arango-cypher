@@ -344,12 +344,16 @@ class TestFuzzyScoring:
     """Wave 4h: ``LEVENSHTEIN_DISTANCE``-based fuzzy match in the AQL."""
 
     def test_fuzzy_threshold_is_bound_into_query(self, movies_mapping) -> None:
-        """The configured threshold must reach the query as a bind var."""
+        """The configured threshold must reach the fuzzy query as a bind var.
+
+        Resolution runs an exact-equality pass first; the threshold only binds
+        into the fuzzy fallback pass, which runs when exact finds nothing.
+        """
         captured: list[dict[str, Any]] = []
 
         def responder(aql: str, bind_vars: dict[str, Any]):
             captured.append(dict(bind_vars))
-            return [{"value": "Forrest Gump", "score": 0.82}]
+            return []  # force the fuzzy fallback pass to run
 
         resolver = EntityResolver(
             db=_FakeDb(responder),
@@ -358,7 +362,7 @@ class TestFuzzyScoring:
         )
         resolver.resolve('who acted in "Forest Gump"?')
         assert captured, "expected at least one AQL execution"
-        assert captured[0].get("fuzzy_threshold") == 0.65
+        assert any(c.get("fuzzy_threshold") == 0.65 for c in captured)
 
     def test_aql_includes_levenshtein_branch(self, movies_mapping) -> None:
         """Defensive: the emitted AQL must reference LEVENSHTEIN_DISTANCE.
@@ -379,10 +383,14 @@ class TestFuzzyScoring:
         )
         resolver.resolve('find "Anything"')
         assert captured
-        aql = captured[0]
-        assert "LEVENSHTEIN_DISTANCE" in aql
-        assert "fuzzy_threshold" in aql
-        assert "MAX([exact, contains, reverse, fuzzy])" in aql
+        # Two-pass design: a cheap exact-equality pass, then a fuzzy fallback.
+        assert any("LOWER(d[@field]) == LOWER(@m)" in a for a in captured), (
+            "expected a cheap exact-equality pass"
+        )
+        fuzzy = next((a for a in captured if "LEVENSHTEIN_DISTANCE" in a), None)
+        assert fuzzy is not None, "expected a fuzzy pass with LEVENSHTEIN_DISTANCE"
+        assert "fuzzy_threshold" in fuzzy
+        assert "MAX([contains, reverse, fuzzy])" in fuzzy
 
     def test_default_threshold_is_documented(self) -> None:
         """The default fuzzy_threshold should match the docstring (0.7)."""

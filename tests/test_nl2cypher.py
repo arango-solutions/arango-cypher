@@ -5,8 +5,31 @@ from __future__ import annotations
 import pytest
 
 from arango_cypher.nl2cypher import NL2CypherResult, PromptBuilder, nl_to_cypher
-from arango_cypher.nl2cypher._core import _detect_graph_intent, _detect_literal_return
+from arango_cypher.nl2cypher._core import (
+    _augment_explain_hint,
+    _detect_graph_intent,
+    _detect_literal_return,
+)
 from tests.helpers.mapping_fixtures import mapping_bundle_for
+
+
+class TestAugmentExplainHint:
+    def test_detects_reused_variable_and_names_it(self) -> None:
+        err = "[HTTP 400][ERR 1511] variable 'p' is assigned multiple times"
+        hint = _augment_explain_hint(err)
+        assert "`p`" in hint
+        assert "UNIQUE path variable named `path`" in hint
+        # Echoes the bad shape using the offending variable name.
+        assert "MATCH p = (a)-[:REL]->(p)" in hint
+
+    def test_uses_the_actual_variable_name(self) -> None:
+        err = "variable 'route' is assigned multiple times"
+        hint = _augment_explain_hint(err)
+        assert "`route`" in hint
+
+    def test_empty_for_unrelated_errors(self) -> None:
+        assert _augment_explain_hint("collection 'Foo' not found") == ""
+        assert _augment_explain_hint("") == ""
 
 
 class TestGraphIntentDetection:
@@ -47,7 +70,11 @@ class TestGraphIntentDetection:
     def test_builder_includes_graph_section_when_intent(self) -> None:
         rendered = PromptBuilder(schema_summary="S", graph_intent=True).render_system()
         assert "Output shape: return a graph" in rendered
-        assert "RETURN p" in rendered
+        assert "RETURN path" in rendered
+        # Guards the p/p collision fix: the section must steer to a dedicated
+        # path variable and explicitly forbid reusing it as a node name.
+        assert "MATCH path = (a)-[:REL]->(b)" in rendered
+        assert "NEVER reuse it as a node name" in rendered
 
     def test_builder_omits_graph_section_without_intent(self) -> None:
         rendered = PromptBuilder(schema_summary="S", graph_intent=False).render_system()

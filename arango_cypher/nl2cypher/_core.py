@@ -498,6 +498,32 @@ Rules:
 
 _RETRY_USER_SUFFIX = "\n\nYour previous Cypher was invalid: {error}. Please fix it."
 
+# ArangoDB EXPLAIN reports a reused variable as "variable 'x' is assigned
+# multiple times". The most common LLM cause is reusing a path variable
+# (``MATCH p = … -> (p)``) as a node/relationship variable, which the model
+# tends to repeat across plain retries. Detect it and append a precise repair.
+_MULTI_ASSIGN_RE = re.compile(r"variable '([^']+)' is assigned multiple times")
+
+
+def _augment_explain_hint(explain_err: str) -> str:
+    """Return a targeted repair hint for known EXPLAIN errors, else ``""``.
+
+    Deterministic so the same actionable instruction is fed on every retry,
+    rather than relying on the model to infer the fix from the raw error.
+    """
+    m = _MULTI_ASSIGN_RE.search(explain_err or "")
+    if not m:
+        return ""
+    var = m.group(1)
+    return (
+        f" Hint: the variable `{var}` is bound more than once. This usually means "
+        f"a path variable (`MATCH {var} = …`) was reused as a node or "
+        f"relationship variable in the same pattern. Use a UNIQUE path variable "
+        f"named `path` and keep every node/relationship variable distinct — e.g. "
+        f"`MATCH path = (a)-[:REL]->(b) RETURN path`, never "
+        f"`MATCH {var} = (a)-[:REL]->({var})`."
+    )
+
 
 @dataclass
 class PromptBuilder:
@@ -573,22 +599,50 @@ class PromptBuilder:
         return (
             "## Output shape: return a graph\n"
             "The user asked to see the result AS A GRAPH (a visualization of "
-            "nodes and relationships). Bind the matched pattern to a PATH "
-            "variable and return the path, so the client can render nodes and "
-            "edges. Do NOT return only scalar properties.\n"
+            "nodes and relationships). Bind the matched pattern to a dedicated "
+            "PATH variable and return that path, so the client can render nodes "
+            "and edges. Do NOT return only scalar properties.\n"
+            "Rules:\n"
+            "- Name the path variable `path`. It MUST be distinct from every "
+            "node and relationship variable — NEVER reuse it as a node name. "
+            "Write `MATCH path = (a)-[:REL]->(b)`, never "
+            "`MATCH p = (a)-[:REL]->(p)` (reusing the variable is a syntax "
+            "error: a variable is assigned twice).\n"
+            "- Return the path variable (or the bound nodes and relationships), "
+            "not a scalar like `b.name`.\n"
+            "- Match named entities TOLERANTLY (fuzzy), not with a brittle exact "
+            "`{name: '...'}`: use a case-insensitive substring match such as "
+            "`WHERE toLower(a.name) CONTAINS toLower('cinf')`, or match a "
+            "ticker/symbol/id field exactly when the user gave one (e.g. "
+            "`(a {id: 'CINF'})`). Do NOT invent a full legal name.\n"
             "Example:\n"
             "```cypher\n"
-            "MATCH p = (a)-[:REL]->(b)\n"
-            "RETURN p\n"
+            "MATCH path = (a)-[:REL]->(b)\n"
+            "WHERE toLower(a.name) CONTAINS toLower('acme')\n"
+            "RETURN path\n"
             "LIMIT 50\n"
             "```\n"
             "If multiple hops are implied, return the full path "
-            "(`MATCH p = (a)-[*1..3]->(b) RETURN p`). Prefer returning `p` "
-            "(or the bound nodes and relationships) over `b.name`."
+            "(`MATCH path = (a)-[*1..3]->(b) RETURN path`)."
         )
 
     def _render_resolved_entities_section(self) -> str:
-        lines = ["## Resolved entities"]
+        lines = [
+            "## Resolved entities (GROUND TRUTH from the live database)",
+            "Each mention below was fuzzy-matched to a REAL value that exists in "
+            "the database. You MUST anchor on these — they override your own "
+            "guesses:",
+            "- Use the EXACT label shown as the node label (e.g. `(a:ORG)`), not "
+            "a different or more specific label.",
+            "- Filter on the EXACT property and value shown "
+            "(e.g. `WHERE a.name == \"cinf\"` or `(a {name: \"cinf\"})`).",
+            "- Do NOT invent, expand, or 'correct' the value (never turn "
+            "\"cinf\" into \"cincinnati financial corporation\").",
+            "- When several rows resolve the same mention, prefer the highest "
+            "similarity.",
+            "",
+            "Resolutions:",
+        ]
         for entry in self.resolved_entities:
             lines.append(f"- {entry}")
         return "\n".join(lines)
@@ -836,6 +890,7 @@ def _call_llm_with_retry(
                 builder.retry_context = (
                     f"Translated AQL failed EXPLAIN: {explain_err}. "
                     f"The Cypher was: {cypher}. Please revise your Cypher."
+                    + _augment_explain_hint(explain_err)
                 )
                 logger.info(
                     "LLM attempt %d/%d: EXPLAIN failed: %s",

@@ -117,6 +117,11 @@ class TestResolvedEntitiesSection:
         assert "Resolved entities" in rendered
         assert "Tom Hanks" in rendered
         assert rendered.index("SCHEMA") < rendered.index("Resolved entities")
+        # The section must be authoritative so the LLM anchors on the resolved
+        # label/value instead of inventing its own (the CINF→cinf fix).
+        assert "GROUND TRUTH" in rendered
+        assert "EXACT label" in rendered
+        assert "Do NOT invent" in rendered
 
     def test_zero_shot_has_no_resolved_entities_section(self) -> None:
         builder = PromptBuilder(schema_summary="SCHEMA")
