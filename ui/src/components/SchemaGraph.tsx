@@ -134,12 +134,24 @@ function computeLayout(entities: EntityInfo[], relationships: RelInfo[]): Layout
     physCards.set(collection, { x: physX, y: Math.max(groupStartY, centerY), w: CARD_W, h: physH });
   }
 
+  // Group relationships by their shared physical edge collection — one
+  // `relations` collection for all GENERIC_WITH_TYPE / LABEL relationship types
+  // (the GraphRAG shape), or one collection per type for DEDICATED_COLLECTION.
+  // Mirrors the vertex-collection dedup above so a single edge-collection card
+  // is drawn regardless of style (previously only DEDICATED_COLLECTION got one,
+  // so type-discriminated edge mappings were silently omitted).
+  const edgeCollRels = new Map<string, RelInfo[]>();
   for (const r of relationships) {
-    if (r.style === "DEDICATED_COLLECTION" && !physCards.has(r.edgeCollection)) {
-      const h = cardH(r.properties.length);
-      relEdgeCards.set(r.edgeCollection, { x: physX, y: curY, w: CARD_W, h });
-      curY += h + PAIR_GAP_Y;
-    }
+    if (!r.edgeCollection || physCards.has(r.edgeCollection)) continue;
+    const group = edgeCollRels.get(r.edgeCollection) || [];
+    group.push(r);
+    edgeCollRels.set(r.edgeCollection, group);
+  }
+  for (const [collection, group] of edgeCollRels) {
+    const maxProps = Math.max(0, ...group.map((r) => r.properties.length));
+    const h = cardH(maxProps);
+    relEdgeCards.set(collection, { x: physX, y: curY, w: CARD_W, h });
+    curY += h + PAIR_GAP_Y;
   }
 
   const maxX = physX + CARD_W + 80;
@@ -321,13 +333,28 @@ export default function SchemaGraph({ mapping }: Props) {
             });
           })()}
 
-          {/* Edge collection cards */}
-          {relationships.map((r) => {
-            const pos = layout.relEdgeCards.get(r.edgeCollection);
-            if (!pos) return null;
-            const c = PHYS_COLORS.DEDICATED_COLLECTION;
-            return <Card key={`phys-${r.edgeCollection}`} pos={pos} label={r.edgeCollection} subtitle="edge collection" props={r.properties} fill={c.fill} stroke={c.stroke} textColor="#e2e8f0" tag="E" />;
-          })}
+          {/* Edge collection cards (deduplicated for shared edge collections) */}
+          {(() => {
+            const seen = new Set<string>();
+            return relationships.map((r) => {
+              if (seen.has(r.edgeCollection)) return null;
+              seen.add(r.edgeCollection);
+              const pos = layout.relEdgeCards.get(r.edgeCollection);
+              if (!pos) return null;
+              const c = PHYS_COLORS[r.style] || PHYS_COLORS.DEDICATED_COLLECTION;
+              const allProps = relationships
+                .filter((x) => x.edgeCollection === r.edgeCollection)
+                .flatMap((x) => x.properties);
+              const uniqueProps = allProps.filter(
+                (p, i, a) => a.findIndex((q) => q.field === p.field) === i,
+              );
+              const subtitle =
+                r.style === "DEDICATED_COLLECTION"
+                  ? "edge collection"
+                  : r.style.replace(/_/g, " ").toLowerCase();
+              return <Card key={`phys-edge-${r.edgeCollection}`} pos={pos} label={r.edgeCollection} subtitle={subtitle} props={uniqueProps} fill={c.fill} stroke={c.stroke} textColor="#e2e8f0" tag="E" />;
+            });
+          })()}
 
           {/* Type-level mapping edges (dashed header-to-header) */}
           {entities.map((e) => {
@@ -405,9 +432,14 @@ export default function SchemaGraph({ mapping }: Props) {
 
           {/* Edge collection property labels are shown inside the edge collection card */}
 
-          {/* _from / _to edges between edge collection and doc collections */}
-          {relationships.map((r) => {
-            if (r.style !== "DEDICATED_COLLECTION") return null;
+          {/* _from / _to edges between edge collection and doc collections
+              (deduplicated per edge collection — a shared `relations` collection
+              connects the same doc collection(s) for all its types). */}
+          {(() => {
+            const seen = new Set<string>();
+            return relationships.map((r) => {
+            if (seen.has(r.edgeCollection)) return null;
+            seen.add(r.edgeCollection);
             const ePos = layout.relEdgeCards.get(r.edgeCollection);
             const fromPhys = layout.physCards.get(entities.find((e) => e.name === r.from)?.collection || "");
             const toPhys = layout.physCards.get(entities.find((e) => e.name === r.to)?.collection || "");
@@ -431,8 +463,9 @@ export default function SchemaGraph({ mapping }: Props) {
                 </g>,
               );
             }
-            return <g key={`refs-${r.type}`}>{segs}</g>;
-          })}
+            return <g key={`refs-${r.edgeCollection}`}>{segs}</g>;
+            });
+          })()}
         </g>
       </svg>
     </div>
