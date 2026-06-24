@@ -120,6 +120,10 @@ class PropertyInfo:
     sentinel_values: tuple[str, ...] = ()
     numeric_like: bool = False
     sample_values: tuple[str, ...] = ()
+    # Domain-agnostic semantic role (identifier / name / categorical / temporal
+    # / numeric / free_text / boolean / other), inferred by the schema analyzer.
+    # Consumers choose a matching strategy from this rather than field names.
+    role: str = ""
 
 
 @dataclass(frozen=True)
@@ -289,6 +293,7 @@ class MappingResolver:
                     sentinel_values=tuple(str(s) for s in sentinels) if sentinels else (),
                     numeric_like=bool(meta.get("numericLike") or meta.get("numeric_like")),
                     sample_values=tuple(str(s) for s in samples) if samples else (),
+                    role=str(meta.get("role") or ""),
                 )
             elif isinstance(meta, str):
                 result[name] = PropertyInfo(field=name, type=meta)
@@ -517,6 +522,7 @@ class MappingResolver:
                         **({"sentinelValues": list(p.sentinel_values)} if p.sentinel_values else {}),
                         **({"numericLike": True} if p.numeric_like else {}),
                         **({"sampleValues": list(p.sample_values)} if p.sample_values else {}),
+                        **({"role": p.role} if p.role else {}),
                     }
                     for name, p in props.items()
                 },
@@ -550,6 +556,7 @@ class MappingResolver:
                         **({"sentinelValues": list(p.sentinel_values)} if p.sentinel_values else {}),
                         **({"numericLike": True} if p.numeric_like else {}),
                         **({"sampleValues": list(p.sample_values)} if p.sample_values else {}),
+                        **({"role": p.role} if p.role else {}),
                     }
                     for name, p in props.items()
                 },

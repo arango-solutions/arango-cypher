@@ -161,6 +161,73 @@ class TestIdentifierPropertyCandidates:
             assert field_name in _STRING_PROPERTY_CANDIDATES
 
 
+class TestRoleAwarePropertySelection:
+    """Property probing is driven by the analyzer's semantic ``role`` when
+    present — a domain-agnostic replacement for the hardcoded field-name list."""
+
+    @staticmethod
+    def _resolver_with_props(props: dict[str, dict]) -> EntityResolver:
+        from arango_query_core import MappingBundle, MappingSource
+
+        bundle = MappingBundle(
+            conceptual_schema={
+                "entities": [{"name": "Thing", "labels": ["Thing"], "properties": []}],
+                "relationships": [],
+            },
+            physical_mapping={
+                "entities": {
+                    "Thing": {
+                        "style": "COLLECTION",
+                        "collectionName": "things",
+                        "properties": props,
+                    }
+                },
+                "relationships": {},
+            },
+            metadata={},
+            source=MappingSource(kind="test"),
+        )
+        return EntityResolver(mapping=bundle)
+
+    def test_identifier_role_probed_before_name(self) -> None:
+        r = self._resolver_with_props(
+            {
+                "weirdcol": {"type": "string", "role": "name"},
+                "tag": {"type": "string", "role": "identifier"},
+            }
+        )
+        assert r._resolve_properties_for("Thing") == ["tag", "weirdcol"]
+
+    def test_categorical_temporal_numeric_excluded(self) -> None:
+        r = self._resolver_with_props(
+            {
+                "label": {"type": "string", "role": "name"},
+                "status": {"type": "string", "role": "categorical"},
+                "created": {"type": "string", "role": "temporal"},
+                "amount": {"type": "string", "role": "numeric"},
+            }
+        )
+        # Only the name-role field is resolvable; the rest are skipped.
+        assert r._resolve_properties_for("Thing") == ["label"]
+
+    def test_identifier_resolves_without_being_named_ticker(self) -> None:
+        """The whole point: a non-"ticker"-named identifier still wins."""
+        r = self._resolver_with_props(
+            {"mnemonic": {"type": "string", "role": "identifier"}}
+        )
+        assert r._resolve_properties_for("Thing") == ["mnemonic"]
+
+    def test_falls_back_to_name_list_without_roles(self) -> None:
+        # No role metadata → legacy field-name ordering (name before code).
+        r = self._resolver_with_props(
+            {
+                "code": {"type": "string"},
+                "name": {"type": "string"},
+            }
+        )
+        assert r._resolve_properties_for("Thing") == ["name", "code"]
+
+
 class TestArangoSearchAdvisory:
     """WP-S3: fuzzy probes on un-indexed fields emit an IndexAdvisory."""
 

@@ -810,6 +810,87 @@ def _infer_value_type(val: Any) -> str:
     return "string"
 
 
+# Domain-agnostic semantic roles for a property, inferred from sampled values.
+# Consumers (entity resolver, NL prompt) choose a matching strategy from the
+# role rather than from hardcoded field names: identifiers → exact match,
+# names/free-text → fuzzy, categorical/temporal/numeric → equality/range and
+# never a fuzzy entity-name target.
+ROLE_IDENTIFIER = "identifier"
+ROLE_NAME = "name"
+ROLE_FREE_TEXT = "free_text"
+ROLE_CATEGORICAL = "categorical"
+ROLE_TEMPORAL = "temporal"
+ROLE_NUMERIC = "numeric"
+ROLE_BOOLEAN = "boolean"
+ROLE_OTHER = "other"
+
+_ISO_DATE_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$"
+)
+
+
+def _classify_property_role(
+    values: list[Any],
+    dominant_type: str,
+    numeric_like: bool,
+) -> str:
+    """Infer a domain-agnostic semantic role for one property.
+
+    Heuristic and cheap (uses only the already-sampled ``values``). The goal is
+    to let downstream code reason about *what kind of thing* a field holds
+    (an identifier vs a human name vs a category vs a date) without hardcoding
+    field-name lists like ``ticker``/``symbol``/``id``.
+    """
+    if dominant_type == "boolean":
+        return ROLE_BOOLEAN
+
+    strings = [v for v in values if isinstance(v, str) and not _is_sentinel_token(v)]
+
+    # Temporal: ISO-8601 date/datetime strings dominate.
+    if strings:
+        iso_hits = sum(1 for s in strings if _ISO_DATE_RE.match(s.strip()))
+        if iso_hits / len(strings) >= 0.8:
+            return ROLE_TEMPORAL
+
+    if dominant_type == "number" or numeric_like:
+        return ROLE_NUMERIC
+
+    if not strings:
+        return ROLE_OTHER
+
+    lowered = [s.strip().lower() for s in strings if s.strip()]
+    if not lowered:
+        return ROLE_OTHER
+
+    n = len(lowered)
+    distinct = len(set(lowered))
+    distinct_ratio = distinct / n
+    avg_len = sum(len(s) for s in lowered) / n
+    max_len = max(len(s) for s in lowered)
+    multiword_share = sum(1 for s in lowered if " " in s) / n
+    token_share = sum(1 for s in lowered if " " not in s and len(s) <= 24) / n
+
+    # Identifier: (near-)unique, short, single-token (e.g. tickers, codes, keys).
+    if (
+        distinct_ratio >= 0.9
+        and max_len <= 32
+        and token_share >= 0.8
+        and multiword_share < 0.2
+    ):
+        return ROLE_IDENTIFIER
+
+    # Categorical: few distinct values relative to the sample, not long.
+    if distinct_ratio <= 0.2 and distinct <= 50 and avg_len <= 40:
+        return ROLE_CATEGORICAL
+
+    # Free text: long and/or multi-word with high variety.
+    if avg_len > 64 or (multiword_share >= 0.5 and avg_len > 24):
+        return ROLE_FREE_TEXT
+
+    # Otherwise a human-readable name/label.
+    return ROLE_NAME
+
+
 def _profile_property_values(
     values: list[Any],
     total_docs: int,
@@ -870,6 +951,7 @@ def _profile_property_values(
             break
 
     out: dict[str, Any] = {"type": dominant_type}
+    out["role"] = _classify_property_role(values, dominant_type, numeric_like)
     if sentinel_values:
         out["sentinelValues"] = sentinel_values
     if numeric_like:
@@ -1259,8 +1341,9 @@ def _build_heuristic_mapping(db: StandardDatabase, schema_type: str) -> MappingB
         """Convert property list to physical-mapping properties dict.
 
         Preserves data-quality hints (sentinelValues, numericLike, sampleValues)
-        emitted by :func:`_sample_properties` so downstream layers (NL prompts,
-        result rendering) can surface them.
+        and the semantic ``role`` emitted by :func:`_sample_properties` so
+        downstream layers (entity resolver, NL prompts, result rendering) can
+        surface them.
         """
         out: dict[str, dict[str, Any]] = {}
         for p in props:
@@ -1271,7 +1354,7 @@ def _build_heuristic_mapping(db: StandardDatabase, schema_type: str) -> MappingB
                 "field": p.get("field", name),
                 "type": p.get("type", "string"),
             }
-            for k in ("sentinelValues", "numericLike", "sampleValues", "required"):
+            for k in ("sentinelValues", "numericLike", "sampleValues", "required", "role"):
                 if k in p:
                     entry[k] = p[k]
             out[name] = entry

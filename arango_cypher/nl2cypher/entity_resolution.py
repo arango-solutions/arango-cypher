@@ -129,13 +129,29 @@ _STRING_PROPERTY_CANDIDATES: tuple[str, ...] = (
     "code",
     "id",
 )
-"""Property names that are likely to hold human-readable strings worth resolving.
+"""Legacy fallback list of property names likely to hold resolvable strings.
 
-The resolver tries each of these, in order, as a first-pass heuristic
-before falling back to "any string-typed property declared on the entity".
-Keeping this small and intentional avoids flooding the DB with look-ups
-on boolean/numeric columns.
+Used only when the analyzer has NOT classified a property's semantic ``role``;
+role-based selection (see ``_RESOLVABLE_ROLE_PRIORITY``) is preferred because it
+is domain-agnostic — a ticker resolves because it is an ``identifier``, not
+because it is literally named "ticker".
 """
+
+# Roles (from ``schema_acquire``) that are worth probing for entity-name
+# resolution, in priority order. Identifiers first (exact, high-signal), then
+# human-readable names, then free text.
+_RESOLVABLE_ROLE_PRIORITY: dict[str, int] = {
+    "identifier": 0,
+    "name": 1,
+    "label": 1,
+    "free_text": 2,
+    "other": 3,
+}
+# Roles that must NEVER be probed as entity-name targets.
+_NON_RESOLVABLE_ROLES: frozenset[str] = frozenset(
+    {"categorical", "temporal", "numeric", "boolean"}
+)
+_ROLE_OTHER = "other"
 
 
 _STOPWORDS: frozenset[str] = frozenset(
@@ -538,7 +554,15 @@ class EntityResolver:
         return out[: self.max_candidates]
 
     def _resolve_properties_for(self, label: str) -> list[str]:
-        """Return string-property names to query for *label*, best first."""
+        """Return string-property names to query for *label*, best first.
+
+        Prefers the analyzer's domain-agnostic semantic ``role`` when present:
+        probe ``identifier`` fields first (exact, high-signal), then ``name`` /
+        ``free_text`` (fuzzy), and never probe ``categorical`` / ``temporal`` /
+        ``numeric`` / ``boolean`` fields for entity-name resolution. When no
+        role metadata is available (older mappings / fixtures), falls back to the
+        legacy field-name heuristic (:data:`_STRING_PROPERTY_CANDIDATES`).
+        """
         if self.mapping is None:
             return list(_STRING_PROPERTY_CANDIDATES)
         pm = self.mapping.physical_mapping or {}
@@ -547,16 +571,33 @@ class EntityResolver:
         props_meta = decl.get("properties", {}) if isinstance(decl, dict) else {}
 
         declared_names: list[str] = []
+        roles: dict[str, str] = {}
         if isinstance(props_meta, dict):
             for name, meta in props_meta.items():
                 if isinstance(meta, dict):
                     ptype = str(meta.get("type", "string")).lower()
+                    role = meta.get("role")
+                    if isinstance(role, str) and role:
+                        roles[name] = role
                     if ptype in ("string", "str", "text"):
                         declared_names.append(name)
                 elif isinstance(meta, str):
                     if meta.lower() in ("string", "str", "text"):
                         declared_names.append(name)
 
+        # Role-driven selection (domain-agnostic) when the analyzer classified
+        # at least one property.
+        if roles:
+            ranked: list[tuple[int, str]] = []
+            for name in declared_names:
+                role = roles.get(name, _ROLE_OTHER)
+                if role in _NON_RESOLVABLE_ROLES:
+                    continue
+                ranked.append((_RESOLVABLE_ROLE_PRIORITY.get(role, 3), name))
+            ranked.sort(key=lambda x: (x[0], x[1]))
+            return [name for _, name in ranked]
+
+        # Legacy fallback: order by the known-good field-name list.
         ordered: list[str] = []
         seen: set[str] = set()
         for cand in _STRING_PROPERTY_CANDIDATES:
