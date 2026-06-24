@@ -114,9 +114,21 @@ def _summarize_bundle(db: StandardDatabase, bundle: Any) -> dict[str, Any]:
     resolver = MappingResolver(bundle)
     result = resolver.schema_summary()
 
-    col_to_label: dict[str, str] = {}
+    # Map each physical collection to the entity label(s) it carries. A
+    # type-discriminated collection (the GraphRAG shape) carries MANY labels, in
+    # which case the physical _from/_to collection is ambiguous and must not be
+    # used to backfill a relationship's endpoint — doing so collapses every
+    # relationship onto one arbitrary label. Correct per-type endpoints come
+    # from the bundle's _fromType/_toType normalization upstream.
+    col_labels: dict[str, set[str]] = {}
     for ent in result.get("entities", []):
-        col_to_label[ent.get("collection", "")] = ent.get("label", "")
+        col_labels.setdefault(ent.get("collection", ""), set()).add(ent.get("label", ""))
+
+    def _sole_label(col: str) -> str | None:
+        labels = col_labels.get(col)
+        if labels and len(labels) == 1:
+            return next(iter(labels))
+        return None
 
     for rel in result.get("relationships", []):
         if rel.get("domain") and rel.get("range"):
@@ -126,9 +138,13 @@ def _summarize_bundle(db: StandardDatabase, bundle: Any) -> dict[str, Any]:
             continue
         from_col, to_col = _infer_edge_endpoints(db, edge_col)
         if from_col and not rel.get("domain"):
-            rel["domain"] = col_to_label.get(from_col, from_col)
+            lbl = _sole_label(from_col)
+            if lbl:
+                rel["domain"] = lbl
         if to_col and not rel.get("range"):
-            rel["range"] = col_to_label.get(to_col, to_col)
+            lbl = _sole_label(to_col)
+            if lbl:
+                rel["range"] = lbl
 
     result["warnings"] = (bundle.metadata or {}).get("warnings") or []
     return result

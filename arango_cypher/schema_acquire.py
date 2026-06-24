@@ -1311,6 +1311,224 @@ def _infer_dedicated_edge_endpoints(
     return (domain, range_)
 
 
+# Open-vocabulary GraphRAG graphs put every relationship in one shared,
+# type-discriminated edge collection (e.g. `relations` keyed by a `type` field)
+# and can have tens of thousands of distinct `type` values with a very heavy
+# head. Materializing them all bloats the mapping, the NL prompt, and the schema
+# graph, so we keep the top-K by edge volume (which covers the vast majority of
+# edges) and summarize the rest. The transpiler still executes any type at query
+# time (it is discriminator-based); only the *schema view* is capped.
+DEFAULT_MAX_RELATIONSHIP_TYPES = 200
+
+
+def _props_to_pm_props(props: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Module-level twin of the nested ``_props_to_pm`` in the heuristic builder:
+    convert a sampled property list into physical-mapping property entries,
+    preserving the data-quality hints and semantic ``role``."""
+    out: dict[str, dict[str, Any]] = {}
+    for p in props:
+        name = p.get("name", "")
+        if not name:
+            continue
+        entry: dict[str, Any] = {"field": p.get("field", name), "type": p.get("type", "string")}
+        for k in ("sentinelValues", "numericLike", "sampleValues", "required", "role"):
+            if k in p:
+                entry[k] = p[k]
+        out[name] = entry
+    return out
+
+
+def _shared_typed_edge_collections(bundle: MappingBundle) -> dict[str, str]:
+    """Return ``{edgeCollection: typeField}`` for GENERIC_WITH_TYPE edge
+    collections (relationship types discriminated by a field on one shared
+    collection)."""
+    pm = bundle.physical_mapping or {}
+    rels = pm.get("relationships", {})
+    if not isinstance(rels, dict):
+        return {}
+    out: dict[str, str] = {}
+    for rmap in rels.values():
+        if not isinstance(rmap, dict):
+            continue
+        coll = rmap.get("edgeCollectionName")
+        tf = rmap.get("typeField")
+        if coll and tf and rmap.get("style") == "GENERIC_WITH_TYPE":
+            out[str(coll)] = str(tf)
+    return out
+
+
+def _aggregate_edge_endpoints(
+    db: StandardDatabase,
+    edge_collection: str,
+    type_field: str,
+    sample_limit: int,
+) -> dict[str, tuple[Any, Any]]:
+    """Return ``{typeValue: (fromType, toType)}`` dominant endpoint *type values*
+    per relationship type, from a single sampled aggregation over the edges'
+    ``_fromType``/``_toType`` discriminators. Returns ``{}`` when those fields
+    are absent (caller then leaves endpoints unresolved rather than guessing)."""
+    try:
+        sample = next(
+            db.aql.execute("FOR e IN @@c LIMIT 1 RETURN e", bind_vars={"@c": edge_collection}),
+            None,
+        )
+    except Exception:
+        return {}
+    if not isinstance(sample, dict) or "_fromType" not in sample or "_toType" not in sample:
+        return {}
+    try:
+        rows = list(
+            db.aql.execute(
+                f"FOR e IN @@c LIMIT @lim "
+                f"COLLECT t = e.`{type_field}`, ft = e._fromType, tt = e._toType "
+                f"WITH COUNT INTO n RETURN {{t: t, ft: ft, tt: tt, n: n}}",
+                bind_vars={"@c": edge_collection, "lim": sample_limit},
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.info("edge endpoint aggregation failed for %s: %s", edge_collection, exc)
+        return {}
+    best: dict[str, tuple[Any, Any, int]] = {}
+    for r in rows:
+        t = r.get("t")
+        if t is None:
+            continue
+        key = str(t)
+        n = int(r.get("n", 0) or 0)
+        cur = best.get(key)
+        if cur is None or n > cur[2]:
+            best[key] = (r.get("ft"), r.get("tt"), n)
+    return {t: (v[0], v[1]) for t, v in best.items()}
+
+
+def _normalize_open_vocab_edges(
+    db: StandardDatabase,
+    bundle: MappingBundle,
+    *,
+    max_types: int = DEFAULT_MAX_RELATIONSHIP_TYPES,
+    sample_limit: int = 1_000_000,
+) -> MappingBundle:
+    """Cap + correct relationships on shared, type-discriminated edge collections.
+
+    For each GENERIC_WITH_TYPE edge collection, keep the top-K relationship types
+    by edge volume (one COLLECT) and set each kept type's domain/range from the
+    dominant ``_fromType``/``_toType`` (one sampled aggregation), mapped to the
+    entity labels. Relationships on other collections (e.g. DEDICATED_COLLECTION)
+    pass through untouched. No-ops on schemas without such a collection, so it is
+    safe to run on every freshly-built bundle.
+    """
+    shared = _shared_typed_edge_collections(bundle)
+    if not shared:
+        return bundle
+
+    pm = bundle.physical_mapping or {}
+    cs = bundle.conceptual_schema or {}
+    rels_pm = pm.get("relationships", {}) if isinstance(pm.get("relationships"), dict) else {}
+    cs_rels = cs.get("relationships", []) if isinstance(cs.get("relationships"), list) else []
+
+    # typeValue -> entity label (vertices share a type-discriminated collection).
+    type_to_label: dict[str, str] = {}
+    ents_pm = pm.get("entities", {}) if isinstance(pm.get("entities"), dict) else {}
+    for label, emap in ents_pm.items():
+        if isinstance(emap, dict) and emap.get("typeValue") is not None:
+            type_to_label.setdefault(str(emap["typeValue"]), str(label))
+
+    def _label_for(type_val: Any) -> str:
+        if type_val is None:
+            return "Any"
+        return type_to_label.get(str(type_val), str(type_val))
+
+    # Pass-through: relationships NOT on a normalized collection keep as-is.
+    def _coll_of(rtype: str) -> str | None:
+        rm = rels_pm.get(rtype)
+        return rm.get("edgeCollectionName") if isinstance(rm, dict) else None
+
+    new_pm: dict[str, Any] = {t: r for t, r in rels_pm.items() if _coll_of(t) not in shared}
+    new_cs: list[Any] = [
+        r for r in cs_rels
+        if not (isinstance(r, dict) and _coll_of(str(r.get("type"))) in shared)
+    ]
+    cap_notes: list[dict[str, Any]] = []
+
+    for coll, type_field in shared.items():
+        try:
+            top = list(
+                db.aql.execute(
+                    f"FOR e IN @@c COLLECT t = e.`{type_field}` WITH COUNT INTO n "
+                    f"SORT n DESC LIMIT @k RETURN {{t: t, n: n}}",
+                    bind_vars={"@c": coll, "k": max_types},
+                )
+            )
+            total_types = next(
+                db.aql.execute(
+                    f"RETURN LENGTH(FOR e IN @@c COLLECT t = e.`{type_field}` RETURN 1)",
+                    bind_vars={"@c": coll},
+                ),
+                0,
+            )
+        except Exception as exc:  # noqa: BLE001 - keep the originals on failure
+            logger.warning("normalize edges: frequency query failed for %s: %s", coll, exc)
+            for t, r in rels_pm.items():
+                if _coll_of(t) == coll:
+                    new_pm[t] = r
+            for r in cs_rels:
+                if isinstance(r, dict) and _coll_of(str(r.get("type"))) == coll:
+                    new_cs.append(r)
+            continue
+
+        endpoints = _aggregate_edge_endpoints(db, coll, type_field, sample_limit)
+        shared_props = _sample_properties(db, coll)
+        shared_props_pm = _props_to_pm_props(shared_props)
+
+        kept = 0
+        for row in top:
+            t = row.get("t")
+            if t is None:
+                continue
+            t = str(t)
+            ft, tt = endpoints.get(t, (None, None))
+            domain, range_ = _label_for(ft), _label_for(tt)
+            new_cs.append(
+                {"type": t, "fromEntity": domain, "toEntity": range_, "properties": shared_props}
+            )
+            new_pm[t] = {
+                "style": "GENERIC_WITH_TYPE",
+                "edgeCollectionName": coll,
+                "typeField": type_field,
+                "typeValue": t,
+                "domain": domain,
+                "range": range_,
+                "properties": shared_props_pm,
+            }
+            kept += 1
+
+        if isinstance(total_types, int) and total_types > kept:
+            cap_notes.append(
+                {"edgeCollection": coll, "totalTypes": total_types, "keptTypes": kept}
+            )
+            logger.info(
+                "normalize edges: capped %s to top %d of %d relationship types",
+                coll,
+                kept,
+                total_types,
+            )
+
+    new_conceptual = dict(cs)
+    new_conceptual["relationships"] = new_cs
+    new_physical = dict(pm)
+    new_physical["relationships"] = new_pm
+    new_meta = dict(bundle.metadata or {})
+    if cap_notes:
+        new_meta["relationshipTypeCaps"] = cap_notes
+    return MappingBundle(
+        conceptual_schema=new_conceptual,
+        physical_mapping=new_physical,
+        metadata=new_meta,
+        owl_turtle=bundle.owl_turtle,
+        source=bundle.source,
+    )
+
+
 def _build_heuristic_mapping(db: StandardDatabase, schema_type: str) -> MappingBundle:
     """Build a MappingBundle from heuristics for PG or LPG schemas."""
     try:
@@ -2146,6 +2364,15 @@ def _build_fresh_bundle(
                 ),
                 install_hint="pip install arangodb-schema-analyzer",
             )
+
+    # Normalize open-vocabulary, type-discriminated edge collections regardless
+    # of which builder ran: cap to the top relationship types by edge volume and
+    # set correct per-type domain/range from the edges' _fromType/_toType. Safe
+    # no-op on schemas without such a collection.
+    try:
+        bundle = _normalize_open_vocab_edges(db, bundle)
+    except Exception:  # noqa: BLE001 - normalization is best-effort, never fatal
+        logger.warning("open-vocab edge normalization failed; using raw mapping", exc_info=True)
 
     if include_owl and not bundle.owl_turtle:
         try:
