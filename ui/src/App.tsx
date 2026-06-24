@@ -12,9 +12,13 @@ import ClauseOutline from "./components/ClauseOutline";
 import TenantSelector from "./components/TenantSelector";
 import GraphSelector from "./components/GraphSelector";
 import SchemaWarningBanner from "./components/SchemaWarningBanner";
+import SettingsMenu from "./components/SettingsMenu";
+import ChatComposer from "./components/ChatComposer";
+import QueryInspector from "./components/QueryInspector";
 import { useAppState } from "./api/store";
 import { buildCorrespondenceMap, buildReverseMap } from "./utils/correspondenceMap";
 import { filterVisibleWarnings, warningsKey } from "./utils/warnings";
+import { IDLE_INTENT, currentStage, planSend, stageLabel, type SendIntent } from "./utils/pipeline";
 import {
   translateCypher,
   executeCypher,
@@ -138,11 +142,69 @@ function splitCypherStatements(input: string): string[] {
 
 export default function App() {
   const [state, dispatch] = useAppState();
-  const [showMapping, setShowMapping] = useState(true);
+  // Mapping/schema panel is progressive disclosure — always closed by default
+  // on load (opened from the gear). Visibility is intentionally session-only so
+  // a hard refresh returns to the clean default.
+  const [showMapping, setShowMapping] = useState(false);
   const [mappingWidth, setMappingWidth] = useState(320);
   const [showHistory, setShowHistory] = useState(false);
   const [showSamples, setShowSamples] = useState(false);
   const [showOutline, setShowOutline] = useState(false);
+  // Query Inspector (Cypher|AQL editors + power actions) is always closed by
+  // default on load — the chat composer drives the common path; the editors are
+  // progressive disclosure. Visibility is session-only so a hard refresh
+  // returns to the clean default (its height/split layout is still persisted).
+  const [showInspector, setShowInspector] = useState(false);
+  // Per-pane visibility for the inspector's Cypher|AQL split (lifted here so
+  // result-affordance chips can focus a specific pane). At least one stays open.
+  const [cypherPaneOpen, setCypherPaneOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("qi_cypher_open") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const [aqlPaneOpen, setAqlPaneOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("qi_aql_open") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("qi_cypher_open", cypherPaneOpen ? "1" : "0");
+    } catch { /* ignore */ }
+  }, [cypherPaneOpen]);
+  useEffect(() => {
+    try {
+      localStorage.setItem("qi_aql_open", aqlPaneOpen ? "1" : "0");
+    } catch { /* ignore */ }
+  }, [aqlPaneOpen]);
+  const toggleCypherPane = useCallback(() => {
+    setCypherPaneOpen((v) => (v && !aqlPaneOpen ? v : !v));
+  }, [aqlPaneOpen]);
+  const toggleAqlPane = useCallback(() => {
+    setAqlPaneOpen((v) => (v && !cypherPaneOpen ? v : !v));
+  }, [cypherPaneOpen]);
+  // Auto-open the inspector when a transpile/execution error occurs, so errors
+  // don't dead-end behind the hidden editors (Query Workbench Shell, §3).
+  const [autoOpenOnError, setAutoOpenOnError] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("qi_auto_open_error") !== "0";
+    } catch {
+      return true;
+    }
+  });
+  const toggleAutoOpenOnError = useCallback(() => {
+    setAutoOpenOnError((v) => {
+      const next = !v;
+      try {
+        localStorage.setItem("qi_auto_open_error", next ? "1" : "0");
+      } catch { /* ignore */ }
+      return next;
+    });
+  }, []);
   const cypherViewRef = useRef<EditorView | null>(null);
   const [cypherHighlightLines, setCypherHighlightLines] = useState<number[]>([]);
   const [aqlHighlightLines, setAqlHighlightLines] = useState<number[]>([]);
@@ -218,6 +280,11 @@ export default function App() {
   // error isn't a recoverable transpile failure.
   const [aqlFallbackCypher, setAqlFallbackCypher] = useState<string | null>(null);
   const directAqlRef = useRef(false); // true when AQL came from NL→AQL direct path
+  // Chat composer "Send" intent: drives the full pipeline (generate → transpile
+  // → run-if-connected) through the existing auto-translate/auto-run effect
+  // chain, independent of the manual Auto-translate/Auto-run toggles. Reset to
+  // IDLE once the pipeline terminates (run, or transpile-only when offline).
+  const sendIntentRef = useRef<SendIntent>(IDLE_INTENT);
   const [aqlModified, setAqlModified] = useState(false);
   const editedAqlRef = useRef("");
   const [learnSaving, setLearnSaving] = useState(false);
@@ -233,7 +300,6 @@ export default function App() {
   // changes, instead of going stale against a previously-connected database.
   const [nlSamples, setNlSamples] = useState<string[]>([]);
   const lastSampleKeyRef = useRef<string | null>(null);
-  const [nlHistoryOpen, setNlHistoryOpen] = useState(false);
   const [autoTranslate, setAutoTranslate] = useState<boolean>(() => {
     try { return localStorage.getItem("auto_translate") === "1"; } catch { return false; }
   });
@@ -281,7 +347,6 @@ export default function App() {
       return next;
     });
   }, []);
-  const nlHistoryRef = useRef<HTMLDivElement>(null);
   const mappingRef = useRef(state.mapping);
   mappingRef.current = state.mapping;
   const cypherRef = useRef(state.cypher);
@@ -372,8 +437,13 @@ export default function App() {
         translateMs: resp.elapsed_ms,
       });
       addToHistory(resp.aql);
-      if (autoRun) setPendingAutoRun(true);
+      if (sendIntentRef.current.run || autoRun) {
+        setPendingAutoRun(true);
+      } else {
+        sendIntentRef.current = IDLE_INTENT;
+      }
     } catch (err) {
+      sendIntentRef.current = IDLE_INTENT;
       dispatch({
         type: "TRANSLATE_ERROR",
         error: err instanceof Error ? err.message : String(err),
@@ -388,6 +458,9 @@ export default function App() {
     if (!state.connection.token) return;
     setAqlFallbackCypher(null);
     dispatch({ type: "EXECUTE_START" });
+    // Execute is the terminal pipeline stage; consume any Send intent so a
+    // later manual Translate/Run doesn't inherit it.
+    sendIntentRef.current = IDLE_INTENT;
     try {
       if (directAqlRef.current && state.aql) {
         const resp = await executeAql(state.aql, state.bindVars, state.connection.token);
@@ -897,16 +970,6 @@ export default function App() {
     }
   }, [state.connection.status]);
 
-  useEffect(() => {
-    const onClick = (e: MouseEvent) => {
-      if (nlHistoryRef.current && !nlHistoryRef.current.contains(e.target as Node)) {
-        setNlHistoryOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
-  }, []);
-
   const handleNL = useCallback(async () => {
     if (!nlInput.trim()) return;
     addNlHistory(nlInput.trim());
@@ -933,8 +996,13 @@ export default function App() {
           const tokens = resp.total_tokens ? ` ${resp.total_tokens}tok` : "";
           const info = `${resp.method} (${Math.round(resp.confidence * 100)}%)${ms}${tokens}`;
           setNlInfo(info);
-          if (autoRun) setPendingAutoRun(true);
+          if (sendIntentRef.current.run || autoRun) {
+            setPendingAutoRun(true);
+          } else {
+            sendIntentRef.current = IDLE_INTENT;
+          }
         } else {
+          sendIntentRef.current = IDLE_INTENT;
           setNlInfo(resp.explanation || "Could not generate AQL");
         }
       } else {
@@ -970,20 +1038,40 @@ export default function App() {
           const tokens = resp.total_tokens ? ` ${resp.total_tokens}tok` : "";
           const info = `${resp.method} (${Math.round(resp.confidence * 100)}%)${ms}${tokens}`;
           setNlInfo(info);
-          if (autoTranslate || autoRun) setPendingAutoTranslate(true);
+          if (sendIntentRef.current.translate || autoTranslate || autoRun) {
+            setPendingAutoTranslate(true);
+          } else {
+            sendIntentRef.current = IDLE_INTENT;
+          }
         } else if (isFailClosed) {
+          sendIntentRef.current = IDLE_INTENT;
           setNlError(resp.explanation || "NL → Cypher failed validation");
         } else {
+          sendIntentRef.current = IDLE_INTENT;
           setNlInfo(resp.explanation || "Could not generate Cypher");
         }
       }
     } catch (err) {
+      sendIntentRef.current = IDLE_INTENT;
       setNlInfo(err instanceof Error ? err.message : "NL translation failed");
       handleMaybeAuthError(err);
     } finally {
       setNlLoading(false);
     }
   }, [nlInput, nlMode, dispatch, addNlHistory, autoTranslate, autoRun, state.connection.token, handleMaybeAuthError]);
+
+  // Chat composer Send: always run the full pipeline (generate → transpile →
+  // run-if-connected), regardless of the manual auto toggles. Reuses handleNL +
+  // the auto-translate/auto-run effect chain via sendIntentRef.
+  const handleSend = useCallback(() => {
+    if (!nlInput.trim() || nlLoading) return;
+    const connected = state.connection.status === "connected";
+    sendIntentRef.current = planSend(connected);
+    // Offline: there will be no execution results, so reveal the inspector to
+    // show the generated Cypher/AQL (Query Workbench Shell §3.2).
+    if (!connected) setShowInspector(true);
+    handleNL();
+  }, [nlInput, nlLoading, state.connection.status, handleNL]);
 
   // WP-S3c: one-click creation of the inverted index an advisory recommends.
   // Authenticated (mutates the connected DB). Idempotent server-side. Tracks
@@ -1124,6 +1212,14 @@ export default function App() {
     handleMaybeAuthError,
   ]);
 
+  // Auto-open the inspector on a query error (gated by preference). Reads the
+  // cypher via ref so this fires only on a new error, not on every keystroke.
+  useEffect(() => {
+    if (autoOpenOnError && state.error && cypherRef.current.trim()) {
+      setShowInspector(true);
+    }
+  }, [state.error, autoOpenOnError]);
+
   // Chain auto-translate after NL→Cypher when enabled.
   useEffect(() => {
     if (!pendingAutoTranslate) return;
@@ -1252,43 +1348,24 @@ export default function App() {
               error={tenantResolution.error}
             />
           )}
-          <button
-            onClick={() => setShowSamples(true)}
-            className="px-2.5 py-1 text-xs rounded bg-gray-800 text-gray-400 hover:text-gray-200 transition-colors"
-          >
-            Samples
-          </button>
-          <button
-            onClick={() => setShowHistory(true)}
-            className="px-2.5 py-1 text-xs rounded bg-gray-800 text-gray-400 hover:text-gray-200 transition-colors"
-          >
-            History
-            {state.history.length > 0 && (
-              <span className="ml-1.5 text-gray-500">
-                ({state.history.length})
-              </span>
-            )}
-          </button>
-          <button
-            onClick={() => setShowOutline(!showOutline)}
-            className={`px-2.5 py-1 text-xs rounded transition-colors ${
-              showOutline
-                ? "bg-indigo-600/20 text-indigo-400 border border-indigo-600/30"
-                : "bg-gray-800 text-gray-400 hover:text-gray-200"
-            }`}
-          >
-            Outline
-          </button>
-          <button
-            onClick={() => setShowMapping(!showMapping)}
-            className={`px-2.5 py-1 text-xs rounded transition-colors ${
-              showMapping
-                ? "bg-indigo-600/20 text-indigo-400 border border-indigo-600/30"
-                : "bg-gray-800 text-gray-400 hover:text-gray-200"
-            }`}
-          >
-            Mapping
-          </button>
+          <SettingsMenu
+            showMapping={showMapping}
+            onToggleMapping={() => setShowMapping((v) => !v)}
+            showOutline={showOutline}
+            onToggleOutline={() => setShowOutline((v) => !v)}
+            onOpenSamples={() => setShowSamples(true)}
+            onOpenHistory={() => setShowHistory(true)}
+            historyCount={state.history.length}
+            autoTranslate={autoTranslate}
+            onToggleAutoTranslate={toggleAutoTranslate}
+            autoRun={autoRun}
+            onToggleAutoRun={toggleAutoRun}
+            autoRunDisabled={!isConnected}
+            autoOpenOnError={autoOpenOnError}
+            onToggleAutoOpenOnError={toggleAutoOpenOnError}
+            nlMode={nlMode}
+            onNlModeChange={setNlMode}
+          />
         </div>
       </header>
 
@@ -1427,94 +1504,62 @@ export default function App() {
               }}
             />
           </>
-        ) : (
-          <button
-            onClick={() => setShowMapping(true)}
-            title="Show schema mapping pane"
-            aria-label="Show schema mapping pane"
-            className="w-6 flex-shrink-0 flex flex-col items-center justify-center gap-2 bg-gray-900/40 hover:bg-gray-800 border-r border-gray-800 group transition-colors"
-          >
-            <span className="text-gray-500 group-hover:text-indigo-400 text-xs leading-none transition-colors">
-              &#9654;
-            </span>
-            <span
-              className="text-[10px] text-gray-600 group-hover:text-gray-400 uppercase tracking-wider transition-colors"
-              style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
-            >
-              Mapping
-            </span>
-          </button>
-        )}
+        ) : null}
 
         {/* Editors and results */}
         <div className="flex-1 min-w-0 flex flex-col">
-          {/* NL input bar */}
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-900/30 border-b border-gray-800">
-            <span className="text-xs text-gray-500 shrink-0">Ask:</span>
-            {tenantContext && (
-              <span
-                className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-900/30 border border-amber-700/60 text-amber-300 text-[10px] shrink-0"
-                title={`Queries scoped to Tenant.${tenantContext.property} = ${tenantContext.value}`}
-              >
-                <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400" />
-                {tenantContext.display || tenantContext.value}
-              </span>
-            )}
-            <div className="flex-1 relative" ref={nlHistoryRef}>
-              <input
-                type="text"
-                value={nlInput}
-                onChange={(e) => setNlInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") { handleNL(); setNlHistoryOpen(false); } }}
-                onFocus={() => { if (nlSuggestions.length > 0) setNlHistoryOpen(true); }}
-                placeholder="Describe what you want in plain English..."
-                className="w-full bg-gray-800 text-gray-200 text-xs rounded px-2.5 py-1.5 border border-gray-700 focus:border-indigo-500 focus:outline-none placeholder-gray-600"
-              />
-              {nlHistoryOpen && nlSuggestions.length > 0 && (
-                <div className="absolute left-0 right-0 top-full mt-0.5 z-50 bg-gray-800 border border-gray-700 rounded shadow-xl max-h-48 overflow-y-auto">
-                  {nlSuggestions.map((q, i) => (
-                    <button
-                      key={i}
-                      className="w-full text-left px-2.5 py-1.5 text-xs text-gray-300 hover:bg-gray-700 hover:text-white truncate transition-colors"
-                      title={q}
-                      onClick={() => { setNlInput(q); setNlHistoryOpen(false); }}
-                    >
-                      {q}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            {/* NL output mode toggle: Cypher (two-stage) vs AQL (direct) */}
-            <div className="flex items-center rounded border border-gray-700 overflow-hidden shrink-0">
-              <button
-                onClick={() => setNlMode("cypher")}
-                className={`px-2 py-1 text-[10px] font-medium transition-colors ${nlMode === "cypher" ? "bg-indigo-600 text-white" : "bg-gray-800 text-gray-400 hover:text-gray-200"}`}
-                title="NL → Cypher → AQL (two-stage)"
-              >
-                Cypher
-              </button>
-              <button
-                onClick={() => setNlMode("aql")}
-                className={`px-2 py-1 text-[10px] font-medium transition-colors ${nlMode === "aql" ? "bg-amber-600 text-white" : "bg-gray-800 text-gray-400 hover:text-gray-200"}`}
-                title="NL → AQL (direct, requires LLM)"
-              >
-                AQL
-              </button>
-            </div>
-            <button
-              onClick={handleNL}
-              disabled={nlLoading || !nlInput.trim()}
-              className="px-3 py-1.5 text-xs font-medium rounded bg-violet-600 hover:bg-violet-500 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-            >
-              {nlLoading ? "..." : "Generate"}
-            </button>
-            {nlInfo && !nlError && (
-              <span className="text-[10px] text-emerald-500/70 shrink-0 max-w-[280px] truncate tabular-nums" title={nlInfo}>
-                {nlInfo}
-              </span>
-            )}
-          </div>
+          {/* NL chat composer — Enter sends the full pipeline */}
+          <ChatComposer
+            value={nlInput}
+            onChange={setNlInput}
+            onSend={handleSend}
+            busy={nlLoading || state.translating || state.executing}
+            suggestions={nlSuggestions}
+            onPickSuggestion={(q) => setNlInput(q)}
+            contextSlot={
+              tenantContext ? (
+                <span
+                  className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-900/30 border border-amber-700/60 text-amber-300 text-[10px]"
+                  title={`Queries scoped to Tenant.${tenantContext.property} = ${tenantContext.value}`}
+                >
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-400" />
+                  {tenantContext.display || tenantContext.value}
+                </span>
+              ) : null
+            }
+            statusSlot={(() => {
+              const stage = currentStage({
+                nlLoading,
+                translating: state.translating,
+                executing: state.executing,
+              });
+              if (stage !== "idle") {
+                return (
+                  <span className="text-[10px] text-indigo-300/80 truncate">
+                    {stageLabel(stage)}
+                  </span>
+                );
+              }
+              if (nlInfo && !nlError) {
+                return (
+                  <span
+                    className="text-[10px] text-emerald-500/70 truncate"
+                    title={nlInfo}
+                  >
+                    {nlInfo}
+                  </span>
+                );
+              }
+              if (!isConnected) {
+                return (
+                  <span className="text-[10px] text-amber-600/80 truncate">
+                    Not connected — Send generates &amp; transpiles only
+                  </span>
+                );
+              }
+              return null;
+            })()}
+          />
 
           {nlError && (
             <div
@@ -1581,93 +1626,27 @@ export default function App() {
             </div>
           )}
 
-          {/* Editor toolbar */}
-          <div className="flex items-center gap-2 px-3 py-2 bg-gray-900/50 border-b border-gray-800">
-            <button
-              onClick={handleTranslate}
-              disabled={isLoading || !state.cypher.trim()}
-              className="px-3 py-1.5 text-xs font-medium rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Ctrl/Cmd+Enter"
-            >
-              {state.translating ? "Translating..." : "Translate"}
-            </button>
-            <button
-              onClick={handleExecute}
-              disabled={isLoading || !isConnected || (!state.cypher.trim() && !state.aql)}
-              className="px-3 py-1.5 text-xs font-medium rounded bg-emerald-600 hover:bg-emerald-500 text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Shift+Enter"
-            >
-              {state.executing ? "Running..." : "Run"}
-            </button>
-            <div className="w-px h-5 bg-gray-700" />
-            <button
-              onClick={handleExplain}
-              disabled={isLoading || !isConnected || !state.cypher.trim()}
-              className="px-3 py-1.5 text-xs font-medium rounded bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Ctrl/Cmd+Shift+E"
-            >
-              {state.explaining ? "Explaining..." : "Explain"}
-            </button>
-            <button
-              onClick={handleProfile}
-              disabled={isLoading || !isConnected || !state.cypher.trim()}
-              className="px-3 py-1.5 text-xs font-medium rounded bg-gray-700 hover:bg-gray-600 text-gray-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Ctrl/Cmd+Shift+P"
-            >
-              {state.profiling ? "Profiling..." : "Profile"}
-            </button>
-
-            {isLoading && (
-              <div className="ml-2 w-4 h-4 border-2 border-indigo-400 border-t-transparent rounded-full animate-spin" />
-            )}
-
-            <div className="w-px h-5 bg-gray-700 ml-2" />
-
-            <label
-              className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-200 cursor-pointer select-none"
-              title="Automatically Translate after generating Cypher from natural language"
-            >
-              <input
-                type="checkbox"
-                checked={autoTranslate}
-                onChange={toggleAutoTranslate}
-                className="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-indigo-500 focus:ring-1 focus:ring-indigo-500 focus:ring-offset-0 cursor-pointer"
-              />
-              Auto-translate
-            </label>
-            <label
-              className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-200 cursor-pointer select-none"
-              title="Automatically Run after a successful Translate (requires connection)"
-            >
-              <input
-                type="checkbox"
-                checked={autoRun}
-                onChange={toggleAutoRun}
-                disabled={!isConnected}
-                className="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-emerald-500 focus:ring-1 focus:ring-emerald-500 focus:ring-offset-0 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-              />
-              Auto-run
-            </label>
-
-            <div className="flex-1" />
-
-            <span className="text-xs text-gray-600">
-              {isConnected ? (
-                <span className="text-gray-500">
-                  Shift+Enter to run
-                </span>
-              ) : (
-                <span className="text-amber-600">
-                  Connect to run / explain / profile
-                </span>
-              )}
-            </span>
-          </div>
-
-          {/* Side-by-side editors */}
-          <div className="flex-1 min-h-0 flex">
-            {/* Cypher editor */}
-            <div className="flex-1 min-w-0 flex flex-col border-r border-gray-800">
+          {/* Query Inspector (Cypher | AQL) — collapsible, closed by default */}
+          <QueryInspector
+            open={showInspector}
+            onToggle={() => setShowInspector((v) => !v)}
+            onTranslate={handleTranslate}
+            onRun={handleExecute}
+            onExplain={handleExplain}
+            onProfile={handleProfile}
+            translating={state.translating}
+            executing={state.executing}
+            explaining={state.explaining}
+            profiling={state.profiling}
+            busy={isLoading}
+            isConnected={isConnected}
+            cypherEmpty={!state.cypher.trim()}
+            cypherOpen={cypherPaneOpen}
+            aqlOpen={aqlPaneOpen}
+            onToggleCypher={toggleCypherPane}
+            onToggleAql={toggleAqlPane}
+            cypherPane={
+              <>
               <div className="px-3 py-1.5 bg-gray-900/30 border-b border-gray-800 flex items-center gap-2">
                 <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">
                   Cypher
@@ -1735,10 +1714,10 @@ export default function App() {
                 params={state.params}
                 onChange={(p) => dispatch({ type: "SET_PARAMS", params: p })}
               />
-            </div>
-
-            {/* AQL editor */}
-            <div className="flex-1 min-w-0 flex flex-col">
+              </>
+            }
+            aqlPane={
+              <>
               <div className="px-3 py-1.5 bg-gray-900/30 border-b border-gray-800 flex items-center gap-2">
                 <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">
                   AQL
@@ -1836,11 +1815,12 @@ export default function App() {
                   onHoverLine={handleAqlHoverLine}
                 />
               </div>
-            </div>
-          </div>
+              </>
+            }
+          />
 
-          {/* Results panel */}
-          <div className="h-64 border-t border-gray-800 flex-shrink-0">
+          {/* Results panel — primary surface; fills space the inspector leaves */}
+          <div className="flex-1 min-h-0 border-t border-gray-800">
             <ResultsPanel
               results={state.results}
               explainPlan={state.explainPlan}
