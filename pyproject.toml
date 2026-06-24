@@ -78,6 +78,7 @@ markers = [
   "integration: requires a running ArangoDB (see README); isolated profile tests use docker-compose.pytest.yml on port 28530",
   "tck: openCypher TCK harness and runners",
   "cross: cross-validates translated AQL against a reference Cypher engine (Neo4j); requires a running Neo4j (see docker-compose.neo4j.yml) plus RUN_INTEGRATION=1 and RUN_CROSS=1",
+  "live: executes translated AQL against a real remote ArangoDB (reads ARANGO_* env); auto-skips when unset. Excluded by the default suite via -k 'not live'.",
 ]
 
 [tool.ruff]
