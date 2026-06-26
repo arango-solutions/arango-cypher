@@ -24,10 +24,10 @@ from typing import Any
 
 import pytest
 
-# Conservative server-side cap so a pathological query can never hang the suite;
-# every live query here is LIMIT-bounded and expected to finish in well under a
-# second, so this only fires on genuine trouble.
-DEFAULT_MAX_RUNTIME_SECONDS = 30.0
+# Server-side cap so a pathological query can never hang the suite. Every live
+# query here is LIMIT-bounded with an unlabeled/abundant endpoint and is
+# expected to finish well under a second, so this only fires on genuine trouble.
+DEFAULT_MAX_RUNTIME_SECONDS = 15.0
 
 
 def _verify_ssl() -> bool:

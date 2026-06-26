@@ -201,7 +201,15 @@ function PropEdge({ x1, y1, x2, y2, color }: { x1: number; y1: number; x2: numbe
   );
 }
 
-function OntologyRel({ type, fromPos, toPos, isSelf, weight = 1.5 }: { type: string; fromPos: CardPos; toPos: CardPos; isSelf: boolean; weight?: number }) {
+function OntologyRel({ type, fromPos, toPos, isSelf, weight = 1.5, selected = false, onSelect }: { type: string; fromPos: CardPos; toPos: CardPos; isSelf: boolean; weight?: number; selected?: boolean; onSelect?: () => void }) {
+  const stroke = selected ? "#818cf8" : "#94a3b8";
+  const pillStroke = selected ? "#818cf8" : "#475569";
+  const pillFill = selected ? "#1e1b4b" : "#0f172a";
+  const w = selected ? weight + 1.5 : weight;
+  const click = onSelect
+    ? (e: React.MouseEvent) => { e.stopPropagation(); onSelect(); }
+    : undefined;
+  const groupProps = onSelect ? { onClick: click, style: { cursor: "pointer" as const } } : {};
   if (isSelf) {
     // Self-loop on the LEFT side of the card, away from property edges
     const cx = fromPos.x;
@@ -212,9 +220,9 @@ function OntologyRel({ type, fromPos, toPos, isSelf, weight = 1.5 }: { type: str
     const pillW = type.length * 7.5 + 16;
     const lx = cx - loopW - pillW / 2 - 4;
     return (
-      <g>
-        <path d={path} fill="none" stroke="#94a3b8" strokeWidth={weight} strokeDasharray="6 3" markerEnd="url(#onto-arrow)" />
-        <rect x={lx} y={midY - 11} width={pillW} height={22} rx={11} fill="#0f172a" stroke="#475569" strokeWidth={1} />
+      <g {...groupProps}>
+        <path d={path} fill="none" stroke={stroke} strokeWidth={w} strokeDasharray="6 3" markerEnd="url(#onto-arrow)" />
+        <rect x={lx} y={midY - 11} width={pillW} height={22} rx={11} fill={pillFill} stroke={pillStroke} strokeWidth={selected ? 1.5 : 1} />
         <text x={lx + pillW / 2} y={midY + 1} fill="#e2e8f0" fontSize={10} fontWeight="600" textAnchor="middle" dominantBaseline="middle">{type}</text>
       </g>
     );
@@ -228,9 +236,9 @@ function OntologyRel({ type, fromPos, toPos, isSelf, weight = 1.5 }: { type: str
   const my = (y1 + y2) / 2;
   const pillW = Math.max(56, type.length * 7 + 14);
   return (
-    <g>
-      <path d={`M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`} fill="none" stroke="#94a3b8" strokeWidth={weight} markerEnd="url(#onto-arrow)" />
-      <rect x={mx - pillW / 2} y={my - 10} width={pillW} height={20} rx={10} fill="#0f172a" stroke="#475569" strokeWidth={1} />
+    <g {...groupProps}>
+      <path d={`M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`} fill="none" stroke={stroke} strokeWidth={w} markerEnd="url(#onto-arrow)" />
+      <rect x={mx - pillW / 2} y={my - 10} width={pillW} height={20} rx={10} fill={pillFill} stroke={pillStroke} strokeWidth={selected ? 1.5 : 1} />
       <text x={mx} y={my + 1} fill="#e2e8f0" fontSize={10} fontWeight="600" textAnchor="middle" dominantBaseline="middle">{type}</text>
     </g>
   );
@@ -302,6 +310,11 @@ export default function SchemaGraph({ mapping }: Props) {
     return b.volume > 0 ? `${base} · ${fmtCount(b.volume)}` : base;
   };
 
+  // Click-to-expand: select a bundle (by arc or panel row) to highlight its arc
+  // and reveal its full predicate list.
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const keyOf = (b: { from: string; to: string }) => `${b.from}\u0001${b.to}`;
+
   const fitToView = useCallback(() => {
     if (size.w === 0 || size.h === 0) return;
     const b = layout.bounds;
@@ -354,9 +367,20 @@ export default function SchemaGraph({ mapping }: Props) {
               {visibleBundles.length} of {bundles.length} type pairs
             </div>
             {visibleBundles.slice(0, 50).map((b) => {
-              const shown = (q ? b.types.filter((t) => t.toLowerCase().includes(q)) : b.types);
+              const key = keyOf(b);
+              const isSel = selectedKey === key;
+              const matched = q ? b.types.filter((t) => t.toLowerCase().includes(q)) : b.types;
+              // Selected row expands to the full predicate list; otherwise truncate.
+              const shown = isSel ? matched : matched.slice(0, 6);
               return (
-                <div key={`${b.from}->${b.to}`} className="px-2 py-1 hover:bg-gray-800/60">
+                <button
+                  type="button"
+                  key={`${b.from}->${b.to}`}
+                  onClick={() => setSelectedKey((cur) => (cur === key ? null : key))}
+                  className={`w-full text-left px-2 py-1 transition-colors ${
+                    isSel ? "bg-indigo-600/20" : "hover:bg-gray-800/60"
+                  }`}
+                >
                   <div className="text-[11px] text-gray-300">
                     {b.from} <span className="text-gray-600">&rarr;</span> {b.to}
                     <span className="text-gray-500"> · {b.types.length}</span>
@@ -365,13 +389,13 @@ export default function SchemaGraph({ mapping }: Props) {
                     )}
                   </div>
                   <div
-                    className="text-[10px] text-gray-500 truncate"
+                    className={`text-[10px] text-gray-500 ${isSel ? "whitespace-normal break-words" : "truncate"}`}
                     title={b.types.join(", ")}
                   >
-                    {shown.slice(0, 6).join(", ")}
-                    {shown.length > 6 ? "…" : ""}
+                    {shown.join(", ")}
+                    {!isSel && matched.length > 6 ? "…" : ""}
                   </div>
-                </div>
+                </button>
               );
             })}
           </div>
@@ -403,6 +427,7 @@ export default function SchemaGraph({ mapping }: Props) {
             const fp = layout.ontoCards.get(b.from);
             const tp = layout.ontoCards.get(b.to);
             if (!fp || !tp) return null;
+            const key = keyOf(b);
             return (
               <OntologyRel
                 key={`relbundle-${b.from}->${b.to}`}
@@ -411,6 +436,8 @@ export default function SchemaGraph({ mapping }: Props) {
                 toPos={tp}
                 isSelf={b.isSelf}
                 weight={arcWeight(b.volume)}
+                selected={selectedKey === key}
+                onSelect={() => setSelectedKey((cur) => (cur === key ? null : key))}
               />
             );
           })}
