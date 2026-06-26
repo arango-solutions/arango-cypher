@@ -248,6 +248,38 @@ export default function SchemaGraph({ mapping }: Props) {
   const { entities, relationships } = useMemo(() => extractMapping(mapping), [mapping]);
   const layout = useMemo(() => computeLayout(entities, relationships), [entities, relationships]);
 
+  // Phase 2 — abstraction: bundle relationship types by entity-type pair so a
+  // graph with hundreds of predicates (the GraphRAG shape) collapses to a few
+  // dozen arcs. `relationships` arrives frequency-ranked from the analyzer cap,
+  // so member order within a bundle is already by edge volume.
+  const bundles = useMemo(() => {
+    const m = new Map<string, { from: string; to: string; types: string[]; isSelf: boolean }>();
+    for (const r of relationships) {
+      const key = `${r.from}\u0001${r.to}`;
+      let b = m.get(key);
+      if (!b) {
+        b = { from: r.from, to: r.to, types: [], isSelf: r.from === r.to };
+        m.set(key, b);
+      }
+      b.types.push(r.type);
+    }
+    return Array.from(m.values()).sort((a, b) => b.types.length - a.types.length);
+  }, [relationships]);
+
+  const [relQuery, setRelQuery] = useState("");
+  const q = relQuery.trim().toLowerCase();
+  const visibleBundles = useMemo(() => {
+    if (!q) return bundles;
+    return bundles.filter(
+      (b) =>
+        b.from.toLowerCase().includes(q) ||
+        b.to.toLowerCase().includes(q) ||
+        b.types.some((t) => t.toLowerCase().includes(q)),
+    );
+  }, [bundles, q]);
+  const bundleLabel = (b: { types: string[] }) =>
+    b.types.length === 1 ? b.types[0] : `${b.types.length} predicates`;
+
   const fitToView = useCallback(() => {
     if (size.w === 0 || size.h === 0) return;
     const b = layout.bounds;
@@ -283,6 +315,44 @@ export default function SchemaGraph({ mapping }: Props) {
       </div>
       <div className="absolute bottom-2 left-2 z-10 text-[10px] text-gray-600">{Math.round(zoom * 100)}%</div>
 
+      {/* Relationship browser — search the predicate vocabulary; arcs are
+          bundled by entity-type pair, this exposes the individual predicates. */}
+      {bundles.length > 0 && (
+        <div className="absolute top-2 left-2 z-10 w-52 max-h-[78%] flex flex-col bg-gray-900/85 border border-gray-700 rounded-md backdrop-blur shadow-xl">
+          <div className="p-1.5 border-b border-gray-800">
+            <input
+              value={relQuery}
+              onChange={(e) => setRelQuery(e.target.value)}
+              placeholder={`Search ${relationships.length} predicates…`}
+              className="w-full bg-gray-800 text-gray-200 rounded px-2 py-1 text-[11px] border border-gray-700 focus:border-indigo-500 focus:outline-none placeholder-gray-600"
+            />
+          </div>
+          <div className="overflow-y-auto py-1">
+            <div className="px-2 py-0.5 text-[10px] text-gray-500">
+              {visibleBundles.length} of {bundles.length} type pairs
+            </div>
+            {visibleBundles.slice(0, 50).map((b) => {
+              const shown = (q ? b.types.filter((t) => t.toLowerCase().includes(q)) : b.types);
+              return (
+                <div key={`${b.from}->${b.to}`} className="px-2 py-1 hover:bg-gray-800/60">
+                  <div className="text-[11px] text-gray-300">
+                    {b.from} <span className="text-gray-600">&rarr;</span> {b.to}
+                    <span className="text-gray-500"> · {b.types.length}</span>
+                  </div>
+                  <div
+                    className="text-[10px] text-gray-500 truncate"
+                    title={b.types.join(", ")}
+                  >
+                    {shown.slice(0, 6).join(", ")}
+                    {shown.length > 6 ? "…" : ""}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Legend */}
       <div className="absolute bottom-2 right-2 z-10 flex gap-3 text-[9px] text-gray-500">
         <span className="flex items-center gap-1"><span className="w-6 h-0.5 inline-block" style={{ background: PROP_EDGE_COLORS[0] }} />property mapping</span>
@@ -302,12 +372,20 @@ export default function SchemaGraph({ mapping }: Props) {
           <line x1={LEFT_MARGIN + CARD_W / 2 - 70} y1={38} x2={LEFT_MARGIN + CARD_W / 2 + 70} y2={38} stroke="#334155" strokeWidth={0.5} />
           <line x1={LEFT_MARGIN + CARD_W + MAPPING_GAP + CARD_W / 2 - 70} y1={38} x2={LEFT_MARGIN + CARD_W + MAPPING_GAP + CARD_W / 2 + 70} y2={38} stroke="#334155" strokeWidth={0.5} />
 
-          {/* Ontology relationship edges */}
-          {relationships.map((r) => {
-            const fp = layout.ontoCards.get(r.from);
-            const tp = layout.ontoCards.get(r.to);
+          {/* Ontology relationship edges — one arc per entity-type-pair bundle */}
+          {visibleBundles.map((b) => {
+            const fp = layout.ontoCards.get(b.from);
+            const tp = layout.ontoCards.get(b.to);
             if (!fp || !tp) return null;
-            return <OntologyRel key={`rel-${r.type}`} type={r.type} fromPos={fp} toPos={tp} isSelf={r.from === r.to} />;
+            return (
+              <OntologyRel
+                key={`relbundle-${b.from}->${b.to}`}
+                type={bundleLabel(b)}
+                fromPos={fp}
+                toPos={tp}
+                isSelf={b.isSelf}
+              />
+            );
           })}
 
           {/* Entity ontology cards */}
@@ -371,20 +449,20 @@ export default function SchemaGraph({ mapping }: Props) {
             );
           })}
 
-          {/* Relationship → edge collection mapping */}
-          {relationships.map((r) => {
-            const ePos = layout.relEdgeCards.get(r.edgeCollection);
+          {/* Bundle → edge collection mapping (one dashed link per bundle, not
+              per predicate, so the shared edge collection stays legible) */}
+          {visibleBundles.map((b) => {
+            const r0 = relationships.find((r) => r.from === b.from && r.to === b.to);
+            const edgeColl = r0?.edgeCollection;
+            const ePos = edgeColl ? layout.relEdgeCards.get(edgeColl) : undefined;
             if (!ePos) return null;
-            const fromOnto = layout.ontoCards.get(r.from);
-            const toOnto = layout.ontoCards.get(r.to);
+            const fromOnto = layout.ontoCards.get(b.from);
+            const toOnto = layout.ontoCards.get(b.to);
             if (!fromOnto) return null;
 
-            // Compute where the KNOWS pill sits
             let pillCX: number, pillCY: number;
-            if (r.from === r.to) {
-              const loopW = 70;
-              const pillW = r.type.length * 7.5 + 16;
-              pillCX = fromOnto.x - loopW - pillW / 2 - 4 + pillW / 2;
+            if (b.isSelf) {
+              pillCX = fromOnto.x - 70;
               pillCY = fromOnto.y + fromOnto.h / 2;
             } else if (toOnto) {
               pillCX = fromOnto.x - 50;
@@ -396,20 +474,20 @@ export default function SchemaGraph({ mapping }: Props) {
 
             const dstX = ePos.x;
             const dstY = ePos.y + CARD_HEADER / 2;
-
-            // Route: pill → down → across to edge collection
             const dropY = Math.max(pillCY + 20, ePos.y - 30);
             const midX = (pillCX + dstX) / 2;
-            const labelX = midX;
-            const labelY = (dropY + dstY) / 2;
 
             return (
-              <g key={`tmap-rel-${r.type}`}>
-                <path d={`M ${pillCX} ${pillCY + 11} L ${pillCX} ${dropY} Q ${pillCX} ${dstY} ${midX} ${dstY} L ${dstX} ${dstY}`}
-                  fill="none" stroke="#f59e0b" strokeWidth={1.5} strokeDasharray="6 4" markerEnd="url(#map-arrow)" opacity={0.7} />
-                <rect x={labelX - 30} y={labelY - 9} width={60} height={18} rx={9} fill="#0f172a" stroke="#f59e0b" strokeWidth={1} opacity={0.8} />
-                <text x={labelX} y={labelY + 1} fill="#fbbf24" fontSize={8} fontWeight="500" textAnchor="middle" dominantBaseline="middle" fontFamily="monospace">EDGE COLL</text>
-              </g>
+              <path
+                key={`tmap-bundle-${b.from}->${b.to}`}
+                d={`M ${pillCX} ${pillCY + 11} L ${pillCX} ${dropY} Q ${pillCX} ${dstY} ${midX} ${dstY} L ${dstX} ${dstY}`}
+                fill="none"
+                stroke="#f59e0b"
+                strokeWidth={1}
+                strokeDasharray="6 4"
+                markerEnd="url(#map-arrow)"
+                opacity={0.35}
+              />
             );
           })}
 
