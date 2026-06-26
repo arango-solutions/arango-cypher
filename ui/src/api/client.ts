@@ -629,6 +629,7 @@ export interface IntrospectRelationship {
   typeField?: string;
   typeValue?: string;
   statistics?: RelationshipStatistics;
+  edgeCount?: number;
 }
 
 export interface SchemaWarning {
@@ -770,6 +771,7 @@ export function introspectToMapping(
       physRel.typeField = r.typeField;
       physRel.typeValue = r.typeValue;
     }
+    if (r.edgeCount != null) physRel.edgeCount = r.edgeCount;
     if (r.statistics) {
       physRel.statistics = r.statistics;
       relStats[r.type] = {

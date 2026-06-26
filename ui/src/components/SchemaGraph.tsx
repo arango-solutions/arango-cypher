@@ -6,7 +6,7 @@ interface Props {
 
 interface PropInfo { name: string; field: string; type: string }
 interface EntityInfo { name: string; collection: string; style: string; properties: PropInfo[] }
-interface RelInfo { type: string; from: string; to: string; edgeCollection: string; style: string; properties: PropInfo[] }
+interface RelInfo { type: string; from: string; to: string; edgeCollection: string; style: string; properties: PropInfo[]; edgeCount: number }
 
 /* ── Data extraction ────────────────────────────────────────────────── */
 
@@ -44,7 +44,7 @@ function extractMapping(mapping: Record<string, unknown>): { entities: EntityInf
     for (const r of csRRich) {
       const t = (r.type as string) || ""; if (!t) continue;
       const p = pmR[t] ?? {};
-      relationships.push({ type: t, from: (r.fromEntity as string) || "", to: (r.toEntity as string) || "", edgeCollection: (p.edgeCollectionName as string) || t.toLowerCase(), style: (p.style as string) || "DEDICATED_COLLECTION", properties: extractProps(p) });
+      relationships.push({ type: t, from: (r.fromEntity as string) || "", to: (r.toEntity as string) || "", edgeCollection: (p.edgeCollectionName as string) || t.toLowerCase(), style: (p.style as string) || "DEDICATED_COLLECTION", properties: extractProps(p), edgeCount: (p.edgeCount as number) || 0 });
     }
   } else {
     const rn = Array.isArray(csRTypes) ? csRTypes : Object.keys(pmR);
@@ -52,7 +52,7 @@ function extractMapping(mapping: Record<string, unknown>): { entities: EntityInf
       if (!t) continue; const p = pmR[t] ?? {};
       const f = (p.domain as string) || (p.fromEntity as string) || (names[0] ?? "");
       const to = (p.range as string) || (p.toEntity as string) || (names[names.length - 1] ?? "");
-      relationships.push({ type: t, from: f, to, edgeCollection: (p.edgeCollectionName as string) || t.toLowerCase(), style: (p.style as string) || "DEDICATED_COLLECTION", properties: extractProps(p) });
+      relationships.push({ type: t, from: f, to, edgeCollection: (p.edgeCollectionName as string) || t.toLowerCase(), style: (p.style as string) || "DEDICATED_COLLECTION", properties: extractProps(p), edgeCount: (p.edgeCount as number) || 0 });
     }
   }
   return { entities, relationships };
@@ -66,6 +66,12 @@ const ROW_H = 20;
 const ROW_PAD = 6;
 const MAPPING_GAP = 200;  // horizontal gap between ontology card and physical card
 const PAIR_GAP_Y = 60;    // vertical gap between entity pairs
+
+function fmtCount(n: number): string {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(0)}k`;
+  return String(n);
+}
 
 function cardH(propCount: number): number {
   if (propCount === 0) return CARD_HEADER;
@@ -195,7 +201,7 @@ function PropEdge({ x1, y1, x2, y2, color }: { x1: number; y1: number; x2: numbe
   );
 }
 
-function OntologyRel({ type, fromPos, toPos, isSelf }: { type: string; fromPos: CardPos; toPos: CardPos; isSelf: boolean }) {
+function OntologyRel({ type, fromPos, toPos, isSelf, weight = 1.5 }: { type: string; fromPos: CardPos; toPos: CardPos; isSelf: boolean; weight?: number }) {
   if (isSelf) {
     // Self-loop on the LEFT side of the card, away from property edges
     const cx = fromPos.x;
@@ -207,7 +213,7 @@ function OntologyRel({ type, fromPos, toPos, isSelf }: { type: string; fromPos: 
     const lx = cx - loopW - pillW / 2 - 4;
     return (
       <g>
-        <path d={path} fill="none" stroke="#94a3b8" strokeWidth={1.5} strokeDasharray="6 3" markerEnd="url(#onto-arrow)" />
+        <path d={path} fill="none" stroke="#94a3b8" strokeWidth={weight} strokeDasharray="6 3" markerEnd="url(#onto-arrow)" />
         <rect x={lx} y={midY - 11} width={pillW} height={22} rx={11} fill="#0f172a" stroke="#475569" strokeWidth={1} />
         <text x={lx + pillW / 2} y={midY + 1} fill="#e2e8f0" fontSize={10} fontWeight="600" textAnchor="middle" dominantBaseline="middle">{type}</text>
       </g>
@@ -223,7 +229,7 @@ function OntologyRel({ type, fromPos, toPos, isSelf }: { type: string; fromPos: 
   const pillW = Math.max(56, type.length * 7 + 14);
   return (
     <g>
-      <path d={`M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`} fill="none" stroke="#94a3b8" strokeWidth={1.5} markerEnd="url(#onto-arrow)" />
+      <path d={`M ${x1} ${y1} Q ${mx} ${my} ${x2} ${y2}`} fill="none" stroke="#94a3b8" strokeWidth={weight} markerEnd="url(#onto-arrow)" />
       <rect x={mx - pillW / 2} y={my - 10} width={pillW} height={20} rx={10} fill="#0f172a" stroke="#475569" strokeWidth={1} />
       <text x={mx} y={my + 1} fill="#e2e8f0" fontSize={10} fontWeight="600" textAnchor="middle" dominantBaseline="middle">{type}</text>
     </g>
@@ -253,18 +259,32 @@ export default function SchemaGraph({ mapping }: Props) {
   // dozen arcs. `relationships` arrives frequency-ranked from the analyzer cap,
   // so member order within a bundle is already by edge volume.
   const bundles = useMemo(() => {
-    const m = new Map<string, { from: string; to: string; types: string[]; isSelf: boolean }>();
+    const m = new Map<string, { from: string; to: string; types: string[]; volume: number; isSelf: boolean }>();
     for (const r of relationships) {
       const key = `${r.from}\u0001${r.to}`;
       let b = m.get(key);
       if (!b) {
-        b = { from: r.from, to: r.to, types: [], isSelf: r.from === r.to };
+        b = { from: r.from, to: r.to, types: [], volume: 0, isSelf: r.from === r.to };
         m.set(key, b);
       }
       b.types.push(r.type);
+      b.volume += r.edgeCount || 0;
     }
-    return Array.from(m.values()).sort((a, b) => b.types.length - a.types.length);
+    // Rank by edge volume (falls back to predicate count when no counts exist).
+    return Array.from(m.values()).sort(
+      (a, b) => b.volume - a.volume || b.types.length - a.types.length,
+    );
   }, [relationships]);
+
+  const maxVolume = useMemo(
+    () => bundles.reduce((mx, b) => Math.max(mx, b.volume), 0),
+    [bundles],
+  );
+  // Log-scaled stroke width so a 7.8M-edge predicate doesn't dwarf a 1k one.
+  const arcWeight = (vol: number) => {
+    if (maxVolume <= 0 || vol <= 0) return 1.5;
+    return 1.2 + 4.3 * (Math.log10(1 + vol) / Math.log10(1 + maxVolume));
+  };
 
   const [relQuery, setRelQuery] = useState("");
   const q = relQuery.trim().toLowerCase();
@@ -277,8 +297,10 @@ export default function SchemaGraph({ mapping }: Props) {
         b.types.some((t) => t.toLowerCase().includes(q)),
     );
   }, [bundles, q]);
-  const bundleLabel = (b: { types: string[] }) =>
-    b.types.length === 1 ? b.types[0] : `${b.types.length} predicates`;
+  const bundleLabel = (b: { types: string[]; volume: number }) => {
+    const base = b.types.length === 1 ? b.types[0] : `${b.types.length} predicates`;
+    return b.volume > 0 ? `${base} · ${fmtCount(b.volume)}` : base;
+  };
 
   const fitToView = useCallback(() => {
     if (size.w === 0 || size.h === 0) return;
@@ -338,6 +360,9 @@ export default function SchemaGraph({ mapping }: Props) {
                   <div className="text-[11px] text-gray-300">
                     {b.from} <span className="text-gray-600">&rarr;</span> {b.to}
                     <span className="text-gray-500"> · {b.types.length}</span>
+                    {b.volume > 0 && (
+                      <span className="text-gray-600"> · {fmtCount(b.volume)} edges</span>
+                    )}
                   </div>
                   <div
                     className="text-[10px] text-gray-500 truncate"
@@ -357,6 +382,7 @@ export default function SchemaGraph({ mapping }: Props) {
       <div className="absolute bottom-2 right-2 z-10 flex gap-3 text-[9px] text-gray-500">
         <span className="flex items-center gap-1"><span className="w-6 h-0.5 inline-block" style={{ background: PROP_EDGE_COLORS[0] }} />property mapping</span>
         <span className="flex items-center gap-1"><span className="w-6 h-0.5 inline-block border-t border-dashed border-gray-500" />type mapping</span>
+        <span className="flex items-center gap-1"><span className="w-6 inline-block bg-slate-400" style={{ height: 3 }} />thicker = more edges</span>
       </div>
 
       <svg width={size.w} height={size.h} className="block">
@@ -384,6 +410,7 @@ export default function SchemaGraph({ mapping }: Props) {
                 fromPos={fp}
                 toPos={tp}
                 isSelf={b.isSelf}
+                weight={arcWeight(b.volume)}
               />
             );
           })}

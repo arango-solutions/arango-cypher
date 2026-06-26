@@ -564,6 +564,8 @@ class MappingResolver:
             if rmap.get("typeField"):
                 rel_entry["typeField"] = rmap["typeField"]
                 rel_entry["typeValue"] = rmap.get("typeValue", "")
+            if rmap.get("edgeCount") is not None:
+                rel_entry["edgeCount"] = rmap["edgeCount"]
             rs = rel_stats_map.get(rtype, {})
             if isinstance(rs, dict) and rs.get("edge_count"):
                 rel_entry["statistics"] = {

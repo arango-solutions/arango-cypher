@@ -104,6 +104,9 @@ def test_sets_per_type_endpoints_from_fromtype_totype():
     assert rels["has_stake_in"]["range"] == "COMP"
     assert rels["operates_in"]["domain"] == "ORG"
     assert rels["operates_in"]["range"] == "GPE"
+    # Per-type edge volume is preserved for volume-weighted rendering/ranking.
+    assert rels["has_stake_in"]["edgeCount"] == 100
+    assert rels["operates_in"]["edgeCount"] == 50
     # Conceptual side mirrors it.
     cs = {r["type"]: r for r in out.conceptual_schema["relationships"]}
     assert cs["has_stake_in"]["fromEntity"] == "ORG"

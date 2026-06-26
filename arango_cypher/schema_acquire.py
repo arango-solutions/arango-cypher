@@ -1486,6 +1486,7 @@ def _normalize_open_vocab_edges(
             if t is None:
                 continue
             t = str(t)
+            edge_count = int(row.get("n", 0) or 0)
             ft, tt = endpoints.get(t, (None, None))
             domain, range_ = _label_for(ft), _label_for(tt)
             new_cs.append(
@@ -1498,6 +1499,9 @@ def _normalize_open_vocab_edges(
                 "typeValue": t,
                 "domain": domain,
                 "range": range_,
+                # Edge volume for this type (from the top-K frequency pass) — drives
+                # volume-weighted rendering / ranking in the schema graph.
+                "edgeCount": edge_count,
                 "properties": shared_props_pm,
             }
             kept += 1
