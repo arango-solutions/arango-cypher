@@ -382,15 +382,24 @@ def _translate_create_query(
     spq: CypherParser.OC_SinglePartQueryContext,
     *,
     create_clauses: list[CypherParser.OC_CreateContext],
+    set_clauses: list[CypherParser.OC_SetContext] | None = None,
+    remove_clauses: list | None = None,
     resolver: MappingResolver,
     bind_vars: dict[str, Any],
 ) -> AqlQuery:
-    """Translate a single-part query containing CREATE clause(s)."""
+    """Translate a single-part query containing CREATE clause(s), optionally
+    followed by SET/REMOVE on the created variables."""
+    set_clauses = set_clauses or []
+    remove_clauses = remove_clauses or []
+    has_writes = bool(set_clauses or remove_clauses)
     reading_clauses = spq.oC_ReadingClause() or []
     ret = spq.oC_Return()
 
     lines: list[str] = []
     var_env: dict[str, str] = {}
+    # Maps each created variable to the bind key of the collection it was
+    # inserted into, so a trailing SET/REMOVE can target the right collection.
+    var_collections: dict[str, str] = {}
     indent = ""
 
     match_clauses: list[CypherParser.OC_MatchContext] = []
@@ -442,7 +451,20 @@ def _translate_create_query(
             var_env=var_env,
             lines=lines,
             indent=indent,
-            has_return=ret is not None or force_let,
+            # SET/REMOVE need every created var LET-bound so they can be
+            # referenced, so force LET when there are trailing writes.
+            has_return=ret is not None or force_let or has_writes,
+            var_collections=var_collections,
+        )
+
+    if has_writes:
+        _apply_create_writes(
+            set_clauses,
+            remove_clauses,
+            var_collections=var_collections,
+            bind_vars=bind_vars,
+            lines=lines,
+            indent=indent,
         )
 
     if ret is not None:
@@ -456,6 +478,88 @@ def _translate_create_query(
     return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
 
 
+def _apply_create_writes(
+    set_clauses: list[CypherParser.OC_SetContext],
+    remove_clauses: list,
+    *,
+    var_collections: dict[str, str],
+    bind_vars: dict[str, Any],
+    lines: list[str],
+    indent: str,
+) -> None:
+    """Emit UPDATE/REPLACE/UNSET for SET/REMOVE that follow CREATE.
+
+    Each modification is wrapped in a ``LET _w<n> = ( … )`` subquery — the same
+    pattern the mutating translator uses for DETACH edge removal — so it
+    coexists with the ``FIRST(INSERT …)`` create subqueries without tripping
+    AQL's restriction on multiple top-level data-modification operations.
+    """
+    counter = 0
+
+    def _coll_ref_for(target_var: str) -> str:
+        key = var_collections.get(target_var)
+        if not key:
+            raise CoreError(
+                f"SET/REMOVE after CREATE targets variable {target_var!r} that "
+                "was not created in this query",
+                code="NOT_IMPLEMENTED",
+            )
+        return _aql_collection_ref(key)
+
+    def _emit(body: str) -> None:
+        nonlocal counter
+        lines.append(f"{indent}LET _w{counter} = ({body} RETURN NEW)")
+        counter += 1
+
+    for sc in set_clauses:
+        for si in sc.oC_SetItem() or []:
+            prop_expr = si.oC_PropertyExpression()
+            if prop_expr is not None:
+                atom = prop_expr.oC_Atom()
+                target_var = (
+                    atom.oC_Variable().getText().strip()
+                    if atom.oC_Variable() is not None
+                    else None
+                )
+                lookups = prop_expr.oC_PropertyLookup() or []
+                if target_var is None or not lookups:
+                    raise CoreError("SET requires a property expression", code="UNSUPPORTED")
+                prop_name = lookups[-1].oC_PropertyKeyName().getText().strip()
+                val = _compile_expression(si.oC_Expression(), bind_vars)
+                _emit(f"UPDATE {target_var} WITH {{{prop_name}: {val}}} IN {_coll_ref_for(target_var)}")
+            else:
+                si_var = si.oC_Variable()
+                if si_var is None:
+                    raise CoreError("Unsupported SET item after CREATE", code="UNSUPPORTED")
+                target_var = si_var.getText().strip()
+                val = _compile_expression(si.oC_Expression(), bind_vars)
+                ref = _coll_ref_for(target_var)
+                if "+=" in si.getText():
+                    _emit(f"UPDATE {target_var} WITH MERGE({target_var}, {val}) IN {ref}")
+                else:
+                    _emit(f"REPLACE {target_var} WITH {val} IN {ref}")
+
+    for rc in remove_clauses:
+        for ri in rc.oC_RemoveItem() or []:
+            prop_expr = ri.oC_PropertyExpression()
+            if prop_expr is None:
+                continue
+            atom = prop_expr.oC_Atom()
+            target_var = (
+                atom.oC_Variable().getText().strip()
+                if atom.oC_Variable() is not None
+                else None
+            )
+            lookups = prop_expr.oC_PropertyLookup() or []
+            if target_var is None or not lookups:
+                raise CoreError("REMOVE requires a property expression", code="UNSUPPORTED")
+            prop_name = lookups[-1].oC_PropertyKeyName().getText().strip()
+            _emit(
+                f'UPDATE {target_var} WITH UNSET({target_var}, "{prop_name}") '
+                f"IN {_coll_ref_for(target_var)}"
+            )
+
+
 def _compile_create(
     create_ctx: CypherParser.OC_CreateContext,
     *,
@@ -465,6 +569,7 @@ def _compile_create(
     lines: list[str],
     indent: str,
     has_return: bool,
+    var_collections: dict[str, str] | None = None,
 ) -> None:
     """Compile a single CREATE clause into AQL INSERT lines."""
     pattern = create_ctx.oC_Pattern()
@@ -561,6 +666,7 @@ def _compile_create(
                 lines=lines,
                 indent=indent,
                 needs_let=needs_let,
+                var_collections=var_collections,
             )
         elif op.kind == "rel":
             _compile_create_rel(
@@ -573,6 +679,7 @@ def _compile_create(
                 lines=lines,
                 indent=indent,
                 needs_let=needs_let,
+                var_collections=var_collections,
             )
 
 
@@ -604,9 +711,11 @@ def _compile_create_node(
     lines: list[str],
     indent: str,
     needs_let: bool,
+    var_collections: dict[str, str] | None = None,
 ) -> None:
     """Compile a single node INSERT."""
-    props = _compile_create_props(node_ctx.oC_Properties(), bind_vars)
+    param_ref = _create_props_param_ref(node_ctx.oC_Properties(), bind_vars)
+    props = [] if param_ref else _compile_create_props(node_ctx.oC_Properties(), bind_vars)
     extra_fields: list[str] = []
 
     if not labels:
@@ -631,8 +740,10 @@ def _compile_create_node(
         elif style != "COLLECTION":
             raise CoreError(f"Unsupported entity mapping style: {style}", code="INVALID_MAPPING")
 
-    doc = _build_insert_doc(props, extra_fields)
+    doc = _build_insert_doc(props, extra_fields, base=param_ref)
     coll_ref = _aql_collection_ref(coll_key)
+    if var_collections is not None:
+        var_collections[var] = coll_key
 
     if needs_let:
         lines.append(f"{indent}LET {var} = FIRST(INSERT {doc} INTO {coll_ref} RETURN NEW)")
@@ -651,6 +762,7 @@ def _compile_create_rel(
     lines: list[str],
     indent: str,
     needs_let: bool,
+    var_collections: dict[str, str] | None = None,
 ) -> None:
     """Compile a single relationship INSERT."""
     detail = rel_pat.oC_RelationshipDetail()
@@ -698,9 +810,13 @@ def _compile_create_rel(
             code="INVALID_MAPPING",
         )
 
-    props = _compile_create_rel_props(rel_pat, bind_vars)
-    doc = _build_insert_doc(props, extra_fields)
+    rel_props_ctx = detail.oC_Properties()
+    param_ref = _create_props_param_ref(rel_props_ctx, bind_vars)
+    props = [] if param_ref else _compile_create_rel_props(rel_pat, bind_vars)
+    doc = _build_insert_doc(props, extra_fields, base=param_ref)
     coll_ref = _aql_collection_ref(edge_coll_key)
+    if var_collections is not None:
+        var_collections[var] = edge_coll_key
 
     if needs_let:
         lines.append(f"{indent}LET {var} = FIRST(INSERT {doc} INTO {coll_ref} RETURN NEW)")
@@ -748,16 +864,37 @@ def _compile_create_rel_props(
     return _compile_create_props(detail.oC_Properties(), bind_vars)
 
 
+def _create_props_param_ref(
+    props_ctx: CypherParser.OC_PropertiesContext | None,
+    bind_vars: dict[str, Any],
+) -> str | None:
+    """Return the AQL bind ref (``@name``) when a pattern's properties are a
+    whole-map parameter (``CREATE (n $props)``), else ``None``."""
+    if props_ctx is None:
+        return None
+    param = props_ctx.oC_Parameter()
+    if param is None:
+        return None
+    return _compile_expression(param, bind_vars)
+
+
 def _build_insert_doc(
     props: list[tuple[str, str]],
     extra_fields: list[str] | None = None,
+    base: str | None = None,
 ) -> str:
-    """Build an AQL object literal for INSERT."""
+    """Build an AQL object literal for INSERT.
+
+    When ``base`` is set (a whole-map parameter like ``@props``), the explicit
+    ``extra_fields``/``props`` are merged over it via ``MERGE`` so server-set
+    fields (type discriminator, ``_from``/``_to``) still apply.
+    """
     fields: list[str] = list(extra_fields or [])
     fields.extend(f"{k}: {v}" for k, v in props)
-    if not fields:
-        return "{}"
-    return "{" + ", ".join(fields) + "}"
+    inner = "{" + ", ".join(fields) + "}" if fields else "{}"
+    if base:
+        return base if not fields else f"MERGE({base}, {inner})"
+    return inner
 
 
 def _compile_return_for_create(

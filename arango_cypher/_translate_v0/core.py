@@ -194,10 +194,22 @@ def _translate_single_query(
                 bind_vars=bind_vars,
             )
 
-        if create_clauses and not set_clauses and not delete_clauses and not remove_clauses:
+        if create_clauses and delete_clauses:
+            # DELETE of just-created rows is degenerate and rare; fail closed
+            # rather than emit a silently-wrong query.
+            raise CoreError(
+                "CREATE combined with DELETE is not supported",
+                code="NOT_IMPLEMENTED",
+            )
+
+        if create_clauses:
+            # Handles CREATE alone and CREATE followed by SET/REMOVE on the
+            # created (or matched) variables.
             return _translate_create_query(
                 spq,
                 create_clauses=create_clauses,
+                set_clauses=set_clauses,
+                remove_clauses=remove_clauses,
                 resolver=resolver,
                 bind_vars=bind_vars,
             )
