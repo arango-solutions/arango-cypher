@@ -173,13 +173,64 @@ def _translate_foreach_query(
                         coll_ref = _aql_collection_ref(coll_key)
                     lines.append(f"  UPDATE {target_var} WITH {{{pairs}}} IN {coll_ref}")
             elif uc.oC_Create() is not None:
-                raise CoreError("CREATE inside FOREACH not yet supported", code="NOT_IMPLEMENTED")
+                # FOREACH (x IN list | CREATE (n {... x ...})) becomes
+                # ``FOR x IN list  INSERT {...} IN coll``. Reuse the create
+                # compiler with the loop variable in scope; no LET binding is
+                # needed since nothing downstream references the new rows.
+                _compile_create(
+                    uc.oC_Create(),
+                    resolver=resolver,
+                    bind_vars=bind_vars,
+                    var_env={var_name: var_name},
+                    lines=lines,
+                    indent="  ",
+                    has_return=False,
+                )
             elif uc.oC_Delete() is not None:
-                raise CoreError("DELETE inside FOREACH not yet supported", code="NOT_IMPLEMENTED")
+                _compile_foreach_delete(
+                    uc.oC_Delete(),
+                    var_name=var_name,
+                    resolver=resolver,
+                    bind_vars=bind_vars,
+                    lines=lines,
+                )
             else:
                 raise CoreError("Unsupported clause inside FOREACH", code="UNSUPPORTED")
 
     return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
+
+
+def _compile_foreach_delete(
+    delete_ctx: CypherParser.OC_DeleteContext,
+    *,
+    var_name: str,
+    resolver: MappingResolver,
+    bind_vars: dict[str, Any],
+    lines: list[str],
+) -> None:
+    """Compile ``FOREACH (x IN list | DELETE x)`` into ``REMOVE x IN coll``.
+
+    The deleted documents come from the iterated list, so their collection is
+    inferred (same single-domain inference the read/mutating paths use) and the
+    statement fails closed on a multi-collection schema. ``DETACH DELETE``
+    inside FOREACH is rejected: removing incident edges per element across all
+    edge collections in a nested loop is both rare and prone to ERR-1579
+    collisions; use a top-level ``MATCH … DETACH DELETE`` instead.
+    """
+    if delete_ctx.DETACH() is not None:
+        raise CoreError(
+            "DETACH DELETE inside FOREACH is not supported; use a top-level "
+            "MATCH … DETACH DELETE",
+            code="NOT_IMPLEMENTED",
+        )
+
+    coll_key = _find_or_create_collection_bind_key(
+        "@collection", _infer_unlabeled_collection(resolver), bind_vars
+    )
+    coll_ref = _aql_collection_ref(coll_key)
+    for de in delete_ctx.oC_Expression() or []:
+        del_target = _compile_expression(de, bind_vars)
+        lines.append(f"  REMOVE {del_target} IN {coll_ref}")
 
 
 def _translate_mutating_query(
@@ -1065,9 +1116,13 @@ def _translate_merge_relationship(
 ) -> AqlQuery:
     """Translate ``MERGE (a)-[:REL {props}]->(b)`` into AQL UPSERT on an edge collection."""
     if len(chains) != 1:
-        raise CoreError(
-            "Only single-hop relationship MERGE is supported",
-            code="NOT_IMPLEMENTED",
+        return _translate_merge_multi_hop(
+            spq,
+            merge_ctx=merge_ctx,
+            node=node,
+            chains=chains,
+            resolver=resolver,
+            bind_vars=bind_vars,
         )
 
     chain = chains[0]
@@ -1157,6 +1212,115 @@ def _translate_merge_relationship(
             ret.oC_ProjectionBody(),
             lines=lines,
             bind_vars=bind_vars,
+        )
+
+    return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
+
+
+def _translate_merge_multi_hop(
+    spq: CypherParser.OC_SinglePartQueryContext,
+    *,
+    merge_ctx: CypherParser.OC_MergeContext,
+    node: CypherParser.OC_NodePatternContext,
+    chains: list,
+    resolver: MappingResolver,
+    bind_vars: dict[str, Any],
+) -> AqlQuery:
+    """Translate a multi-hop relationship MERGE — ``MERGE (a)-[:R1]->(b)-[:R2]->(c)``.
+
+    Each hop becomes its own edge UPSERT. Endpoints must be bound by a preceding
+    MATCH (same requirement as single-hop relationship MERGE — the UPSERT
+    references each node's ``_id``). AQL cannot write a collection twice in one
+    query (ERR 1579), so each hop must map to a *distinct* edge collection; a
+    repeat fails closed. ``ON CREATE``/``ON MATCH SET`` is ambiguous across hops
+    and a trailing RETURN only sees the last edge, so both are rejected.
+    """
+    if merge_ctx.oC_MergeAction():
+        raise CoreError(
+            "ON CREATE/ON MATCH SET is not supported with multi-hop MERGE; "
+            "use single-hop MERGE statements",
+            code="NOT_IMPLEMENTED",
+        )
+
+    hops: list[tuple[Any, Any, Any]] = []
+    current_node = node
+    for chain in chains:
+        rel_pat = chain.oC_RelationshipPattern()
+        end_node = chain.oC_NodePattern()
+        if rel_pat is None or end_node is None:
+            raise CoreError("Invalid relationship MERGE pattern", code="UNSUPPORTED")
+        hops.append((current_node, rel_pat, end_node))
+        current_node = end_node
+
+    lines: list[str] = []
+    _compile_merge_reading_clauses(spq, resolver=resolver, bind_vars=bind_vars, lines=lines)
+
+    used_edge_keys: set[str] = set()
+    for from_node, rel_pat, to_node in hops:
+        start_var, _ = _extract_node_var_and_labels(from_node, default_var="a")
+        end_var, _ = _extract_node_var_and_labels(to_node, default_var="b")
+
+        detail = rel_pat.oC_RelationshipDetail()
+        if detail is None:
+            raise CoreError("Relationship type is required for MERGE", code="UNSUPPORTED")
+        types_ctx = detail.oC_RelationshipTypes()
+        if types_ctx is None:
+            raise CoreError("Relationship type is required for MERGE", code="UNSUPPORTED")
+        type_names = types_ctx.oC_RelTypeName()
+        if not type_names or len(type_names) != 1:
+            raise CoreError(
+                "Exactly one relationship type is required for MERGE", code="UNSUPPORTED"
+            )
+        rel_type = type_names[0].getText().strip()
+
+        direction = _relationship_direction(rel_pat)
+        if direction == "INBOUND":
+            from_var, to_var = end_var, start_var
+        else:
+            from_var, to_var = start_var, end_var
+
+        r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
+        r_style = r_map.get("style")
+        edge_coll_name = r_map.get("edgeCollectionName") or r_map.get("collectionName")
+        if not isinstance(edge_coll_name, str) or not edge_coll_name:
+            raise CoreError(
+                f"Invalid relationship mapping collection for: {rel_type}",
+                code="INVALID_MAPPING",
+            )
+        edge_coll_key = _find_or_create_collection_bind_key(
+            "@edgeCollection", edge_coll_name, bind_vars
+        )
+        if edge_coll_key in used_edge_keys:
+            raise CoreError(
+                f"Multi-hop MERGE reuses edge collection ({edge_coll_name!r}); AQL "
+                "cannot write a collection twice in one query (ERR 1579). Split "
+                "into separate statements.",
+                code="NOT_IMPLEMENTED",
+            )
+        used_edge_keys.add(edge_coll_key)
+        edge_coll_ref = _aql_collection_ref(edge_coll_key)
+
+        search_fields = [f"_from: {from_var}._id", f"_to: {to_var}._id"]
+        insert_fields = [f"_from: {from_var}._id", f"_to: {to_var}._id"]
+        if r_style == "GENERIC_WITH_TYPE":
+            type_field = r_map.get("typeField", "type")
+            rtv_key = _pick_bind_key("relTypeValue", bind_vars)
+            bind_vars[rtv_key] = r_map.get("typeValue")
+            search_fields.append(f"{type_field}: @{rtv_key}")
+            insert_fields.append(f"{type_field}: @{rtv_key}")
+        for k, v in _compile_create_rel_props(rel_pat, bind_vars):
+            insert_fields.append(f"{k}: {v}")
+
+        lines.append("UPSERT {" + ", ".join(search_fields) + "}")
+        lines.append("INSERT {" + ", ".join(insert_fields) + "}")
+        lines.append("UPDATE {}")
+        lines.append(f"IN {edge_coll_ref}")
+
+    if spq.oC_Return() is not None:
+        raise CoreError(
+            "RETURN after multi-hop MERGE is not supported; a trailing RETURN "
+            "only sees the last edge",
+            code="NOT_IMPLEMENTED",
         )
 
     return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)

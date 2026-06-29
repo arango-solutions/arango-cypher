@@ -183,3 +183,87 @@ class TestMultipleMerge:
                 "MERGE (a:Person {name:'A'}) MERGE (a)-[:ACTED_IN]->(c)", mapping=pg
             )
         assert "endpoint" in str(exc.value)
+
+
+class TestMultiHopMerge:
+    """MERGE (a)-[:R1]->(b)-[:R2]->(c) — one UPSERT per hop.
+
+    Endpoints come from a preceding MATCH (same as single-hop). Each hop must
+    map to a distinct edge collection (ERR 1579); ON CREATE/MATCH SET and a
+    trailing RETURN are rejected because they're ambiguous across hops.
+    """
+
+    def test_two_hop_distinct_edge_collections(self, pg):
+        out = translate(
+            "MATCH (a:Person {name:'A'}),(b:Person {name:'B'}),(c:Movie {title:'M'}) "
+            "MERGE (a)-[:FOLLOWS]->(b)-[:REVIEWED]->(c)",
+            mapping=pg,
+        )
+        assert out.aql.count("UPSERT") == 2
+        assert "UPSERT {_from: a._id, _to: b._id}" in out.aql
+        assert "UPSERT {_from: b._id, _to: c._id}" in out.aql
+        # distinct edge-collection bind keys
+        assert "@edgeCollection" in out.bind_vars
+        assert "@edgeCollection2" in out.bind_vars
+
+    def test_repeated_edge_collection_fails_closed(self, pg):
+        with pytest.raises(CoreError) as exc:
+            translate(
+                "MATCH (a:Person {name:'A'}),(b:Person {name:'B'}),(c:Person {name:'C'}) "
+                "MERGE (a)-[:FOLLOWS]->(b)-[:FOLLOWS]->(c)",
+                mapping=pg,
+            )
+        assert "edge collection" in str(exc.value)
+
+    def test_return_fails_closed(self, pg):
+        with pytest.raises(CoreError):
+            translate(
+                "MATCH (a:Person),(b:Person),(c:Movie) "
+                "MERGE (a)-[:FOLLOWS]->(b)-[:REVIEWED]->(c) RETURN a",
+                mapping=pg,
+            )
+
+    def test_merge_action_fails_closed(self, pg):
+        with pytest.raises(CoreError):
+            translate(
+                "MATCH (a:Person),(b:Person),(c:Movie) "
+                "MERGE (a)-[:FOLLOWS]->(b)-[:REVIEWED]->(c) ON CREATE SET a.x = 1",
+                mapping=pg,
+            )
+
+
+class TestForeachWrites:
+    """CREATE and DELETE inside FOREACH.
+
+    ``FOREACH (x IN list | CREATE …)`` reuses the create compiler under the
+    loop; ``FOREACH (x IN list | DELETE x)`` removes each iterated document from
+    the inferred domain collection. DETACH DELETE inside FOREACH is rejected.
+    """
+
+    def test_foreach_create_node(self, pg):
+        out = translate(
+            "FOREACH (name IN ['A','B'] | CREATE (p:Person {name: name}))",
+            mapping=pg,
+        )
+        assert "FOR name IN ['A','B']" in out.aql
+        assert "INSERT {name: name} INTO @@collection" in out.aql
+
+    def test_foreach_create_keeps_discriminator(self, naked):
+        out = translate(
+            "FOREACH (x IN [1,2] | CREATE (m:User {n: x}))", mapping=naked
+        )
+        assert "INSERT {type: @typeValue, n: x} INTO @@collection" in out.aql
+
+    def test_foreach_delete(self, naked):
+        out = translate("MATCH (p:User) FOREACH (x IN [p] | DELETE x)", mapping=naked)
+        assert "FOR x IN [p]" in out.aql
+        assert "REMOVE x IN @@collection" in out.aql
+
+    def test_foreach_detach_delete_fails_closed(self, naked):
+        with pytest.raises(CoreError) as exc:
+            translate("FOREACH (x IN [1] | DETACH DELETE x)", mapping=naked)
+        assert "DETACH" in str(exc.value)
+
+    def test_foreach_delete_multi_collection_fails_closed(self, pg):
+        with pytest.raises(CoreError):
+            translate("FOREACH (x IN [1] | DELETE x)", mapping=pg)
