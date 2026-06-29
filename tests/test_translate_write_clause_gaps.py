@@ -28,6 +28,13 @@ def lpg():
     return mapping_bundle_for("finreflectkg")
 
 
+@pytest.fixture(scope="module")
+def naked():
+    # All entities share one type-discriminated ``vertices`` collection, so an
+    # unlabeled MATCH (n) resolves to a single domain collection.
+    return mapping_bundle_for("naked_lpg")
+
+
 class TestWholeMapCreateParam:
     def test_collection_style_inserts_param_directly(self, pg):
         out = translate("CREATE (n:Person $props) RETURN n", mapping=pg)
@@ -81,3 +88,98 @@ class TestCreateThenWrite:
                 "MATCH (n:Person) CREATE (m:Person {name: 'A'}) DELETE n", mapping=pg
             )
         assert "DELETE" in str(exc.value)
+
+
+class TestUnlabeledMutations:
+    """MATCH (n) SET/DELETE/REMOVE on an unlabeled anchor.
+
+    Previously rejected with ``SET/DELETE requires labeled node in v0``. Now
+    resolves to the single domain collection (same inference the read path
+    uses) and fails closed on multi-collection schemas.
+    """
+
+    def test_unlabeled_set(self, naked):
+        out = translate("MATCH (n) SET n.seen = true", mapping=naked)
+        assert "FOR n IN @@collection" in out.aql
+        assert "UPDATE n WITH {seen: true} IN @@collection" in out.aql
+        # No discriminator filter is emitted: unlabeled means the whole domain.
+        assert "@typeField" not in out.aql
+
+    def test_unlabeled_delete_with_where(self, naked):
+        out = translate("MATCH (n) WHERE n.age < 18 DELETE n", mapping=naked)
+        assert "FILTER" in out.aql
+        assert "REMOVE n IN @@collection" in out.aql
+
+    def test_unlabeled_detach_delete(self, naked):
+        out = translate("MATCH (n) DETACH DELETE n", mapping=naked)
+        assert "ANY n" in out.aql  # incident edges removed first
+        assert "REMOVE n IN @@collection" in out.aql
+
+    def test_unlabeled_remove_property(self, naked):
+        out = translate("MATCH (n) REMOVE n.tmp", mapping=naked)
+        assert 'UNSET(n, "tmp")' in out.aql
+
+    def test_unlabeled_multi_collection_fails_closed(self, pg):
+        # movies_pg has many distinct collections; an unlabeled mutation cannot
+        # safely pick one, so it must raise rather than silently target one.
+        with pytest.raises(CoreError):
+            translate("MATCH (n) DELETE n", mapping=pg)
+
+
+class TestMultipleMerge:
+    """Several MERGE clauses in one statement.
+
+    Each merged element runs as a ``LET``-bound UPSERT. AQL forbids re-reading a
+    collection after modifying it in the same query (ERR 1579), so every MERGE
+    must hit a distinct physical collection; repeats and MATCH-prefixed forms
+    fail closed with actionable errors.
+    """
+
+    def test_two_node_merges_distinct_collections(self, pg):
+        out = translate(
+            "MERGE (a:Person {name:'A'}) MERGE (b:Movie {title:'M'})", mapping=pg
+        )
+        assert out.aql.count("UPSERT") == 2
+        assert "LET a = FIRST(UPSERT {name: 'A'}" in out.aql
+        assert "LET b = FIRST(UPSERT {title: 'M'}" in out.aql
+        # write-only multi-merge needs a terminal RETURN to be valid AQL
+        assert out.aql.rstrip().endswith("RETURN null")
+
+    def test_node_node_edge_merge(self, pg):
+        out = translate(
+            "MERGE (a:Person {name:'A'}) MERGE (b:Movie {title:'M'}) "
+            "MERGE (a)-[:ACTED_IN]->(b)",
+            mapping=pg,
+        )
+        assert out.aql.count("UPSERT") == 3
+        assert "UPSERT {_from: a._id, _to: b._id}" in out.aql
+
+    def test_multi_merge_with_return(self, pg):
+        out = translate(
+            "MERGE (a:Person {name:'A'}) MERGE (b:Movie {title:'M'}) RETURN a, b",
+            mapping=pg,
+        )
+        assert "RETURN {a: a, b: b}" in out.aql
+
+    def test_same_collection_fails_closed(self, pg):
+        with pytest.raises(CoreError) as exc:
+            translate(
+                "MERGE (a:Person {name:'A'}) MERGE (b:Person {name:'B'})", mapping=pg
+            )
+        assert "same collection" in str(exc.value)
+
+    def test_match_prefixed_multi_merge_fails_closed(self, pg):
+        with pytest.raises(CoreError) as exc:
+            translate(
+                "MATCH (x:Person) MERGE (a:Person {name:'A'}) "
+                "MERGE (b:Movie {title:'M'})",
+                mapping=pg,
+            )
+        assert "MATCH" in str(exc.value)
+
+    def test_unbound_rel_endpoint_fails_closed(self, pg):
+        with pytest.raises(CoreError) as exc:
+            translate(
+                "MERGE (a:Person {name:'A'}) MERGE (a)-[:ACTED_IN]->(c)", mapping=pg
+            )
+        assert "endpoint" in str(exc.value)

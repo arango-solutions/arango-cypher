@@ -225,21 +225,24 @@ def _translate_mutating_query(
     var, labels = _extract_node_var_and_labels(start_node, default_var="n")
     prop_filters = _compile_node_pattern_properties(start_node, var=var, bind_vars=bind_vars)
 
-    if not labels:
-        raise CoreError("SET/DELETE requires labeled node in v0", code="UNSUPPORTED")
-
-    primary = _pick_primary_entity_label(labels, resolver)
-    entity_mapping = resolver.resolve_entity(_strip_label_backticks(primary))
-    coll_key = "@collection"
-    bind_vars[coll_key] = entity_mapping["collectionName"]
-
     lines: list[str] = [f"FOR {var} IN @@collection"]
 
-    style = entity_mapping.get("style")
-    if style == "LABEL":
-        bind_vars["typeField"] = entity_mapping["typeField"]
-        bind_vars["typeValue"] = entity_mapping["typeValue"]
-        lines.append(f"  FILTER {var}[@typeField] == @typeValue")
+    if labels:
+        primary = _pick_primary_entity_label(labels, resolver)
+        entity_mapping = resolver.resolve_entity(_strip_label_backticks(primary))
+        bind_vars["@collection"] = entity_mapping["collectionName"]
+
+        style = entity_mapping.get("style")
+        if style == "LABEL":
+            bind_vars["typeField"] = entity_mapping["typeField"]
+            bind_vars["typeValue"] = entity_mapping["typeValue"]
+            lines.append(f"  FILTER {var}[@typeField] == @typeValue")
+    else:
+        # Unlabeled ``MATCH (n) SET/DELETE/REMOVE …``: resolve to the single
+        # domain collection using the same inference the read path uses. Fails
+        # closed (CoreError) when the schema has more than one candidate
+        # collection, so we never silently mutate the wrong store.
+        bind_vars["@collection"] = _infer_unlabeled_collection(resolver)
 
     for f in prop_filters:
         lines.append(f"  FILTER {f}")
@@ -931,9 +934,11 @@ def _translate_merge_query(
 ) -> AqlQuery:
     """Translate MERGE clause(s) into AQL UPSERT."""
     if len(merge_clauses) != 1:
-        raise CoreError(
-            "Only a single MERGE clause is supported",
-            code="NOT_IMPLEMENTED",
+        return _translate_multi_merge_query(
+            spq,
+            merge_clauses=merge_clauses,
+            resolver=resolver,
+            bind_vars=bind_vars,
         )
     merge_ctx = merge_clauses[0]
     pattern_part = merge_ctx.oC_PatternPart()
@@ -952,40 +957,9 @@ def _translate_merge_query(
             bind_vars=bind_vars,
         )
 
-    var, labels = _extract_node_var_and_labels(node, default_var="n")
-    if not labels:
-        raise CoreError("MERGE requires a labeled node", code="UNSUPPORTED")
-
-    primary = _pick_primary_entity_label(labels, resolver)
-    entity_mapping = resolver.resolve_entity(_strip_label_backticks(primary))
-    coll_key = _find_or_create_collection_bind_key(
-        "@collection",
-        entity_mapping["collectionName"],
-        bind_vars,
+    var, _coll_key, coll_ref, search_doc, insert_doc, update_doc = _build_merge_node_docs(
+        node, merge_ctx, resolver=resolver, bind_vars=bind_vars
     )
-    coll_ref = _aql_collection_ref(coll_key)
-
-    props = _compile_create_props(node.oC_Properties(), bind_vars)
-    extra_fields: list[str] = []
-    style = entity_mapping.get("style")
-    if style == "LABEL":
-        type_field = entity_mapping.get("typeField", "type")
-        tv_key = _pick_bind_key("typeValue", bind_vars)
-        bind_vars[tv_key] = entity_mapping.get("typeValue")
-        extra_fields.append(f"{type_field}: @{tv_key}")
-
-    search_doc = _build_insert_doc(props, extra_fields)
-    insert_doc = search_doc
-
-    on_create_fields, on_match_fields = _extract_merge_actions(merge_ctx, bind_vars)
-
-    if on_create_fields:
-        all_insert_fields = list(extra_fields)
-        all_insert_fields.extend(f"{k}: {v}" for k, v in props)
-        all_insert_fields.extend(on_create_fields)
-        insert_doc = "{" + ", ".join(all_insert_fields) + "}" if all_insert_fields else "{}"
-
-    update_doc = "{" + ", ".join(on_match_fields) + "}" if on_match_fields else "{}"
 
     lines: list[str] = []
     _compile_merge_reading_clauses(spq, resolver=resolver, bind_vars=bind_vars, lines=lines)
@@ -1184,5 +1158,224 @@ def _translate_merge_relationship(
             lines=lines,
             bind_vars=bind_vars,
         )
+
+    return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
+
+
+def _build_merge_node_docs(
+    node: CypherParser.OC_NodePatternContext,
+    merge_ctx: CypherParser.OC_MergeContext,
+    *,
+    resolver: MappingResolver,
+    bind_vars: dict[str, Any],
+) -> tuple[str, str, str, str, str, str]:
+    """Build the UPSERT docs for a node MERGE.
+
+    Returns ``(var, coll_key, coll_ref, search_doc, insert_doc, update_doc)``.
+    Shared by the single- and multi-MERGE translators so both emit identical
+    document literals (only the surrounding statement form differs).
+    """
+    var, labels = _extract_node_var_and_labels(node, default_var="n")
+    if not labels:
+        raise CoreError("MERGE requires a labeled node", code="UNSUPPORTED")
+
+    primary = _pick_primary_entity_label(labels, resolver)
+    entity_mapping = resolver.resolve_entity(_strip_label_backticks(primary))
+    coll_key = _find_or_create_collection_bind_key(
+        "@collection",
+        entity_mapping["collectionName"],
+        bind_vars,
+    )
+    coll_ref = _aql_collection_ref(coll_key)
+
+    props = _compile_create_props(node.oC_Properties(), bind_vars)
+    extra_fields: list[str] = []
+    style = entity_mapping.get("style")
+    if style == "LABEL":
+        type_field = entity_mapping.get("typeField", "type")
+        tv_key = _pick_bind_key("typeValue", bind_vars)
+        bind_vars[tv_key] = entity_mapping.get("typeValue")
+        extra_fields.append(f"{type_field}: @{tv_key}")
+
+    search_doc = _build_insert_doc(props, extra_fields)
+    insert_doc = search_doc
+
+    on_create_fields, on_match_fields = _extract_merge_actions(merge_ctx, bind_vars)
+    if on_create_fields:
+        all_insert_fields = list(extra_fields)
+        all_insert_fields.extend(f"{k}: {v}" for k, v in props)
+        all_insert_fields.extend(on_create_fields)
+        insert_doc = "{" + ", ".join(all_insert_fields) + "}" if all_insert_fields else "{}"
+
+    update_doc = "{" + ", ".join(on_match_fields) + "}" if on_match_fields else "{}"
+    return var, coll_key, coll_ref, search_doc, insert_doc, update_doc
+
+
+def _build_merge_rel_docs(
+    node: CypherParser.OC_NodePatternContext,
+    chain: CypherParser.OC_PatternElementChainContext,
+    merge_ctx: CypherParser.OC_MergeContext,
+    *,
+    resolver: MappingResolver,
+    bind_vars: dict[str, Any],
+    var_ids: dict[str, str],
+) -> tuple[str, str, str, str, str, str]:
+    """Build the UPSERT docs for a single-hop relationship MERGE whose endpoints
+    are already bound by earlier MERGE clauses in the same statement.
+
+    Returns ``(var, edge_coll_key, edge_coll_ref, search_doc, insert_doc,
+    update_doc)``. Endpoints are referenced by their bound ``_id`` (via
+    ``var_ids``) rather than re-scanned, because the multi-MERGE form runs each
+    element as a ``LET``-bound UPSERT.
+    """
+    rel_pat = chain.oC_RelationshipPattern()
+    target_node = chain.oC_NodePattern()
+    if rel_pat is None or target_node is None:
+        raise CoreError("Invalid relationship MERGE pattern", code="UNSUPPORTED")
+
+    start_var, _ = _extract_node_var_and_labels(node, default_var="a")
+    end_var, _ = _extract_node_var_and_labels(target_node, default_var="b")
+    for endpoint in (start_var, end_var):
+        if endpoint not in var_ids:
+            raise CoreError(
+                f"MERGE relationship endpoint {endpoint!r} must be created by an "
+                "earlier MERGE in the same statement (multi-MERGE does not scan "
+                "matched nodes); add a MERGE for it or use a separate statement",
+                code="NOT_IMPLEMENTED",
+            )
+
+    detail = rel_pat.oC_RelationshipDetail()
+    if detail is None:
+        raise CoreError("Relationship type is required for MERGE", code="UNSUPPORTED")
+    types_ctx = detail.oC_RelationshipTypes()
+    if types_ctx is None:
+        raise CoreError("Relationship type is required for MERGE", code="UNSUPPORTED")
+    type_names = types_ctx.oC_RelTypeName()
+    if not type_names or len(type_names) != 1:
+        raise CoreError("Exactly one relationship type is required for MERGE", code="UNSUPPORTED")
+    rel_type = type_names[0].getText().strip()
+
+    direction = _relationship_direction(rel_pat)
+    if direction == "INBOUND":
+        from_id, to_id = var_ids[end_var], var_ids[start_var]
+    else:
+        from_id, to_id = var_ids[start_var], var_ids[end_var]
+
+    r_map = resolver.resolve_relationship(_strip_label_backticks(rel_type))
+    r_style = r_map.get("style")
+    edge_coll_name = r_map.get("edgeCollectionName") or r_map.get("collectionName")
+    if not isinstance(edge_coll_name, str) or not edge_coll_name:
+        raise CoreError(
+            f"Invalid relationship mapping collection for: {rel_type}",
+            code="INVALID_MAPPING",
+        )
+    edge_coll_key = _find_or_create_collection_bind_key(
+        "@edgeCollection",
+        edge_coll_name,
+        bind_vars,
+    )
+    edge_coll_ref = _aql_collection_ref(edge_coll_key)
+
+    search_fields = [f"_from: {from_id}", f"_to: {to_id}"]
+    insert_fields = [f"_from: {from_id}", f"_to: {to_id}"]
+    if r_style == "GENERIC_WITH_TYPE":
+        type_field = r_map.get("typeField", "type")
+        rtv_key = _pick_bind_key("relTypeValue", bind_vars)
+        bind_vars[rtv_key] = r_map.get("typeValue")
+        search_fields.append(f"{type_field}: @{rtv_key}")
+        insert_fields.append(f"{type_field}: @{rtv_key}")
+
+    for k, v in _compile_create_rel_props(rel_pat, bind_vars):
+        insert_fields.append(f"{k}: {v}")
+
+    on_create_fields, on_match_fields = _extract_merge_actions(merge_ctx, bind_vars)
+    search_doc = "{" + ", ".join(search_fields) + "}"
+    insert_doc = "{" + ", ".join(insert_fields + on_create_fields) + "}"
+    update_doc = "{" + ", ".join(on_match_fields) + "}" if on_match_fields else "{}"
+
+    rel_var_name = ""
+    if detail.oC_Variable() is not None:
+        rel_var_name = detail.oC_Variable().getText().strip()
+    if not rel_var_name:
+        rel_var_name = "r"
+
+    return rel_var_name, edge_coll_key, edge_coll_ref, search_doc, insert_doc, update_doc
+
+
+def _translate_multi_merge_query(
+    spq: CypherParser.OC_SinglePartQueryContext,
+    *,
+    merge_clauses: list[CypherParser.OC_MergeContext],
+    resolver: MappingResolver,
+    bind_vars: dict[str, Any],
+) -> AqlQuery:
+    """Translate several MERGE clauses into a sequence of ``LET``-bound UPSERTs.
+
+    AQL forbids reading a collection after it has been modified in the same
+    query (ERR 1579), so each MERGE must target a *distinct* physical
+    collection; a repeat is rejected with an actionable error. Relationship
+    MERGE endpoints must be bound by an earlier node MERGE in the same
+    statement. Preceding MATCH is not supported here (scoping/nesting differs);
+    split such queries into separate statements.
+    """
+    reading_clauses = spq.oC_ReadingClause() or []
+    if any(rc.oC_Match() is not None for rc in reading_clauses):
+        raise CoreError(
+            "MATCH combined with multiple MERGE clauses is not supported; "
+            "split into separate statements",
+            code="NOT_IMPLEMENTED",
+        )
+
+    lines: list[str] = []
+    used_collection_keys: set[str] = set()
+    var_ids: dict[str, str] = {}
+
+    def _claim(coll_key: str) -> None:
+        if coll_key in used_collection_keys:
+            raise CoreError(
+                f"Multiple MERGE clauses target the same collection "
+                f"({bind_vars.get(coll_key)!r}); AQL cannot read a collection "
+                "after modifying it in the same query (ERR 1579). Split into "
+                "separate statements.",
+                code="NOT_IMPLEMENTED",
+            )
+        used_collection_keys.add(coll_key)
+
+    for mc in merge_clauses:
+        pattern_part = mc.oC_PatternPart()
+        elem = pattern_part.oC_AnonymousPatternPart().oC_PatternElement()
+        node = elem.oC_NodePattern()
+        chains = elem.oC_PatternElementChain() or []
+
+        if len(chains) > 1:
+            raise CoreError(
+                "Only single-hop relationship MERGE is supported",
+                code="NOT_IMPLEMENTED",
+            )
+
+        if chains:
+            var, coll_key, coll_ref, search_doc, insert_doc, update_doc = _build_merge_rel_docs(
+                node, chains[0], mc, resolver=resolver, bind_vars=bind_vars, var_ids=var_ids
+            )
+        else:
+            var, coll_key, coll_ref, search_doc, insert_doc, update_doc = _build_merge_node_docs(
+                node, mc, resolver=resolver, bind_vars=bind_vars
+            )
+
+        _claim(coll_key)
+        lines.append(
+            f"LET {var} = FIRST(UPSERT {search_doc} INSERT {insert_doc} "
+            f"UPDATE {update_doc} IN {coll_ref} RETURN NEW)"
+        )
+        var_ids[var] = f"{var}._id"
+
+    ret = spq.oC_Return()
+    if ret is not None:
+        _compile_return_for_create(ret.oC_ProjectionBody(), lines=lines, bind_vars=bind_vars)
+    else:
+        # The LET-bound UPSERTs are subqueries, not top-level modifications, so
+        # the query needs a terminal RETURN to be valid AQL. The writes still
+        # execute even though the result is discarded.
+        lines.append("RETURN null")
 
     return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
