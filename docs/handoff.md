@@ -28,24 +28,26 @@ Cypher coverage is at **22/22 transpile**. WP-S1, WP-S2 (incl. S2c), and WP-S3
 
 ### A. Loose ends from the last session (small, high-value)
 
-1. **Dedupe the unlabeled-MATCH warning.** It currently renders 3× (AQL header,
-   AQL pane, results banner). Collapse to one dismissible spot.
-   - `ui/src/App.tsx` (AQL-pane warnings block, ~line 1688 region)
-   - `ui/src/components/ResultsPanel.tsx` (`WarningsBanner`)
+1. ~~**Dedupe the unlabeled-MATCH warning.**~~ ✅ **Done** (commit `4e48943`).
+   Translate/execute warnings render in a single dismissible strip above the AQL
+   editor (`ui/src/App.tsx` ~line 1789), backed by `ui/src/utils/warnings.ts`
+   (`warningsKey` resets dismissals on a new warning set; `filterVisibleWarnings`).
+   The duplicate `ResultsPanel` banner was removed. (`ProfileWarningsBanner` and
+   `SchemaWarningBanner` are distinct concerns and intentionally remain.)
 
-2. **Catalog sidecar auto-warm for newly-connected DBs.** The "Schema not ready"
-   banner appears for any DB not in `configs/catalog.yml` (e.g.
-   `financial-kg-2025-08-26`). Options: (a) auto-register a connected DB and
-   trigger a background warm, or (b) document/wire `sync_forever` with the DB
-   listed.
-   - `arango_cypher/catalog/registry.py` (`load_registry`, `DatabaseEntry`)
-   - `arango_cypher/catalog/sync.py` (`sync_once` / `sync_forever`)
-   - `arango_cypher/service/routes/schema.py` (the `pending` response path)
+2. ~~**Catalog sidecar auto-warm for newly-connected DBs.**~~ ✅ **Done** (commit
+   `4e48943`). `arango_cypher/catalog/warm.py` + the `pending` path in
+   `service/routes/schema.py` auto-warm a connected-but-unregistered DB.
 
-3. **Verify live schema classification** for `financial-kg-2025-08-26` — confirm
-   `chunks` is genuinely a side store (COLLECTION-style) and not a mis-classified
-   entity. Quick probe against the live DB using `.env` creds. (The unlabeled-
-   MATCH warning is *correct* behavior if chunks really is a side store.)
+3. **Verify live schema classification** for the FinReflectKG / `financial-kg-*`
+   DB — confirm `chunks` is genuinely a side store (COLLECTION-style) and not a
+   mis-classified entity. **Blocked:** the `.env` creds for the live
+   `FinReflectKG` pilot host return HTTP 401, and the shipped
+   `finreflectkg.export.json` fixture is a *curated* export (domain graph only —
+   `Node` + `relations`, no `chunks`), so it can't stand in for the live probe.
+   Needs working credentials (or a fresh export that includes the side stores).
+   (The unlabeled-MATCH warning is *correct* behavior if `chunks` really is a
+   side store.)
 
 ### B. WP-V1 — Broaden the corpus & guard semantics (ongoing)
 
