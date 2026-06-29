@@ -72,3 +72,11 @@ nl_corrections.db-wal
 # The committed `baseline.json` is the gate's reference; per-run reports
 # stay local (or get uploaded as CI artifacts).
 tests/nl2cypher/eval/reports/
+.prd-drift-queue/
+.claude/
+# CLAUDE.md consolidated into AGENTS.md; keep ignored in case a local Claude
+# session regenerates it (AGENTS.md is the canonical, tracked agent doc).
+CLAUDE.md
+
+# Stray root npm lockfile (the real one lives in ui/package-lock.json).
+/package-lock.json
