@@ -39,15 +39,19 @@ Cypher coverage is at **22/22 transpile**. WP-S1, WP-S2 (incl. S2c), and WP-S3
    `4e48943`). `arango_cypher/catalog/warm.py` + the `pending` path in
    `service/routes/schema.py` auto-warm a connected-but-unregistered DB.
 
-3. **Verify live schema classification** for the FinReflectKG / `financial-kg-*`
-   DB — confirm `chunks` is genuinely a side store (COLLECTION-style) and not a
-   mis-classified entity. **Blocked:** the `.env` creds for the live
-   `FinReflectKG` pilot host return HTTP 401, and the shipped
-   `finreflectkg.export.json` fixture is a *curated* export (domain graph only —
-   `Node` + `relations`, no `chunks`), so it can't stand in for the live probe.
-   Needs working credentials (or a fresh export that includes the side stores).
-   (The unlabeled-MATCH warning is *correct* behavior if `chunks` really is a
-   side store.)
+3. ~~**Verify live schema classification**~~ ✅ **Done** (verified 2026-06-29
+   against the live `FinReflectKG` pilot DB). Note: that host rejects HTTP Basic
+   auth — connect with `auth_method="jwt"` (python-arango). Findings:
+   - `chunks` → entity `Chunk`, **`style=COLLECTION`** (a side store), correctly
+     *not* a `LABEL`-style entity sharing `Node`. The 19 domain types
+     (COMP/ORG/PERSON/RISK_FACTOR/…) are `style=LABEL coll=Node`; `relations` is
+     the single `GENERIC_WITH_TYPE` edge collection (200 types). `aga_*`,
+     `benchmark_*`, and `arango_cypher_schema_cache` are all COLLECTION side
+     stores.
+   - `MATCH (n)` resolves to `Node` and emits the (correct) warning listing the
+     29 excluded side collections; `MATCH (c:Chunk)` targets `chunks`. The
+     unlabeled-MATCH warning is therefore *correct* behavior — confirmed, not a
+     misclassification.
 
 ### B. WP-V1 — Broaden the corpus & guard semantics (ongoing)
 
