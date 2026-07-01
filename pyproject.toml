@@ -29,7 +29,10 @@ analyzer = [
   # needs the analyzer references this one via `arango-cypher-py[analyzer]`
   # so there is a single source of truth (PEP 621 / PEP 735
   # self-referencing extras — supported by pip, uv, and hatchling).
-  "arangodb-schema-analyzer>=0.6.1,<0.7.0",
+  # 0.9.0 floor: adds named-graph membership (metadata.graphMembership +
+  # per-entry graphs), graphScope, CSI v1, GraphRAG detection, and
+  # gold/metric-history — all consumed by this package.
+  "arangodb-schema-analyzer>=0.9.0,<0.10.0",
 ]
 service = [
   # Headless service installs (ServiceMaker / Container Manager /
