@@ -3699,13 +3699,23 @@ def _compile_subquery_body(
     edge_key = _pick_bind_key("@sqEdge", bind_vars)
     bind_vars[edge_key] = r_map.get("edgeCollectionName") or r_map.get("collectionName")
 
-    sq_v = "_sq_v"
     sq_e = "_sq_e"
     target_var, t_labels = _extract_node_var_and_labels(target_node, default_var="_sq_t")
-    if target_var != "_sq_t":
-        sq_v = target_var
+    target_named = target_var != "_sq_t"
+    target_has_props = target_node.oC_Properties() is not None
+    # A *bare* named target (no label, no properties) references an outer binding
+    # — e.g. ``exists{(p)-[:R]->(m)}`` where ``m`` is bound in the enclosing
+    # query — so traverse to a fresh internal variable and constrain it by
+    # ``_id``; reusing the outer name as the loop variable makes AQL reject the
+    # query ("variable 'm' is assigned multiple times"). A *labeled/propertied*
+    # named target (``(m:User)``) is a fresh binding local to the subquery, so it
+    # is used as the loop variable directly.
+    correlate_target = target_named and not t_labels and not target_has_props
+    sq_v = target_var if (target_named and not correlate_target) else "_sq_v"
 
     filters: list[str] = []
+    if correlate_target:
+        filters.append(f"{sq_v}._id == {target_var}._id")
 
     r_style = r_map.get("style")
     if r_style == "GENERIC_WITH_TYPE":
