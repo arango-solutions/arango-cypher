@@ -262,9 +262,27 @@ Fixes landed from this corpus (each with regression tests):
   `collect()` result), var-lost-after-COLLECT (double-aggregation scope),
   UNWIND-var-lost, a few `unexpected INTO` syntax cases, `date()`.
 
-The largest coverage lever overall (not corpus-specific) remains relaxing the
-leading-`MATCH` parser constraint (~1,560 TCK scenarios) — tracked separately as
-a deliberate refactor.
+#### WP-V1b — Leading-clause constraint relaxed (TCK mega-lever) · *done 2026-07-01*
+
+The largest single TCK lever: no-MATCH computational pipelines. Cypher starting
+with `WITH` (constant projection) or `UNWIND` over literals — no MATCH, no writes
+— previously failed "MATCH is required before WITH". A dedicated order-walking
+handler (`_translate_computational_multi_part`) now compiles them to a plain
+`LET`/`FOR` AQL pipeline (reusing `_apply_with`/`_append_return`); routing only
+sends the no-MATCH/no-write case there, leaving MATCH-led and write paths
+unchanged. Also fixed the collect-without-grouping-key bug this exposed
+(`COLLECT INTO x` → `COLLECT AGGREGATE x = PUSH(…)`).
+
+**TCK dry-run coverage (translation-only):**
+
+| Subset | 2026-04-20 | 2026-07-01 |
+| --- | --- | --- |
+| CORE (excl. temporal/quantifier/call) | 54.8% | **86.4%** (1902/2201) |
+| FULL | 32.2% | **53.4%** (2063/3861) |
+
+"MATCH is required before WITH" fell 475 → 22. The remaining 22 are **write-tail
+combos** (`WITH … MERGE`, `UNWIND … CREATE`) needing read+write pipeline
+integration — the next slice. Full breakdown: `tests/tck/COVERAGE_REPORT.md`.
 
 ---
 

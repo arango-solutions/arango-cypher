@@ -1,34 +1,38 @@
 # openCypher TCK coverage — measured
 
-> Measurement date: 2026-04-20
+> Measurement date: 2026-07-01 (was 2026-04-20)
 > Methodology: translation-only dry run (`python tests/tck/analyze_coverage.py`). Each scenario's main Cypher query is parsed and translated; scenarios that translate successfully (or correctly reject an error-expected input) count as passable. No DB execution — this is an upper bound on what the runner could achieve with a live ArangoDB.
 
 ## Headline numbers
 
-| Subset | Passable | Pass rate |
-|--------|----------|-----------|
-| **Full TCK** (all 3,861 scenarios) | 1,245 / 3,861 | **32.2 %** |
-| **Core TCK** (excludes out-of-scope: `expressions/temporal`, `expressions/quantifier`, `clauses/call` — 2,201 scenarios) | 1,206 / 2,201 | **54.8 %** |
-| **Clauses-only** (the focused v0 target — excludes all `expressions/` + `useCases/`, 1,199 scenarios) | 792 / 1,199 | **66.1 %** |
+| Subset | Passable | Pass rate | (was 2026-04-20) |
+|--------|----------|-----------|------------------|
+| **Full TCK** (all 3,861 scenarios) | 2,063 / 3,861 | **53.4 %** | 32.2 % |
+| **Core TCK** (excludes out-of-scope: `expressions/temporal`, `expressions/quantifier`, `clauses/call` — 2,201 scenarios) | 1,902 / 2,201 | **86.4 %** | 54.8 % |
 
-The prior PRD entry ("Projected 66.1 %, clause-focused") is confirmed as an accurate measurement of the clauses-only subset. The full-TCK number is lower primarily because of the two out-of-scope expression categories (`temporal`: 1,004 scenarios requiring the TCK's date/time type system; `quantifier`: 604 scenarios requiring existential quantifier syntax). Both are explicitly marked out of scope for v0–v0.4.
+The jump (Core 54.8 % → 86.4 %) came from relaxing the leading-clause
+constraint: no-MATCH computational pipelines (leading `WITH`-constants / `UNWIND`
+over literals) now translate instead of failing "MATCH is required before WITH"
+(that bucket fell 475 → 22). Earlier Wave-8 fixes (unlabeled-endpoint inference,
+`EXISTS`/`COUNT` pattern shorthand, COLLECT/ORDER-BY hygiene) contributed the
+rest. The remaining full-TCK gap is dominated by the two out-of-scope expression
+categories (`temporal`: 1,004 scenarios; `quantifier`: 604) and the
+`Unsupported atom` bucket (largely temporal/quantifier expression atoms).
 
 ## Top translation-failure reasons (actionable)
 
+Measured 2026-07-01:
+
 | Count | Reason | Implication |
 |------:|--------|-------------|
-| 1,560 | `MATCH is required in v0 subset` | Scenario's main query starts with something other than `MATCH` — typically a bare `CREATE`, `WITH`, or `UNWIND`. Largest single lever: relax the leading-clause constraint in the parser, so these scenarios reach the translator. |
-| 475 | `MATCH is required before WITH in v0 subset` | Subset of the above. |
-| 102 | `Relationship type is required in v0 subset` | `MATCH (a)-[r]-(b)` without a `:TYPE`. Could be supported by emitting an `ANY` multi-edge-collection traversal. |
-| 84 | `Relationship detail with a single type is required in v0 subset` | Multi-type edges `-[:A\|B]->`. Requires minor translator change. |
-| 49 | `SET/DELETE requires labeled node in v0` | Write clauses on unlabeled node variables. |
-| 45 | `Updating clauses are not supported in v0` | `SET` / `DELETE` / `REMOVE` edge-case subset. |
-| 28 | `Unsupported function in v0: duration` | `expressions/temporal` — out of scope. |
-| 20 + 10 + 10 | `Cypher syntax error at ...: no viable alternative` | ANTLR grammar gaps. Specific failing texts require inspection. |
-| 15 | `Unsupported function in v0: count` | Standalone `count()` in a context we don't yet accept. |
-| 10 | `Only IN operator is supported in v0` | Custom operators (e.g. `[x, y]` pattern-matching). |
-| 10 | Chained comparisons not supported | `a < b < c` — grammar. |
-| 9 | `Only a single pattern part is supported in v0` | Multi-pattern `MATCH` clauses with comma-separated patterns. |
+| 539 | `Unsupported atom in v0` | Largely temporal/quantifier expression atoms (out of scope); the rest are `any()`/`all()`/`none()` list predicates and other complex atoms. |
+| 372 / 112 / 110 / 66 / 64 / 46 / 34 | `Unsupported function in v0: datetime / time / localtime / *.truncate / duration` | `expressions/temporal` — out of scope. |
+| 46 | `Updating clauses are not supported in v0` | Write-tail combos (`WITH … MERGE`, `UNWIND … CREATE`) + `SET`/`DELETE`/`REMOVE` edge cases. |
+| 36 | `Only one collect(...) is supported in v0` | Multiple `collect()` in one projection. |
+| 22 | `MATCH is required before WITH in v0 subset` | Remaining are write-tail combos (need read+write pipeline integration). |
+| 20 | `Cypher syntax error … no viable alternative` | ANTLR grammar gaps. |
+| 15 | `Unsupported function in v0: count` | Standalone `count()` in a not-yet-accepted context. |
+| 13 | `RETURN items required` / `Unsupported expression node: NoneType` | Misc projection edge cases. |
 
 ## Category breakdown
 
