@@ -83,3 +83,53 @@ class TestUnnamedEdgeCollisionAcrossMatches:
             mapping=pg,
         )
         _assert_unique_for_vars(out.aql)
+
+
+class TestCollectGroupVarShadowing:
+    """A COLLECT group/aggregate/INTO variable must not reuse a live FOR var.
+
+    ``COLLECT director = director.name`` / ``COLLECT m = m`` are rejected by AQL
+    ("assigned multiple times"); the group var is reallocated to a fresh name
+    while the projection key keeps the original alias.
+    """
+
+    def test_return_aggregation_alias_equals_loop_var(self, pg):
+        out = translate(
+            "MATCH (director:Person)-[:DIRECTED]->(movie:Movie)<-[:ACTED_IN]-(director) "
+            "RETURN director.name AS director, collect(movie.title) AS movies",
+            mapping=pg,
+        )
+        assert "COLLECT director = director.name" not in out.aql
+        assert "COLLECT director_g1 = director.name" in out.aql
+        # projection key stays the Cypher-visible alias
+        assert "director: director_g1" in out.aql
+
+    def test_with_distinct_passthrough(self, pg):
+        out = translate(
+            "MATCH (p:Person)-[:WROTE]->(m:Movie) WHERE p.born > 1975 "
+            "WITH DISTINCT m MATCH (m)<-[r:REVIEWED]-() WHERE r.rating < 75 "
+            "RETURN count(DISTINCT m)",
+            mapping=pg,
+        )
+        assert "COLLECT m = m" not in out.aql
+        assert "COLLECT m_1 = m" in out.aql
+
+    def test_double_aggregation_reuses_group_key(self, pg):
+        out = translate(
+            "MATCH (p:Person)-[:ACTED_IN]->(m:Movie) "
+            "WITH floor(p.born / 10) * 10 AS decade, count(m) AS movies_acted_in "
+            "RETURN decade, avg(movies_acted_in) AS average_movies ORDER BY decade",
+            mapping=pg,
+        )
+        # the second COLLECT groups by the prior `decade` without reusing the name
+        assert "COLLECT decade_g1 = decade" in out.aql
+        assert "decade: decade_g1" in out.aql
+
+    def test_plain_aggregation_not_over_renamed(self, pg):
+        # No collision → names must stay natural (regression guard).
+        out = translate(
+            "MATCH (p:Person)-[:ACTED_IN]->(m:Movie) "
+            "RETURN p.name AS name, count(m) AS c ORDER BY c DESC",
+            mapping=pg,
+        )
+        assert "COLLECT name = p.name AGGREGATE c = COUNT(m)" in out.aql

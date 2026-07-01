@@ -2659,9 +2659,11 @@ def _apply_with(
         forbidden_vars.add(aql_var)
         compiled_nonagg.append((cypher_var, aql_var, expr))
 
-    # If this WITH performs a COLLECT (aggregation), any non-aggregate projected variables
-    # will be (re)bound by COLLECT, so they must not collide with pre-existing vars.
-    if compiled_agg or compiled_into is not None:
+    # If this WITH performs a COLLECT (aggregation *or* DISTINCT), any
+    # non-aggregate projected variable is (re)bound by COLLECT, so it must not
+    # reuse a pre-existing FOR variable — ``WITH DISTINCT m`` otherwise emits
+    # ``COLLECT m = m`` (ERR 1511, "assigned multiple times").
+    if compiled_agg or compiled_into is not None or distinct:
         adjusted: list[tuple[str, str, str]] = []
         for cypher_var, aql_var, expr in compiled_nonagg:
             if aql_var in pre_existing:
@@ -2848,6 +2850,12 @@ def _append_return(
     lines.append("  RETURN " + _compile_return_object(compiled_items))
 
 
+# Identifiers referenced as variables in a projection expression: a bare name or
+# the leading part of a dotted access (``director`` in ``director.name``), but not
+# a function call (``collect(``) or a property suffix (``.name``).
+_REFERENCED_IDENT_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)(?!\s*\()")
+
+
 def _append_return_aggregation(
     items: list,
     *,
@@ -2858,9 +2866,37 @@ def _append_return_aggregation(
     skip_value: str | None = None,
     limit_value: str | None = None,
 ) -> None:
-    compiled_nonagg: list[tuple[str, str]] = []
-    compiled_agg: list[tuple[str, str]] = []
-    compiled_into: tuple[str, dict[str, Any]] | None = None
+    # Each entry is (projection_key, aql_var, expr). The projection key is the
+    # Cypher-visible name (RETURN {key: ...}); the AQL var is what the COLLECT
+    # actually binds. They differ when the natural name collides with a live FOR
+    # variable — ``COLLECT director = director.name`` is rejected by AQL
+    # ("variable 'director' is assigned multiple times"), so the group var is
+    # reallocated to a fresh name while the projection key stays ``director``.
+    compiled_nonagg: list[tuple[str, str, str]] = []
+    compiled_agg: list[tuple[str, str, str]] = []
+    compiled_into: tuple[str, str, dict[str, Any]] | None = None
+
+    # Names live *before* the COLLECT: the enclosing FOR variables. A COLLECT
+    # group/aggregate/INTO variable must not reuse any of them. ``var_env`` carries
+    # them after a WITH, but a plain ``MATCH … RETURN <agg>`` passes an empty env,
+    # so also harvest the variables referenced by the projection expressions
+    # themselves (``director.name`` references the live ``director``) — a group var
+    # matching one of those would collide.
+    live_names: set[str] = set(var_env.values()) if var_env else set()
+    for _it in items:
+        _t = _it.oC_Expression().getText()
+        if var_env:
+            _t = _rewrite_vars(_t, var_env)
+        live_names.update(_REFERENCED_IDENT_RE.findall(_t))
+
+    def _alloc(preferred: str) -> str:
+        name = preferred
+        i = 1
+        while name in live_names:
+            name = f"{preferred}_g{i}"
+            i += 1
+        live_names.add(name)
+        return name
 
     for it in items:
         expr_ctx = it.oC_Expression()
@@ -2871,11 +2907,11 @@ def _append_return_aggregation(
 
         collect_spec = _parse_collect(expr_txt)
         if collect_spec is not None:
-            idx = len(compiled_nonagg) + len(compiled_agg) + 1
-            var_name = alias or f"expr{idx}"
             if compiled_into is not None:
                 raise CoreError("Only one collect() is supported in RETURN", code="NOT_IMPLEMENTED")
-            compiled_into = (var_name, collect_spec)
+            idx = len(compiled_nonagg) + len(compiled_agg) + 1
+            key = alias or f"expr{idx}"
+            compiled_into = (key, _alloc(key), collect_spec)
             continue
 
         agg = _compile_agg_expr(expr_txt)
@@ -2884,8 +2920,8 @@ def _append_return_aggregation(
             fn_match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\(", expr_txt)
             fn_key = fn_match.group(1).lower() if fn_match else None
             idx = len(compiled_nonagg) + len(compiled_agg) + 1
-            var_name = alias or fn_key or f"expr{idx}"
-            compiled_agg.append((var_name, agg_expr))
+            key = alias or fn_key or f"expr{idx}"
+            compiled_agg.append((key, _alloc(key), agg_expr))
             continue
 
         expr = _compile_expression(expr_ctx, bind_vars)
@@ -2895,16 +2931,16 @@ def _append_return_aggregation(
         # (e.g. ``type(r)`` -> ``type``) rather than the compiled AQL, which
         # for non-trivial expressions like the ``type()`` runtime discriminator
         # would yield a malformed identifier (``...collection)``).
-        var_name = (
+        key = (
             alias
             or _infer_key(expr_txt)
             or _infer_key(expr)
             or f"expr{len(compiled_nonagg) + len(compiled_agg) + 1}"
         )
-        compiled_nonagg.append((var_name, expr))
+        compiled_nonagg.append((key, _alloc(key), expr))
 
-    group_parts = ", ".join(f"{v} = {e}" for v, e in compiled_nonagg)
-    agg_parts = ", ".join(f"{v} = {e}" for v, e in compiled_agg)
+    group_parts = ", ".join(f"{aql} = {e}" for _k, aql, e in compiled_nonagg)
+    agg_parts = ", ".join(f"{aql} = {e}" for _k, aql, e in compiled_agg)
 
     collect_line = "  COLLECT"
     if group_parts:
@@ -2914,43 +2950,44 @@ def _append_return_aggregation(
 
     post_let: tuple[str, str] | None = None
     if compiled_into is not None:
-        into_var, spec = compiled_into
+        _into_key, into_aql, spec = compiled_into
         needs_post = bool(spec.get("distinct")) or spec.get("slice") is not None
         if needs_post:
-            temp = f"_{into_var}_grp"
+            temp = f"_{into_aql}_grp"
             collect_line += f" INTO {temp} = {spec['inner']}"
-            post_let = (into_var, _collect_post_expr(temp, spec))
+            post_let = (into_aql, _collect_post_expr(temp, spec))
         else:
-            collect_line += f" INTO {into_var} = {spec['inner']}"
+            collect_line += f" INTO {into_aql} = {spec['inner']}"
 
     lines.append(collect_line)
     if post_let is not None:
         lines.append(f"  LET {post_let[0]} = {post_let[1]}")
 
-    agg_env = {v: v for v, _ in compiled_nonagg}
-    agg_env.update({v: v for v, _ in compiled_agg})
+    # ORDER BY / RETURN env: map both the projection key and the original grouped
+    # expression to the (possibly reallocated) AQL variable. After
+    # ``COLLECT name = p.name`` the Cypher variable ``p`` is out of scope, so an
+    # ORDER BY referring to ``p.name`` must resolve to the group var.
+    agg_env: dict[str, str] = {}
+    for key, aql, _e in compiled_nonagg + compiled_agg:
+        agg_env[key] = aql
     if compiled_into is not None:
-        agg_env[compiled_into[0]] = compiled_into[0]
-
-    # Map each grouped Cypher expression (e.g. ``p.name``) to its COLLECT
-    # alias.  After ``COLLECT name = p.name`` the original Cypher variable
-    # ``p`` is out of scope in AQL, so a Cypher ORDER BY referring to
-    # ``p.name`` must be rewritten to the alias ``name``.
-    for var_name, expr in compiled_nonagg:
+        agg_env[compiled_into[0]] = compiled_into[1]
+    for key, aql, expr in compiled_nonagg:
         if expr not in agg_env:
-            agg_env[expr] = var_name
+            agg_env[expr] = aql
 
     if order_ctx is not None:
         lines.append("  " + _compile_order_by(order_ctx, bind_vars, var_env=agg_env))
     _append_skip_limit(lines, skip_value, limit_value)
 
-    all_items = compiled_nonagg + compiled_agg
+    all_items: list[tuple[str, str]] = [(k, aql) for k, aql, _ in compiled_nonagg]
+    all_items += [(k, aql) for k, aql, _ in compiled_agg]
     if compiled_into is not None:
-        all_items.append(compiled_into)
+        all_items.append((compiled_into[0], compiled_into[1]))
     if len(all_items) == 1:
-        lines.append(f"  RETURN {all_items[0][0]}")
+        lines.append(f"  RETURN {all_items[0][1]}")
     else:
-        parts = ", ".join(f"{v}: {v}" for v, _ in all_items)
+        parts = ", ".join(f"{k}: {aql}" for k, aql in all_items)
         lines.append(f"  RETURN {{{parts}}}")
 
 
