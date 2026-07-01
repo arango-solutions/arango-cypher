@@ -224,6 +224,48 @@ which is the prompt to promote the entry).
   questions.
 - Expand beyond these 22 with a feature-matrix corpus (every clause/function once).
 
+#### WP-V1a — Text2Cypher corpus harness (large-scale, real LLM Cypher)
+
+A far bigger, execution-grounded benchmark than the 22-query FinReflectKG set:
+the neo4j-derived **movies Text2Cypher** corpus (~1,942 real LLM-emitted Cypher
+queries against the movies demo graph, which our `movies_pg` fixture matches
+exactly). Harness: **`scripts/eval_text2cypher_corpus.py`** — opt-in, reads an
+external `--dataset` path (the dataset's redistribution license is pending, so it
+is **not** committed), runs the transpiler over the `cypher` column, reports
+transpile coverage + ranked failure buckets, and (`--with-db`) executes the
+generated AQL against a seeded movies PG DB. Treat the dataset's `cypher` +
+Neo4j `results` as the reference; its own machine-translated `aql_query` is not
+used.
+
+**Measured baseline (2026-07-01):**
+
+| Metric | Start | After WP-V1a fixes |
+| --- | --- | --- |
+| Transpile coverage | 85.8% (1666/1942) | **90.4% (1756/1942)** |
+| Ran without error (of transpiled) | 95.1% | **97.8%** |
+
+Fixes landed from this corpus (each with regression tests):
+- Unlabeled traversal endpoints inferred from relationship domain/range
+  (`(m:Movie)<-[:REVIEWED]-()` → Person), COLLECTION-style only.
+- Two variable-collision (ERR 1511) classes: back-reference self-cycle and
+  unnamed-edge collision across MATCH clauses.
+- COLLECT group-var shadowing (`COLLECT director = director.name`).
+- ORDER BY on a RETURN alias emitted an unbound `SORT` (collection-not-found).
+- Cypher scalar functions inside aggregate arguments (`max(size(x))` → LENGTH).
+
+**Ranked remaining backlog (execution errors, ~39; diminishing returns):**
+- **Transpile gaps (higher leverage):** `count{}` / `exists{}` subquery
+  expression syntax (**58** — the single biggest bucket; needs grammar+compiler),
+  multi-type hops `[:A|B]`, `collect()` nested in `size()`.
+- **Execution-correctness tail:** ~14 remaining ERR-1511 (auto edge/node
+  namespace pollution + multi-`WITH` scope), `FOR IN <alias>` (iterating a
+  `collect()` result), var-lost-after-COLLECT (double-aggregation scope),
+  UNWIND-var-lost, a few `unexpected INTO` syntax cases, `date()`.
+
+The largest coverage lever overall (not corpus-specific) remains relaxing the
+leading-`MATCH` parser constraint (~1,560 TCK scenarios) — tracked separately as
+a deliberate refactor.
+
 ---
 
 ## 4. Sequencing & milestones
