@@ -985,6 +985,22 @@ def _translate_match_body(
     if edge_only is not None:
         return edge_only
 
+    # A leading unlabeled anchor with a typed first hop can be resolved from the
+    # relationship's domain/range (e.g. ()-[:REVIEWED]->(m:Movie) → the anchor is
+    # a Person). The anchor is the *opposite* endpoint of the first hop's target,
+    # so the traversal direction is reversed.
+    if not u_labels and chains:
+        _rp0 = chains[0].oC_RelationshipPattern()
+        if _rp0 is not None:
+            _rt0, _, _ = _extract_relationship_type_and_var(_rp0, default_var="r")
+            _rev0 = {"OUTBOUND": "INBOUND", "INBOUND": "OUTBOUND"}.get(
+                _relationship_direction(_rp0), "ANY"
+            )
+            if _rt0:
+                _inferred_u = resolver.infer_endpoint_label(_rt0, _rev0)
+                if _inferred_u:
+                    u_labels = [_inferred_u]
+
     u_filters: list[str] = []
     if not u_labels:
         bind_vars["@uCollection"] = _infer_unlabeled_collection(resolver)
@@ -1047,6 +1063,16 @@ def _translate_match_body(
             stats_dir = resolver.preferred_traversal_direction(rel_type)
             if stats_dir:
                 direction = stats_dir
+
+        # An unlabeled endpoint of a typed relationship can be resolved from the
+        # relationship's domain/range (e.g. (m:Movie)<-[:REVIEWED]-() → Person),
+        # so it is treated as if it carried that label. Use the *pattern*
+        # direction (not the stats-adjusted one) so an undirected -[:REL]- stays
+        # ambiguous and falls back to single-collection inference.
+        if not v_labels and not v_bound and rel_type:
+            _inferred_v = resolver.infer_endpoint_label(rel_type, _relationship_direction(rel_pat))
+            if _inferred_v:
+                v_labels = [_inferred_v]
 
         v_primary: str | None = None
         v_map: dict[str, Any] | None = None
@@ -1918,9 +1944,6 @@ def _compile_match_multi_parts_from_parts(
                 v_node, default_var=f"v{idx + 1}_{hop_i + 1}"
             )
             v_bound = v_var in forbidden
-            if not v_bound and not v_labels:
-                # Unlabeled new bindings are only supported when we can infer a single backing collection.
-                _ = _infer_unlabeled_collection(resolver)
             v_trav = v_var if not v_bound else _pick_fresh_var(f"{v_var}_m", forbidden_vars=forbidden)
 
             rel_default = "r" if rel_part_i == 0 else f"r{rel_part_i + 1}"
@@ -1928,6 +1951,18 @@ def _compile_match_multi_parts_from_parts(
             rel_type, rel_var, rel_range = _extract_relationship_type_and_var(
                 rel_pat, default_var=rel_default
             )
+            # An unlabeled endpoint of a typed relationship can be resolved from
+            # the relationship's domain/range (e.g. (m:Movie)<-[:REVIEWED]-() →
+            # Person). This is treated as if the node carried that label, so all
+            # the normal entity-filter logic (collection + type discriminator +
+            # edge-constrains optimization) applies. Falls through to the
+            # single-collection inference below when it cannot be resolved.
+            if not v_bound and not v_labels and rel_type:
+                _inferred_v = resolver.infer_endpoint_label(
+                    rel_type, _relationship_direction(rel_pat)
+                )
+                if _inferred_v:
+                    v_labels = [_inferred_v]
             detail = rel_pat.oC_RelationshipDetail()
             rel_is_named = detail is not None and detail.oC_Variable() is not None
             r_prop_filters = _compile_relationship_pattern_properties(
@@ -2093,6 +2128,7 @@ def _compile_match_from_bound(
         rel_default = "r" if hop_idx == 0 else "r_1"
         v_cy, v_labels = _extract_node_var_and_labels(v_node, default_var=node_default)
         rel_type, rel_cy, rel_range = _extract_relationship_type_and_var(rel_pat, default_var=rel_default)
+        v_is_backref = v_cy in out_env
 
         v_aql = _pick_fresh_var(v_cy, forbidden_vars=forbidden_vars) if v_cy not in out_env else out_env[v_cy]
         r_aql = (
@@ -2106,6 +2142,13 @@ def _compile_match_from_bound(
         out_env[rel_cy] = r_aql
 
         direction = _relationship_direction(rel_pat)
+        # Resolve an unlabeled (non-back-reference) endpoint of a typed
+        # relationship from the relationship's domain/range.
+        if not v_labels and not v_is_backref and rel_type:
+            _inferred_v = resolver.infer_endpoint_label(rel_type, direction)
+            if _inferred_v:
+                v_labels = [_inferred_v]
+
         v_primary: str | None = None
         v_map: dict[str, Any] | None = None
         if v_labels:
@@ -2320,6 +2363,13 @@ def _compile_match_pipeline(
             stats_dir = resolver.preferred_traversal_direction(rel_type)
             if stats_dir:
                 direction = stats_dir
+
+        # Resolve an unlabeled endpoint of a typed relationship from the
+        # relationship's domain/range (e.g. (m:Movie)<-[:REVIEWED]-() → Person).
+        if not v_labels and rel_type:
+            _inferred_v = resolver.infer_endpoint_label(rel_type, _relationship_direction(rel_pat))
+            if _inferred_v:
+                v_labels = [_inferred_v]
 
         v_primary: str | None = None
         v_map: dict[str, Any] | None = None

@@ -346,6 +346,56 @@ class MappingResolver:
                 range_, target_label
             )
 
+    def infer_endpoint_label(self, rel_type: str, direction: str) -> str | None:
+        """Infer the label of an *unlabeled* traversal endpoint.
+
+        Given a typed relationship and the traversal ``direction`` used to reach
+        the endpoint from the current node, return the endpoint's conceptual
+        label when the relationship's domain/range resolves it unambiguously to
+        a **single** class (e.g. ``(m:Movie)<-[:REVIEWED]-()`` traverses INBOUND
+        along ``REVIEWED`` whose domain is ``Person`` → ``"Person"``).
+
+        Returns ``None`` when the type is unknown, domain/range is unresolved, the
+        direction is ambiguous (``ANY`` with distinct domain/range), or the
+        endpoint is a multi-class union — callers then fall back to their
+        existing single-collection inference (or fail closed).
+        """
+        try:
+            rmap = self.resolve_relationship(rel_type)
+        except CoreError:
+            return None
+
+        domain, range_ = self._resolve_domain_range(rel_type, rmap)
+        if not domain or not range_:
+            return None
+
+        if direction == "OUTBOUND":
+            endpoint: str | list[str] | None = range_
+        elif direction == "INBOUND":
+            endpoint = domain
+        else:  # ANY — only safe when both ends are the same class
+            endpoint = domain if domain == range_ else None
+
+        if isinstance(endpoint, str):
+            label = endpoint
+        elif isinstance(endpoint, list) and len(endpoint) == 1:
+            label = endpoint[0]
+        else:
+            return None
+
+        # Only apply the inference for COLLECTION-style entities, where the label
+        # maps 1:1 to a physical collection and needs no type discriminator.
+        # For LABEL / GENERIC_WITH_TYPE styles, treating an inferred label as a
+        # written one would add a ``type == value`` filter that asserts more than
+        # domain/range safely guarantees on open-world data — and those schemas
+        # already resolve unlabeled endpoints via single-collection inference.
+        try:
+            if self.resolve_entity(label).get("style") != "COLLECTION":
+                return None
+        except CoreError:
+            return None
+        return label
+
     def _endpoint_constrains(self, endpoint: str | list[str], target_label: str) -> bool:
         """Check if an endpoint (single class or union) guarantees the target type.
 
