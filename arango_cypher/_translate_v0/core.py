@@ -2481,6 +2481,35 @@ def _compile_match_pipeline(
     return lines, forbidden
 
 
+# Cypher scalar functions whose AQL equivalent is a plain 1:1 head rename. Used
+# to lower an aggregate's inner argument (``max(size(x))`` → ``MAX(LENGTH(x))``),
+# which is passed to ``_compile_agg_expr`` as raw text and so bypasses the
+# parse-tree function compiler. Only rename-only mappings belong here; functions
+# with a non-trivial AQL rewrite (coalesce, id, keys, …) are intentionally left
+# to fail loudly rather than be silently mistranslated by text substitution.
+_AGG_INNER_FN_ALIASES = {
+    "size": "LENGTH",
+    "tolower": "LOWER",
+    "lower": "LOWER",
+    "toupper": "UPPER",
+    "upper": "UPPER",
+    "tostring": "TO_STRING",
+    "tointeger": "TO_NUMBER",
+    "toint": "TO_NUMBER",
+    "tofloat": "TO_NUMBER",
+    "toboolean": "TO_BOOL",
+    "tobool": "TO_BOOL",
+}
+_AGG_INNER_FN_RE = re.compile(
+    r"\b(" + "|".join(_AGG_INNER_FN_ALIASES) + r")\s*\(", re.IGNORECASE
+)
+
+
+def _lower_agg_inner_fns(text: str) -> str:
+    """Rename Cypher scalar-function heads inside an aggregate argument to AQL."""
+    return _AGG_INNER_FN_RE.sub(lambda mo: f"{_AGG_INNER_FN_ALIASES[mo.group(1).lower()]}(", text)
+
+
 def _compile_agg_expr(expr_text: str) -> tuple[str, str] | None:
     """
     Compile simple Cypher aggregate calls used in corpus WITH:
@@ -2493,7 +2522,7 @@ def _compile_agg_expr(expr_text: str) -> tuple[str, str] | None:
     if not m:
         return None
     fn = m.group(1).lower()
-    inner = m.group(2).strip()
+    inner = _lower_agg_inner_fns(m.group(2).strip())
     if fn == "count":
         if inner.lower().startswith("distinct"):
             inner_expr = inner[len("distinct") :].strip()
