@@ -1326,6 +1326,74 @@ def _merge_bind_vars(
             target[k] = v
 
 
+def _translate_computational_multi_part(
+    mpq: CypherParser.OC_MultiPartQueryContext,
+    *,
+    bind_vars: dict[str, Any],
+) -> AqlQuery:
+    """Translate a multi-part query that has **no MATCH and no writes** — a pure
+    computational pipeline over literals: leading ``WITH`` (constant projections)
+    and/or leading ``UNWIND``, chained ``WITH``/``UNWIND`` stages, and a tail
+    ``RETURN``. Clauses are processed in source order.
+
+    Examples::
+
+        WITH [1, 2, 3] AS list UNWIND list AS x RETURN x
+        UNWIND range(1, 2) AS row WITH collect(row) AS rows UNWIND rows AS x RETURN x
+        WITH {a: {b: 1}} AS m RETURN m.a.b
+    """
+    lines: list[str] = []
+    var_env: dict[str, str] = {}
+    forbidden: set[str] = set()
+
+    def _emit_unwind(uw: CypherParser.OC_UnwindContext) -> None:
+        expr = _compile_expression(uw.oC_Expression(), bind_vars)
+        if var_env:
+            expr = _rewrite_vars(expr, var_env)
+        var = uw.oC_Variable().getText().strip()
+        lines.append(f"FOR {var} IN {expr}")
+        var_env[var] = var
+        forbidden.add(var)
+
+    def _emit_reading(rc: CypherParser.OC_ReadingClauseContext) -> None:
+        uw = rc.oC_Unwind()
+        if uw is None:
+            # Routing guarantees no MATCH here; anything else is unsupported.
+            raise CoreError(
+                "Only UNWIND/WITH reading clauses are supported without MATCH",
+                code="NOT_IMPLEMENTED",
+            )
+        _emit_unwind(uw)
+
+    for child in mpq.getChildren():
+        if isinstance(child, CypherParser.OC_ReadingClauseContext):
+            _emit_reading(child)
+        elif isinstance(child, CypherParser.OC_WithContext):
+            var_env = _apply_with(
+                child,
+                lines=lines,
+                bind_vars=bind_vars,
+                forbidden_vars=forbidden,
+                incoming_env=var_env,
+            )
+        elif isinstance(child, CypherParser.OC_SinglePartQueryContext):
+            if child.oC_UpdatingClause():
+                raise CoreError("Updating clauses are not supported in v0", code="UNSUPPORTED")
+            for rc in child.oC_ReadingClause() or []:
+                _emit_reading(rc)
+            ret = child.oC_Return()
+            if ret is None:
+                raise CoreError("RETURN is required in v0 subset", code="UNSUPPORTED")
+            _append_return(
+                ret.oC_ProjectionBody(),
+                lines=lines,
+                bind_vars=bind_vars,
+                var_env=var_env,
+            )
+
+    return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
+
+
 def _translate_multi_part_query(
     mpq: CypherParser.OC_MultiPartQueryContext,
     *,
@@ -1339,6 +1407,21 @@ def _translate_multi_part_query(
     with_ctxs = mpq.oC_With() or []
     if not with_ctxs:
         raise CoreError("WITH is required for multi-part queries", code="UNSUPPORTED")
+
+    # No-MATCH, no-write computational pipeline (leading WITH-constants / UNWIND).
+    # Route these to a dedicated order-walking handler so they no longer fail the
+    # "MATCH is required before WITH" guard below.
+    _prefix_reading = mpq.oC_ReadingClause() or []
+    _tail = mpq.oC_SinglePartQuery()
+    _tail_reading = (_tail.oC_ReadingClause() or []) if _tail is not None else []
+    _has_match = any(rc.oC_Match() is not None for rc in _prefix_reading) or any(
+        rc.oC_Match() is not None for rc in _tail_reading
+    )
+    _has_updating = bool(mpq.oC_UpdatingClause()) or (
+        _tail is not None and bool(_tail.oC_UpdatingClause())
+    )
+    if not _has_match and not _has_updating:
+        return _translate_computational_multi_part(mpq, bind_vars=bind_vars)
     if mpq.oC_UpdatingClause():
         raise CoreError("Updating clauses are not supported in v0", code="UNSUPPORTED")
 
@@ -2728,14 +2811,29 @@ def _apply_with(
         post_let: tuple[str, str] | None = None
         if compiled_into is not None:
             cy, aql, spec = compiled_into
-            needs_post = bool(spec.get("distinct")) or spec.get("slice") is not None
-            if needs_post:
-                temp = pick_name(f"_{aql}_grp")
-                forbidden_vars.add(temp)
-                collect_line += f" INTO {temp} = {spec['inner']}"
-                post_let = (aql, _collect_post_expr(temp, spec))
+            distinct = bool(spec.get("distinct"))
+            has_slice = spec.get("slice") is not None
+            if group_parts:
+                # A grouping key is present → the ``INTO`` form is valid AQL.
+                if distinct or has_slice:
+                    temp = pick_name(f"_{aql}_grp")
+                    forbidden_vars.add(temp)
+                    collect_line += f" INTO {temp} = {spec['inner']}"
+                    post_let = (aql, _collect_post_expr(temp, spec))
+                else:
+                    collect_line += f" INTO {aql} = {spec['inner']}"
             else:
-                collect_line += f" INTO {aql} = {spec['inner']}"
+                # No grouping key → ``COLLECT INTO x`` is a syntax error; collect
+                # everything into a list via an AGGREGATE PUSH/UNIQUE instead.
+                sep = "," if agg_parts else " AGGREGATE"
+                if has_slice:
+                    temp = pick_name(f"_{aql}_grp")
+                    forbidden_vars.add(temp)
+                    collect_line += f"{sep} {temp} = PUSH({spec['inner']})"
+                    post_let = (aql, _collect_post_expr(temp, spec))
+                else:
+                    fn = "UNIQUE" if distinct else "PUSH"
+                    collect_line += f"{sep} {aql} = {fn}({spec['inner']})"
             env[cy] = aql
 
         lines.append(collect_line)
@@ -3004,13 +3102,27 @@ def _append_return_aggregation(
     post_let: tuple[str, str] | None = None
     if compiled_into is not None:
         _into_key, into_aql, spec = compiled_into
-        needs_post = bool(spec.get("distinct")) or spec.get("slice") is not None
-        if needs_post:
-            temp = f"_{into_aql}_grp"
-            collect_line += f" INTO {temp} = {spec['inner']}"
-            post_let = (into_aql, _collect_post_expr(temp, spec))
+        distinct = bool(spec.get("distinct"))
+        has_slice = spec.get("slice") is not None
+        if group_parts:
+            # A grouping key is present → the ``INTO`` form is valid AQL.
+            if distinct or has_slice:
+                temp = f"_{into_aql}_grp"
+                collect_line += f" INTO {temp} = {spec['inner']}"
+                post_let = (into_aql, _collect_post_expr(temp, spec))
+            else:
+                collect_line += f" INTO {into_aql} = {spec['inner']}"
         else:
-            collect_line += f" INTO {into_aql} = {spec['inner']}"
+            # No grouping key → ``COLLECT INTO x`` is a syntax error; collect
+            # everything into a list via an AGGREGATE PUSH/UNIQUE instead.
+            sep = "," if agg_parts else " AGGREGATE"
+            if has_slice:
+                temp = f"_{into_aql}_grp"
+                collect_line += f"{sep} {temp} = PUSH({spec['inner']})"
+                post_let = (into_aql, _collect_post_expr(temp, spec))
+            else:
+                fn = "UNIQUE" if distinct else "PUSH"
+                collect_line += f"{sep} {into_aql} = {fn}({spec['inner']})"
 
     lines.append(collect_line)
     if post_let is not None:

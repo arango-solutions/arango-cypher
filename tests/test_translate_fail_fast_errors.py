@@ -11,11 +11,9 @@ from tests.helpers.mapping_fixtures import mapping_bundle_for
     "cypher,code,msg_sub",
     [
         # MultiPartQuery / WITH guardrails
-        (
-            "WITH 1 AS x RETURN x",
-            "UNSUPPORTED",
-            "MATCH is required before WITH",
-        ),
+        # (Note: leading WITH-constant / UNWIND computational pipelines like
+        # `WITH 1 AS x RETURN x` are now supported — see
+        # test_translate_computational_pipeline.py.)
         (
             "MATCH (n:User)\nWITH n\nSET n.x = 1\nRETURN n",
             "UNSUPPORTED",
