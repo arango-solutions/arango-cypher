@@ -2766,6 +2766,26 @@ def _compile_order_by(
     return "SORT " + ", ".join(parts)
 
 
+def _order_env(
+    var_env: dict[str, str] | None,
+    compiled_items: list[tuple[str | None, str]],
+) -> dict[str, str]:
+    """Env for compiling ORDER BY in a (non-aggregation) RETURN.
+
+    Cypher lets ``ORDER BY`` reference a projection alias (``RETURN size(r.roles)
+    AS n ORDER BY n``), but in AQL the ``SORT`` precedes the ``RETURN`` so the
+    alias is not yet a bound variable — emitting ``SORT n`` makes AQL read ``n``
+    as a collection ("collection or view not found: n"). Mapping each alias to
+    its already-compiled expression inlines it (``SORT LENGTH(r.roles)``), which
+    references the still-live FOR variables.
+    """
+    env: dict[str, str] = dict(var_env) if var_env else {}
+    for alias, expr in compiled_items:
+        if alias and alias not in env:
+            env[alias] = expr
+    return env
+
+
 def _append_return(
     proj: CypherParser.OC_ProjectionBodyContext,
     *,
@@ -2834,13 +2854,17 @@ def _append_return(
             lines.append(f"  RETURN {col_var}")
         else:
             if order_ctx is not None:
-                lines.append("  " + _compile_order_by(order_ctx, bind_vars, var_env=var_env))
+                lines.append(
+                    "  " + _compile_order_by(order_ctx, bind_vars, var_env=_order_env(var_env, compiled_items))
+                )
             _append_skip_limit(lines, skip_value, limit_value)
             lines.append("  RETURN DISTINCT " + _compile_return_object(compiled_items))
         return
 
     if order_ctx is not None:
-        lines.append("  " + _compile_order_by(order_ctx, bind_vars, var_env=var_env))
+        lines.append(
+            "  " + _compile_order_by(order_ctx, bind_vars, var_env=_order_env(var_env, compiled_items))
+        )
     _append_skip_limit(lines, skip_value, limit_value)
 
     if len(compiled_items) == 1 and compiled_items[0][0] is None:
