@@ -2128,18 +2128,27 @@ def _compile_match_from_bound(
         rel_default = "r" if hop_idx == 0 else "r_1"
         v_cy, v_labels = _extract_node_var_and_labels(v_node, default_var=node_default)
         rel_type, rel_cy, rel_range = _extract_relationship_type_and_var(rel_pat, default_var=rel_default)
+        _rdetail = rel_pat.oC_RelationshipDetail()
+        rel_named = _rdetail is not None and _rdetail.oC_Variable() is not None
         v_is_backref = v_cy in out_env
 
         v_aql = _pick_fresh_var(v_cy, forbidden_vars=forbidden_vars) if v_cy not in out_env else out_env[v_cy]
+        # Only an *explicitly named* relationship may back-reference an existing
+        # binding. An unnamed edge's synthetic default name (``r``) must never
+        # alias a variable already bound by a prior MATCH — that produced AQL
+        # like ``FOR m, r … FOR w, r`` (ERR 1511, "assigned multiple times").
         r_aql = (
-            _pick_fresh_var(rel_cy, forbidden_vars=forbidden_vars)
-            if rel_cy not in out_env
-            else out_env[rel_cy]
+            out_env[rel_cy]
+            if (rel_named and rel_cy in out_env)
+            else _pick_fresh_var(rel_cy, forbidden_vars=forbidden_vars)
         )
         r_prop_filters = _compile_relationship_pattern_properties(rel_pat, var=r_aql, bind_vars=bind_vars)
 
         out_env[v_cy] = v_aql
-        out_env[rel_cy] = r_aql
+        if rel_named:
+            out_env[rel_cy] = r_aql
+        forbidden_vars.add(v_aql)
+        forbidden_vars.add(r_aql)
 
         direction = _relationship_direction(rel_pat)
         # Resolve an unlabeled (non-back-reference) endpoint of a typed
@@ -2344,8 +2353,14 @@ def _compile_match_pipeline(
             raise CoreError("Invalid relationship pattern", code="UNSUPPORTED")
 
         v_var, v_labels = _extract_node_var_and_labels(v_node, default_var="v")
+        # A back-reference to an already-bound node (e.g. (p)-[:R]->(m)<-[:R2]-(p))
+        # must traverse to a *fresh* variable and constrain it by _id, not re-open
+        # a FOR loop on the bound name — AQL rejects the duplicate variable
+        # ("assigned multiple times").
+        v_bound = v_var in forbidden
+        v_trav = v_var if not v_bound else _pick_fresh_var(f"{v_var}_m", forbidden_vars=forbidden)
 
-        v_prop_filters = _compile_node_pattern_properties(v_node, var=v_var, bind_vars=bind_vars)
+        v_prop_filters = _compile_node_pattern_properties(v_node, var=v_trav, bind_vars=bind_vars)
         rel_type, rel_var, rel_range = _extract_relationship_type_and_var(rel_pat, default_var="r")
         detail = rel_pat.oC_RelationshipDetail()
         rel_named = detail is not None and detail.oC_Variable() is not None
@@ -2405,12 +2420,14 @@ def _compile_match_pipeline(
         if rmin != rmax:
             has_varlen = True
         lines.append(
-            f"  FOR {v_var}, {rel_var} IN {rmin}..{rmax} {direction} {current_var} {_aql_collection_ref(edge_key)}"
+            f"  FOR {v_trav}, {rel_var} IN {rmin}..{rmax} {direction} {current_var} {_aql_collection_ref(edge_key)}"
         )
 
         v_filters: list[str] = []
+        if v_bound:
+            v_filters.append(f"{v_trav}._id == {v_var}._id")
         if not skip_coll_filter:
-            v_filters.append(f"IS_SAME_COLLECTION(@{vcoll_key}, {v_var})")
+            v_filters.append(f"IS_SAME_COLLECTION(@{vcoll_key}, {v_trav})")
         if v_map is not None and v_primary is not None:
             v_style = v_map.get("style")
             if v_style == "LABEL":
@@ -2418,8 +2435,8 @@ def _compile_match_pipeline(
                 vtv_key = _pick_bind_key("vTypeValue", bind_vars)
                 bind_vars[vtf_key] = v_map.get("typeField")
                 bind_vars[vtv_key] = v_map.get("typeValue")
-                v_filters.append(f"{v_var}[@{vtf_key}] == @{vtv_key}")
-                v_filters.extend(_extra_label_filters(v_var, v_labels, v_primary))
+                v_filters.append(f"{v_trav}[@{vtf_key}] == @{vtv_key}")
+                v_filters.extend(_extra_label_filters(v_trav, v_labels, v_primary))
             elif v_style != "COLLECTION":
                 raise CoreError(f"Unsupported entity mapping style: {v_style}", code="INVALID_MAPPING")
             elif len(v_labels) > 1:
@@ -2443,9 +2460,10 @@ def _compile_match_pipeline(
         for f in v_prop_filters:
             lines.append(f"    FILTER {f}")
 
+        forbidden.add(v_trav)
         forbidden.add(v_var)
         forbidden.add(rel_var)
-        current_var = v_var
+        current_var = v_trav
         last_indent = "    "
 
     where_ctx = match_ctx.oC_Where()
