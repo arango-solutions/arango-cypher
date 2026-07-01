@@ -23,7 +23,7 @@ cases:
     expected:
       aql: |
         FOR n IN @@collection
-          COLLECT city = n.city INTO names = n.name
+          COLLECT city = n.city AGGREGATE names = PUSH(n.name)
           RETURN {city: city, names: names}
       bind_vars:
         "@collection": persons
@@ -55,7 +55,7 @@ cases:
       aql: |
         FOR m IN @@collection
           FILTER m[@typeField] == @typeValue
-          COLLECT released = m.released INTO titles = m.title
+          COLLECT released = m.released AGGREGATE titles = PUSH(m.title)
           RETURN {released: released, titles: titles}
       bind_vars:
         "@collection": nodes

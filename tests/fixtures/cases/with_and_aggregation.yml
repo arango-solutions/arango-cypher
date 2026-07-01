@@ -92,7 +92,7 @@ cases:
     expected:
       aql: |
         FOR u IN @@collection
-          COLLECT city = u.city INTO ids = u.id
+          COLLECT city = u.city AGGREGATE ids = PUSH(u.id)
           RETURN {city: city, n: LENGTH(ids)}
       bind_vars:
         "@collection": users
@@ -190,7 +190,7 @@ cases:
     expected:
       aql: |
         FOR u IN @@collection
-          COLLECT city = u.city INTO ids = u.id
+          COLLECT city = u.city AGGREGATE ids = PUSH(u.id)
           LET n = LENGTH(ids)
           SORT n DESC
           LIMIT 0, 2

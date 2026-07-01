@@ -2720,7 +2720,9 @@ def _apply_with(
 
     compiled_nonagg: list[tuple[str, str, str]] = []  # (cypher_var, aql_var, expr)
     compiled_agg: list[tuple[str, str, str]] = []  # (cypher_var, aql_var, agg_expr)
-    compiled_into: tuple[str, str, dict[str, Any]] | None = None  # (cypher_var, aql_var, spec)
+    # collect() → AGGREGATE PUSH/UNIQUE parts; a list so multiple collect()
+    # coexist (AQL allows many AGGREGATE parts, only one INTO).
+    compiled_collects: list[tuple[str, str, dict[str, Any]]] = []  # (cypher_var, aql_var, spec)
     pre_existing = set(forbidden_vars)
 
     def pick_name(cypher_var: str) -> str:
@@ -2739,12 +2741,10 @@ def _apply_with(
 
         collect_spec = _parse_collect(expr_txt_for_agg)
         if collect_spec is not None:
-            if compiled_into is not None:
-                raise CoreError("Only one collect(...) is supported in v0", code="NOT_IMPLEMENTED")
-            cypher_var = alias or "collected"
+            cypher_var = alias or f"collected{len(compiled_collects) + 1}"
             aql_var = pick_name(cypher_var)
             forbidden_vars.add(aql_var)
-            compiled_into = (cypher_var, aql_var, collect_spec)
+            compiled_collects.append((cypher_var, aql_var, collect_spec))
             continue
 
         agg = _compile_agg_expr(expr_txt_for_agg)
@@ -2775,7 +2775,7 @@ def _apply_with(
     # non-aggregate projected variable is (re)bound by COLLECT, so it must not
     # reuse a pre-existing FOR variable — ``WITH DISTINCT m`` otherwise emits
     # ``COLLECT m = m`` (ERR 1511, "assigned multiple times").
-    if compiled_agg or compiled_into is not None or distinct:
+    if compiled_agg or compiled_collects or distinct:
         adjusted: list[tuple[str, str, str]] = []
         for cypher_var, aql_var, expr in compiled_nonagg:
             if aql_var in pre_existing:
@@ -2795,12 +2795,25 @@ def _apply_with(
     env: dict[str, str] = {cy: aql for cy, aql, _ in compiled_nonagg}
     env.update({cy: aql for cy, aql, _ in compiled_agg})
 
-    # Aggregation path (AGGREGATE and/or collect INTO). collect() may now
-    # coexist with AGGREGATE aggregates via a single COLLECT ... AGGREGATE ...
-    # INTO ... clause; DISTINCT/slice on the collect become a post-COLLECT LET.
-    if compiled_agg or compiled_into is not None:
+    # Aggregation path (AGGREGATE and/or collect). Each collect() lowers to an
+    # AGGREGATE PUSH (UNIQUE for DISTINCT); a trailing slice/index becomes a
+    # post-COLLECT LET over a PUSH temp. Multiple collect() coexist as multiple
+    # AGGREGATE parts.
+    if compiled_agg or compiled_collects:
         group_parts = ", ".join(f"{aql} = {expr}" for _, aql, expr in compiled_nonagg)
-        agg_parts = ", ".join(f"{aql} = {expr}" for _, aql, expr in compiled_agg)
+        agg_pieces = [f"{aql} = {expr}" for _, aql, expr in compiled_agg]
+        post_lets: list[tuple[str, str]] = []
+        for cy, aql, spec in compiled_collects:
+            if spec.get("slice") is not None:
+                temp = pick_name(f"_{aql}_grp")
+                forbidden_vars.add(temp)
+                agg_pieces.append(f"{temp} = PUSH({spec['inner']})")
+                post_lets.append((aql, _collect_post_expr(temp, spec)))
+            else:
+                fn = "UNIQUE" if spec.get("distinct") else "PUSH"
+                agg_pieces.append(f"{aql} = {fn}({spec['inner']})")
+            env[cy] = aql
+        agg_parts = ", ".join(agg_pieces)
 
         collect_line = "  COLLECT"
         if group_parts:
@@ -2808,37 +2821,9 @@ def _apply_with(
         if agg_parts:
             collect_line += f" AGGREGATE {agg_parts}"
 
-        post_let: tuple[str, str] | None = None
-        if compiled_into is not None:
-            cy, aql, spec = compiled_into
-            distinct = bool(spec.get("distinct"))
-            has_slice = spec.get("slice") is not None
-            if group_parts:
-                # A grouping key is present → the ``INTO`` form is valid AQL.
-                if distinct or has_slice:
-                    temp = pick_name(f"_{aql}_grp")
-                    forbidden_vars.add(temp)
-                    collect_line += f" INTO {temp} = {spec['inner']}"
-                    post_let = (aql, _collect_post_expr(temp, spec))
-                else:
-                    collect_line += f" INTO {aql} = {spec['inner']}"
-            else:
-                # No grouping key → ``COLLECT INTO x`` is a syntax error; collect
-                # everything into a list via an AGGREGATE PUSH/UNIQUE instead.
-                sep = "," if agg_parts else " AGGREGATE"
-                if has_slice:
-                    temp = pick_name(f"_{aql}_grp")
-                    forbidden_vars.add(temp)
-                    collect_line += f"{sep} {temp} = PUSH({spec['inner']})"
-                    post_let = (aql, _collect_post_expr(temp, spec))
-                else:
-                    fn = "UNIQUE" if distinct else "PUSH"
-                    collect_line += f"{sep} {aql} = {fn}({spec['inner']})"
-            env[cy] = aql
-
         lines.append(collect_line)
-        if post_let is not None:
-            lines.append(f"  LET {post_let[0]} = {post_let[1]}")
+        for pk, pe in post_lets:
+            lines.append(f"  LET {pk} = {pe}")
 
         with_filter = _rewrite_vars(with_filter_raw, env) if with_filter_raw else None
         if with_filter:
@@ -3025,7 +3010,10 @@ def _append_return_aggregation(
     # reallocated to a fresh name while the projection key stays ``director``.
     compiled_nonagg: list[tuple[str, str, str]] = []
     compiled_agg: list[tuple[str, str, str]] = []
-    compiled_into: tuple[str, str, dict[str, Any]] | None = None
+    # Each collect() is lowered to an AGGREGATE PUSH/UNIQUE part; a list (not a
+    # single slot) so multiple collect() in one projection are supported —
+    # AQL allows many AGGREGATE parts but only one INTO.
+    compiled_collects: list[tuple[str, str, dict[str, Any]]] = []
 
     # Names live *before* the COLLECT: the enclosing FOR variables. A COLLECT
     # group/aggregate/INTO variable must not reuse any of them. ``var_env`` carries
@@ -3058,11 +3046,9 @@ def _append_return_aggregation(
 
         collect_spec = _parse_collect(expr_txt)
         if collect_spec is not None:
-            if compiled_into is not None:
-                raise CoreError("Only one collect() is supported in RETURN", code="NOT_IMPLEMENTED")
-            idx = len(compiled_nonagg) + len(compiled_agg) + 1
+            idx = len(compiled_nonagg) + len(compiled_agg) + len(compiled_collects) + 1
             key = alias or f"expr{idx}"
-            compiled_into = (key, _alloc(key), collect_spec)
+            compiled_collects.append((key, _alloc(key), collect_spec))
             continue
 
         agg = _compile_agg_expr(expr_txt)
@@ -3070,7 +3056,7 @@ def _append_return_aggregation(
             _kind, agg_expr = agg
             fn_match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\(", expr_txt)
             fn_key = fn_match.group(1).lower() if fn_match else None
-            idx = len(compiled_nonagg) + len(compiled_agg) + 1
+            idx = len(compiled_nonagg) + len(compiled_agg) + len(compiled_collects) + 1
             key = alias or fn_key or f"expr{idx}"
             compiled_agg.append((key, _alloc(key), agg_expr))
             continue
@@ -3091,7 +3077,21 @@ def _append_return_aggregation(
         compiled_nonagg.append((key, _alloc(key), expr))
 
     group_parts = ", ".join(f"{aql} = {e}" for _k, aql, e in compiled_nonagg)
-    agg_parts = ", ".join(f"{aql} = {e}" for _k, aql, e in compiled_agg)
+
+    # collect() → AGGREGATE PUSH (UNIQUE for DISTINCT); a trailing slice/index
+    # becomes a post-COLLECT LET over a PUSH temp. Multiple collect() coexist as
+    # multiple AGGREGATE parts.
+    agg_pieces = [f"{aql} = {e}" for _k, aql, e in compiled_agg]
+    post_lets: list[tuple[str, str]] = []
+    for _k, aql, spec in compiled_collects:
+        if spec.get("slice") is not None:
+            temp = f"_{aql}_grp"
+            agg_pieces.append(f"{temp} = PUSH({spec['inner']})")
+            post_lets.append((aql, _collect_post_expr(temp, spec)))
+        else:
+            fn = "UNIQUE" if spec.get("distinct") else "PUSH"
+            agg_pieces.append(f"{aql} = {fn}({spec['inner']})")
+    agg_parts = ", ".join(agg_pieces)
 
     collect_line = "  COLLECT"
     if group_parts:
@@ -3099,34 +3099,9 @@ def _append_return_aggregation(
     if agg_parts:
         collect_line += f" AGGREGATE {agg_parts}"
 
-    post_let: tuple[str, str] | None = None
-    if compiled_into is not None:
-        _into_key, into_aql, spec = compiled_into
-        distinct = bool(spec.get("distinct"))
-        has_slice = spec.get("slice") is not None
-        if group_parts:
-            # A grouping key is present → the ``INTO`` form is valid AQL.
-            if distinct or has_slice:
-                temp = f"_{into_aql}_grp"
-                collect_line += f" INTO {temp} = {spec['inner']}"
-                post_let = (into_aql, _collect_post_expr(temp, spec))
-            else:
-                collect_line += f" INTO {into_aql} = {spec['inner']}"
-        else:
-            # No grouping key → ``COLLECT INTO x`` is a syntax error; collect
-            # everything into a list via an AGGREGATE PUSH/UNIQUE instead.
-            sep = "," if agg_parts else " AGGREGATE"
-            if has_slice:
-                temp = f"_{into_aql}_grp"
-                collect_line += f"{sep} {temp} = PUSH({spec['inner']})"
-                post_let = (into_aql, _collect_post_expr(temp, spec))
-            else:
-                fn = "UNIQUE" if distinct else "PUSH"
-                collect_line += f"{sep} {into_aql} = {fn}({spec['inner']})"
-
     lines.append(collect_line)
-    if post_let is not None:
-        lines.append(f"  LET {post_let[0]} = {post_let[1]}")
+    for pk, pe in post_lets:
+        lines.append(f"  LET {pk} = {pe}")
 
     # ORDER BY / RETURN env: map both the projection key and the original grouped
     # expression to the (possibly reallocated) AQL variable. After
@@ -3135,8 +3110,8 @@ def _append_return_aggregation(
     agg_env: dict[str, str] = {}
     for key, aql, _e in compiled_nonagg + compiled_agg:
         agg_env[key] = aql
-    if compiled_into is not None:
-        agg_env[compiled_into[0]] = compiled_into[1]
+    for key, aql, _s in compiled_collects:
+        agg_env[key] = aql
     for key, aql, expr in compiled_nonagg:
         if expr not in agg_env:
             agg_env[expr] = aql
@@ -3147,8 +3122,7 @@ def _append_return_aggregation(
 
     all_items: list[tuple[str, str]] = [(k, aql) for k, aql, _ in compiled_nonagg]
     all_items += [(k, aql) for k, aql, _ in compiled_agg]
-    if compiled_into is not None:
-        all_items.append((compiled_into[0], compiled_into[1]))
+    all_items += [(k, aql) for k, aql, _ in compiled_collects]
     if len(all_items) == 1:
         lines.append(f"  RETURN {all_items[0][1]}")
     else:
