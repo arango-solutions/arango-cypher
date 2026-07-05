@@ -82,6 +82,13 @@ from .nl2cypher.tenant_scope import EntityTenantRole, TenantScopeManifest
 
 logger = logging.getLogger(__name__)
 
+# MT-7 — dedicated admin cross-tenant bypass audit stream. Kept separate
+# from the module logger (which carries the routine TENANT_SCOPE_OK /
+# TENANT_SCOPE_VIOLATION lines) so operators can route, retain, and alert
+# on privilege-escalation events independently (PRD §10: "Log every
+# request to a separate audit stream with the bypass reason").
+audit_logger = logging.getLogger("arango_cypher.tenant_audit")
+
 
 # ---------------------------------------------------------------------------
 # Public exceptions
@@ -330,13 +337,30 @@ def validate_plan(
     db: Any,
     aql: str,
     bind_vars: dict[str, Any],
-    manifest: TenantScopeManifest,
+    manifest: TenantScopeManifest | None,
     sharding_profile: dict[str, Any] | None,
     collection_to_entity: dict[str, str] | None = None,
     session: Any,
     plan_override: dict[str, Any] | None = None,
+    admin_bypass: bool = False,
+    bypass_reason: str = "",
 ) -> None:
     """Refuse the query if its EXPLAIN plan violates §1.2.
+
+    MT-7 — admin cross-tenant bypass. When ``admin_bypass`` is set AND
+    the session is flagged ``is_admin`` AND a non-empty ``bypass_reason``
+    is supplied, the tenant-scope enforcement (the bind-var identity gate
+    and the per-node tenant-predicate walk) is skipped so an operator may
+    legitimately span tenants (PRD §10). The **structural** checks are
+    NOT bypassed — the query is still EXPLAINed and a failed / malformed
+    plan is still refused. Every honoured bypass emits an
+    ``ADMIN_CROSS_TENANT_BYPASS`` line to the dedicated
+    ``arango_cypher.tenant_audit`` stream with the reason and digests. A
+    bypass requested without admin rights or without a reason is ignored
+    (falls through to normal enforcement) — defence in depth behind the
+    route's own gate. The plan-shape cache is skipped for bypass calls
+    (they never run the structural walk, so must not populate or read the
+    certification LRU).
 
     Algorithm (PRD §8.2):
 
@@ -388,14 +412,21 @@ def validate_plan(
     # (unit tests) skip EXPLAIN entirely and so have no sentinel — the
     # walker falls back to accepting only ``parameter``-typed
     # ``@tenantId`` nodes, exactly as before.
+    # MT-7 — is the caller an authorised cross-tenant admin? Honoured
+    # only for a session flagged is_admin with a non-empty reason; an
+    # unauthorised bypass request falls through to normal enforcement.
+    bypass_active = bool(admin_bypass) and bool(getattr(session, "is_admin", False)) and bool(bypass_reason)
+
     # MT-6 — plan-shape cache. When the same (aql, schema) shape has
     # already been certified we skip the EXPLAIN + structural walk, but
     # still run the per-call bind-var gate and emit the audit line. The
     # cache is only consulted on the real-EXPLAIN path; ``plan_override``
     # (unit tests) always walks the supplied plan so tests stay
-    # deterministic and never populate the cache.
+    # deterministic and never populate the cache. Bypass calls skip the
+    # cache entirely — they don't run the structural walk, so a cached
+    # verdict is neither produced nor consulted for them.
     cache_key: str | None = None
-    if plan_override is None:
+    if plan_override is None and not bypass_active and manifest is not None:
         cache_key = _plan_cache_key(aql, manifest, sharding_profile, collection_to_entity)
         cached = _PLAN_CACHE.get(cache_key)
         if cached is not None:
@@ -440,6 +471,15 @@ def validate_plan(
         )
         _log_violation(violation, session=session)
         raise violation
+
+    # MT-7 — authorised admin cross-tenant bypass. The plan is structurally
+    # sound (it EXPLAINed and coerced to a dict); skip the tenant-scope
+    # enforcement and record the privilege-escalation event on the audit
+    # stream. Reached only for is_admin sessions with a reason.
+    if bypass_active:
+        digests = _digests(aql=aql, bind_vars=bind_vars, plan=plan)
+        _log_admin_bypass(session=session, reason=bypass_reason, **digests)
+        return
 
     nodes = plan.get("nodes") if isinstance(plan.get("nodes"), list) else []
 
@@ -1376,6 +1416,31 @@ def _log_pass(
         aql_digest[:16],
         plan_digest[:16],
         "hit" if cached else "miss",
+    )
+
+
+def _log_admin_bypass(
+    *,
+    session: Any,
+    reason: str,
+    aql_digest: str,
+    plan_digest: str,
+) -> None:
+    """Record an honoured admin cross-tenant bypass (MT-7, PRD §10).
+
+    Emitted at WARNING on the dedicated ``arango_cypher.tenant_audit``
+    stream — a privilege-escalation event that must be independently
+    alertable. Carries the mandatory bypass reason plus the same
+    aql/plan digests as the normal audit lines so an auditor can replay
+    exactly what ran.
+    """
+    audit_logger.warning(
+        "ADMIN_CROSS_TENANT_BYPASS session=%s tenant=%s reason=%s aql_digest=%s plan_digest=%s",
+        _session_token_prefix(session),
+        getattr(session, "tenant_id", None),
+        reason,
+        aql_digest[:16],
+        plan_digest[:16],
     )
 
 

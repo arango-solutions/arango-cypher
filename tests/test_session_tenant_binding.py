@@ -705,6 +705,64 @@ class TestNl2CypherLayer3Injection:
 
 
 # ---------------------------------------------------------------------------
+# /execute-aql — MT-7 admin cross-tenant bypass gating
+# ---------------------------------------------------------------------------
+
+
+class TestAdminCrossTenantBypassGating:
+    """The route-level gate for ``cross_tenant`` on ``/execute-aql`` (MT-7).
+
+    These pin the trust-boundary refusals that fire *before* any DB
+    access: a non-admin cannot request a bypass, and an admin must give
+    a reason for the audit stream. The successful bypass execution path
+    is covered at the adapter/validator level in
+    ``tests/test_tenant_admin_bypass.py``.
+    """
+
+    def _connect(self, *, is_admin: bool) -> str:
+        fake_db = _FakeDb(has_tenant_collection=False)
+        with _patched_arango_client(_make_fake_client(fake_db)):
+            client = TestClient(_app())
+            resp = client.post(
+                "/connect",
+                json={
+                    "url": "http://example.invalid",
+                    "database": "test",
+                    "username": "root",
+                    "password": "",
+                    "tenantId": "tenant-A-uuid",
+                    "isAdmin": is_admin,
+                },
+            )
+        assert resp.status_code == 200, resp.text
+        return resp.json()["token"]
+
+    def test_non_admin_cross_tenant_refused_403(self):
+        token = self._connect(is_admin=False)
+        client = TestClient(_app())
+        resp = client.post(
+            "/execute-aql",
+            headers={"X-Arango-Session": token},
+            json={"aql": "FOR e IN Employee RETURN e", "cross_tenant": True, "bypass_reason": "x"},
+        )
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"]["code"] == "ADMIN_REQUIRED"
+        _fresh_service()._sessions.pop(token, None)
+
+    def test_admin_cross_tenant_without_reason_refused_422(self):
+        token = self._connect(is_admin=True)
+        client = TestClient(_app())
+        resp = client.post(
+            "/execute-aql",
+            headers={"X-Arango-Session": token},
+            json={"aql": "FOR e IN Employee RETURN e", "cross_tenant": True},
+        )
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["code"] == "BYPASS_REASON_REQUIRED"
+        _fresh_service()._sessions.pop(token, None)
+
+
+# ---------------------------------------------------------------------------
 # /execute — tenant refusals must surface as 403, never masked as 500
 # ---------------------------------------------------------------------------
 

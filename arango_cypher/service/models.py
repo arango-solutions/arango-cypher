@@ -146,6 +146,12 @@ class ExecuteRequest(BaseModel):
     mapping: dict[str, Any] | None = None
     params: dict[str, Any] | None = None
     extensions_enabled: bool = True
+    # MT-7 — admin cross-tenant bypass. Honoured only for an admin-flagged
+    # session with a non-empty ``bypass_reason``; Layer 5 then skips its
+    # tenant-scope enforcement (structural EXPLAIN check still runs) and
+    # records the event on the audit stream. Ignored for non-admins.
+    cross_tenant: bool = False
+    bypass_reason: str | None = Field(default=None, max_length=_MAX_FIELD_LENGTH)
 
 
 class ExecuteResponse(BaseModel):
@@ -186,6 +192,9 @@ class ExecuteAqlRequest(BaseModel):
     # Optional — pre-Wave-7 callers may omit it. With a tenant-bound
     # session and no mapping, /execute-aql is refused fail-closed.
     mapping: dict[str, Any] | None = None
+    # MT-7 — admin cross-tenant bypass; see ExecuteRequest.cross_tenant.
+    cross_tenant: bool = False
+    bypass_reason: str | None = Field(default=None, max_length=_MAX_FIELD_LENGTH)
 
 
 class ToolCallRequest(BaseModel):

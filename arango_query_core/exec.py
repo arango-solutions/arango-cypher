@@ -54,6 +54,8 @@ def safe_execute(
     sharding_profile: dict[str, Any] | None,
     collection_to_entity: dict[str, str] | None = None,
     execute_kwargs: dict[str, Any] | None = None,
+    admin_bypass: bool = False,
+    bypass_reason: str = "",
 ) -> tuple[Any, dict[str, Any]]:
     """Layer 6 — execute AQL only after Layer 5 has certified the plan.
 
@@ -113,6 +115,8 @@ def safe_execute(
         sharding_profile=sharding_profile,
         collection_to_entity=collection_to_entity,
         session=session,
+        admin_bypass=admin_bypass,
+        bypass_reason=bypass_reason,
     )
 
     cursor = db.aql.execute(aql, bind_vars=bind_vars, **(execute_kwargs or {}))

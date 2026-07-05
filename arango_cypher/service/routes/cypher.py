@@ -85,6 +85,46 @@ def _layer4_error_response(exc: AqlRewriteError) -> HTTPException:
     )
 
 
+def _resolve_admin_bypass(
+    *,
+    cross_tenant: bool,
+    bypass_reason: str | None,
+    session: _Session,
+) -> tuple[bool, str]:
+    """Validate an MT-7 admin cross-tenant bypass request.
+
+    Returns ``(admin_bypass, bypass_reason)``. A non-cross-tenant
+    request resolves to ``(False, "")``. A cross-tenant request is
+    refused unless the session is an admin (HTTP 403 ``ADMIN_REQUIRED``)
+    and carries a non-empty reason for the audit stream (HTTP 422
+    ``BYPASS_REASON_REQUIRED``). Gating here keeps the privilege check
+    at the trust boundary; Layer 5 re-checks ``is_admin`` as defence in
+    depth before honouring the bypass.
+    """
+    if not cross_tenant:
+        return False, ""
+    if not getattr(session, "is_admin", False):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "admin_required",
+                "code": "ADMIN_REQUIRED",
+                "message": "cross_tenant queries require an admin-flagged session",
+            },
+        )
+    reason = (bypass_reason or "").strip()
+    if not reason:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "bypass_reason_required",
+                "code": "BYPASS_REASON_REQUIRED",
+                "message": "cross_tenant requires a non-empty bypass_reason for the audit log",
+            },
+        )
+    return True, reason
+
+
 @app.post("/translate", response_model=TranslateResponse)
 def translate_endpoint(
     req: TranslateRequest,
@@ -268,16 +308,28 @@ def execute_endpoint(
     if correction:
         warnings.insert(0, {"message": f"Using learned correction #{correction.id}"})
 
+    admin_bypass, bypass_reason = _resolve_admin_bypass(
+        cross_tenant=req.cross_tenant,
+        bypass_reason=req.bypass_reason,
+        session=session,
+    )
+
     # Layer 4 (AQL AST tenant-injection) before Layer 5 sees the AQL.
     # On tenant-bound sessions this rewrites every unscoped read; on
     # workbench / unbound sessions it's a structural no-op. Refusals
-    # surface as HTTPException via `_maybe_apply_layer4`.
-    run_aql, run_bind, layer4_changes = _maybe_apply_layer4(
-        session=session,
-        mapping_dict=req.mapping,
-        aql=run_aql,
-        bind_vars=run_bind,
-    )
+    # surface as HTTPException via `_maybe_apply_layer4`. An admin
+    # cross-tenant bypass SKIPS Layer 4 — re-injecting a tenant
+    # predicate would defeat the very cross-tenant read the operator
+    # authorised (Layer 5's bypass then permits the unscoped plan).
+    if admin_bypass:
+        layer4_changes: list[str] = []
+    else:
+        run_aql, run_bind, layer4_changes = _maybe_apply_layer4(
+            session=session,
+            mapping_dict=req.mapping,
+            aql=run_aql,
+            bind_vars=run_bind,
+        )
 
     with _translate_errors("AQL execution failed"):
         t_exec = time.perf_counter()
@@ -291,6 +343,8 @@ def execute_endpoint(
                 bind_vars=run_bind,
                 session=session,
                 mapping_dict=req.mapping,
+                admin_bypass=admin_bypass,
+                bypass_reason=bypass_reason,
             )
             results = list(cursor)
         except TenantScopeViolation as v:
@@ -334,19 +388,28 @@ def execute_aql_endpoint(
     direct execute and a WARN audit log.
     """
     final_bind = req.bind_vars
+    admin_bypass, bypass_reason = _resolve_admin_bypass(
+        cross_tenant=req.cross_tenant,
+        bypass_reason=req.bypass_reason,
+        session=session,
+    )
     # Layer 4 — the *only* tenant-scope defence on raw-AQL submissions.
     # When the session is tenant-bound and no mapping was supplied the
     # adapter raises TenantScopeViolation(NO_MAPPING_FOR_VALIDATION),
     # which `_maybe_apply_layer4` translates to a 403. The same
     # condition is checked by Layer 6 (safe_execute_aql) downstream;
     # checking here too means we refuse early without wasting an
-    # EXPLAIN round-trip.
-    run_aql, final_bind, layer4_changes = _maybe_apply_layer4(
-        session=session,
-        mapping_dict=req.mapping,
-        aql=req.aql,
-        bind_vars=req.bind_vars,
-    )
+    # EXPLAIN round-trip. An admin cross-tenant bypass skips Layer 4
+    # (see /execute) so the raw AQL runs unscoped across tenants.
+    if admin_bypass:
+        run_aql, final_bind, layer4_changes = req.aql, dict(req.bind_vars or {}), []
+    else:
+        run_aql, final_bind, layer4_changes = _maybe_apply_layer4(
+            session=session,
+            mapping_dict=req.mapping,
+            aql=req.aql,
+            bind_vars=req.bind_vars,
+        )
     with _translate_errors("AQL execution failed"):
         t_exec = time.perf_counter()
         try:
@@ -356,6 +419,8 @@ def execute_aql_endpoint(
                 bind_vars=final_bind,
                 session=session,
                 mapping_dict=req.mapping,
+                admin_bypass=admin_bypass,
+                bypass_reason=bypass_reason,
             )
             results = list(cursor)
         except TenantScopeViolation as v:

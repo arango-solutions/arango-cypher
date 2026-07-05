@@ -80,7 +80,16 @@ class TestSafeExecuteCore:
         called: dict[str, Any] = {}
 
         def _stub_validator(
-            *, db, aql, bind_vars, manifest, sharding_profile, collection_to_entity, session
+            *,
+            db,
+            aql,
+            bind_vars,
+            manifest,
+            sharding_profile,
+            collection_to_entity,
+            session,
+            admin_bypass=False,
+            bypass_reason="",
         ) -> None:
             called["bind_vars"] = dict(bind_vars)
             called["aql"] = aql

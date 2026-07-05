@@ -135,6 +135,8 @@ def safe_execute_aql(
     session: _Session,
     mapping_dict: dict[str, Any] | None,
     execute_kwargs: dict[str, Any] | None = None,
+    admin_bypass: bool = False,
+    bypass_reason: str = "",
 ) -> tuple[Any, dict[str, Any]]:
     """Layer-6 entry point used by every Cypher- or AQL-execute route.
 
@@ -151,10 +153,20 @@ def safe_execute_aql(
       falls through to a direct ``db.aql.execute`` with the session
       tenant bind vars still spread on top of the caller's. A WARNING
       records the bypass for audit.
+
+    MT-7 — when ``admin_bypass`` is set and the session is an admin,
+    Layer 5's tenant-scope enforcement is skipped (the structural
+    EXPLAIN check still runs) so an operator may span tenants; the
+    validator records the event on the ``arango_cypher.tenant_audit``
+    stream. The no-mapping fail-closed refusal above is skipped for a
+    bypass call — the cross-tenant read intentionally has no single
+    tenant to certify against, and Layer 5 still structurally EXPLAINs.
     """
     manifest, sharding_profile, coll_to_entity = _build_validator_inputs(mapping_dict)
 
-    if manifest is None:
+    bypass_active = bool(admin_bypass) and bool(getattr(session, "is_admin", False)) and bool(bypass_reason)
+
+    if manifest is None and not bypass_active:
         if getattr(session, "tenant_id", None) is not None:
             raise TenantScopeViolation(
                 code="NO_MAPPING_FOR_VALIDATION",
@@ -183,6 +195,8 @@ def safe_execute_aql(
         sharding_profile=sharding_profile,
         collection_to_entity=coll_to_entity,
         execute_kwargs=execute_kwargs,
+        admin_bypass=admin_bypass,
+        bypass_reason=bypass_reason,
     )
 
 
