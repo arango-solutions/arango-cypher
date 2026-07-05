@@ -16,6 +16,10 @@ from unittest.mock import patch
 import pytest
 
 from arango_cypher import service as _service
+from tests.helpers.service_reload import (
+    restore_service_modules,
+    snapshot_service_modules,
+)
 
 # ---------------------------------------------------------------------------
 # _require_analyzer_unless_opted_out
@@ -63,42 +67,29 @@ class TestRequireAnalyzer:
 
 
 class TestImportTimeGuard:
-    def _purge_service_modules(self) -> list[str]:
-        """Drop the service module + close-by submodules from sys.modules.
-
-        Returns the list of names removed so the caller can restore
-        them in teardown — reloading the service registers routes on a
-        *new* FastAPI ``app`` instance, which would break every
-        downstream test that imported the original app before us.
-        """
-        names = [name for name in list(sys.modules) if name == "arango_cypher.service"]
-        return names
-
     def test_import_raises_when_analyzer_missing_and_no_opt_out(self, monkeypatch):
         monkeypatch.delenv("ARANGO_CYPHER_ALLOW_HEURISTIC", raising=False)
-        removed = self._purge_service_modules()
-        original = {name: sys.modules.pop(name) for name in removed}
+        # Snapshot the whole service module tree: reloading re-executes
+        # every arango_cypher.service.* submodule (registering routes on a
+        # new FastAPI app), so we must restore all of them — not just the
+        # top-level package — or downstream tests monkeypatch stale
+        # submodules (see tests/helpers/service_reload.py).
+        snapshot = snapshot_service_modules()
+        sys.modules.pop("arango_cypher.service", None)
         try:
             with patch.dict(sys.modules, {"schema_analyzer": None}):
                 with pytest.raises(RuntimeError, match="arangodb-schema-analyzer"):
                     importlib.import_module("arango_cypher.service")
         finally:
-            # Drop the partially-imported module (if any) and restore
-            # the original so the rest of the suite keeps seeing the
-            # app / session registry it already captured.
-            sys.modules.pop("arango_cypher.service", None)
-            for name, mod in original.items():
-                sys.modules[name] = mod
+            restore_service_modules(snapshot)
 
     def test_import_succeeds_when_opt_out_set(self, monkeypatch):
         monkeypatch.setenv("ARANGO_CYPHER_ALLOW_HEURISTIC", "1")
-        removed = self._purge_service_modules()
-        original = {name: sys.modules.pop(name) for name in removed}
+        snapshot = snapshot_service_modules()
+        sys.modules.pop("arango_cypher.service", None)
         try:
             with patch.dict(sys.modules, {"schema_analyzer": None}):
                 mod = importlib.import_module("arango_cypher.service")
                 assert hasattr(mod, "app")
         finally:
-            sys.modules.pop("arango_cypher.service", None)
-            for name, mod in original.items():
-                sys.modules[name] = mod
+            restore_service_modules(snapshot)

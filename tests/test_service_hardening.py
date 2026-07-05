@@ -42,6 +42,10 @@ from fastapi.testclient import TestClient
 
 from arango_cypher import corrections, nl_corrections, service
 from arango_cypher.service import app
+from tests.helpers.service_reload import (
+    restore_service_modules,
+    snapshot_service_modules,
+)
 
 
 @pytest.fixture
@@ -94,7 +98,8 @@ def public_mode_app(monkeypatch: pytest.MonkeyPatch):
     teardown to avoid bleeding into unrelated tests.
     """
     monkeypatch.setenv("ARANGO_CYPHER_PUBLIC_MODE", "1")
-    saved = sys.modules.pop("arango_cypher.service", None)
+    snapshot = snapshot_service_modules()
+    sys.modules.pop("arango_cypher.service", None)
     try:
         reloaded = importlib.import_module("arango_cypher.service")
         # Re-apply the ``_block_real_connect`` stub against the freshly
@@ -122,10 +127,12 @@ def public_mode_app(monkeypatch: pytest.MonkeyPatch):
         reloaded.ArangoClient = _FakeClient  # type: ignore[attr-defined]
         yield reloaded
     finally:
-        if saved is not None:
-            sys.modules["arango_cypher.service"] = saved
-        else:
-            sys.modules.pop("arango_cypher.service", None)
+        # Restore the FULL service module tree, not just the top-level
+        # package: the reload re-executed (and replaced) every
+        # arango_cypher.service.* submodule, and leaving those reloaded
+        # objects in sys.modules breaks monkeypatch-by-module in later
+        # tests (see tests/helpers/service_reload.py).
+        restore_service_modules(snapshot)
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +391,8 @@ def reload_service_clean():
     ``monkeypatch`` is still holding the bad env vars — which races
     with the very startup guard the test is exercising.
     """
-    saved = sys.modules.pop("arango_cypher.service", None)
+    snapshot = snapshot_service_modules()
+    sys.modules.pop("arango_cypher.service", None)
     reloaded: list[Any] = []
 
     def _reload():
@@ -396,14 +404,12 @@ def reload_service_clean():
     try:
         yield _reload
     finally:
-        # Restore the original cached module reference (the one with
-        # the test-time env stripped). If the test never successfully
-        # reloaded — e.g. it asserted the import raises — we
-        # explicitly re-import once with a clean env so the next test
-        # in the run gets a usable ``service`` module.
-        sys.modules.pop("arango_cypher.service", None)
-        if saved is not None:
-            sys.modules["arango_cypher.service"] = saved
+        # Restore the full service module tree (top-level package + every
+        # reloaded submodule) so a reload here can't leak stale
+        # arango_cypher.service.* objects into downstream tests. If the
+        # snapshot was empty (service was never imported before us) this
+        # simply drops whatever the reload created.
+        restore_service_modules(snapshot)
 
 
 class TestCorsCredentialedWildcardRejected:
