@@ -323,9 +323,34 @@ unchanged. Also fixed the collect-without-grouping-key bug this exposed
 | CORE (excl. temporal/quantifier/call) | 54.8% | **86.4%** (1902/2201) |
 | FULL | 32.2% | **53.4%** (2063/3861) |
 
-"MATCH is required before WITH" fell 475 → 22. The remaining 22 are **write-tail
+"MATCH is required before WITH" fell 475 → 22. The remaining 22 were **write-tail
 combos** (`WITH … MERGE`, `UNWIND … CREATE`) needing read+write pipeline
-integration — the next slice. Full breakdown: `tests/tck/COVERAGE_REPORT.md`.
+integration — largely closed in WP-V1e (below). Full breakdown:
+`tests/tck/COVERAGE_REPORT.md`.
+
+#### WP-V1e — Write-tail combos (UNWIND→write, WITH→CREATE) · *done 2026-07-05*
+
+Two read+write pipeline gaps closed (TCK +6 overall: Full 2068→2074, Core
+1907→1913):
+
+- **`UNWIND … CREATE` / `UNWIND … MERGE`.** A shared UNWIND-aware
+  reading-clause compiler (`_compile_write_reading_clauses`) turns MATCH/UNWIND
+  reading clauses into the `FOR …` prefix the write nests in
+  (`UNWIND [..] AS x CREATE (n {p:x})` → `FOR x IN [..] INSERT {p:x}`).
+  `UNWIND … CREATE` was hard-rejected; `UNWIND … MERGE` translated but
+  *silently dropped* the `FOR` (unbound loop var in the UPSERT) — now fixed.
+  Supports MATCH-then-UNWIND and multiple UNWINDs; UNWIND-before-MATCH refused.
+- **`MATCH … WITH … CREATE`** (incl. after aggregation, e.g. `WITH count(p) AS c
+  CREATE (m {released:c})`). The multi-part handler now emits a tail CREATE
+  (`_append_multipart_create_tail`, reusing the append-mode `_compile_create`)
+  nested in the already-built WITH pipeline, referencing bound vars.
+
+Still deferred (refused with a specific error, never mis-compiled): `WITH …
+MERGE` / `WITH … SET` / `WITH … DELETE` (need the standalone MERGE/mutating
+builders refactored to append-mode) and `UNWIND … WITH … CREATE`
+(leading-UNWIND multi-part routing). Tests:
+`tests/test_translate_write_clause_gaps.py` (`TestUnwindWriteTail`,
+`TestWithCreateTail`).
 
 ---
 

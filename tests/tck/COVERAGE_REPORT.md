@@ -15,8 +15,12 @@
 
 | Subset | Passable | Pass rate | (was 2026-04-20) |
 |--------|----------|-----------|------------------|
-| **Full TCK** (all 3,861 scenarios) | 2,068 / 3,861 | **53.6 %** | 32.2 % |
-| **Core TCK** (excludes out-of-scope: `expressions/temporal`, `expressions/quantifier`, `clauses/call` — 2,201 scenarios) | 1,907 / 2,201 | **86.6 %** | 54.8 % |
+| **Full TCK** (all 3,861 scenarios) | 2,074 / 3,861 | **53.7 %** | 32.2 % |
+| **Core TCK** (excludes out-of-scope: `expressions/temporal`, `expressions/quantifier`, `clauses/call` — 2,201 scenarios) | 1,913 / 2,201 | **86.9 %** | 54.8 % |
+
+> 2026-07-05: WP-V1e (write-tail combos — `UNWIND … CREATE`/`MERGE`,
+> `MATCH … WITH … CREATE`) added +6 (Full 2,068→2,074, Core 1,907→1,913);
+> `clauses/create` 74→82%, `clauses/unwind` 50→71%.
 
 > 2026-07-05: WP-V1c (single-node `EXISTS`/`COUNT` subquery bodies) took
 > `expressions/existentialSubqueries` from 6/10 → 9/10; WP-V1d
@@ -40,7 +44,7 @@ Measured 2026-07-01:
 |------:|--------|-------------|
 | 539 | `Unsupported atom in v0` | Largely temporal/quantifier expression atoms (out of scope); the rest are `any()`/`all()`/`none()` list predicates and other complex atoms. |
 | 372 / 112 / 110 / 66 / 64 / 46 / 34 | `Unsupported function in v0: datetime / time / localtime / *.truncate / duration` | `expressions/temporal` — out of scope. |
-| 46 | `Updating clauses are not supported in v0` | Write-tail combos (`WITH … MERGE`, `UNWIND … CREATE`) + `SET`/`DELETE`/`REMOVE` edge cases. |
+| 46 | `Updating clauses are not supported in v0` | Partly closed 2026-07-05 (WP-V1e): `UNWIND … CREATE/MERGE` and `MATCH … WITH … CREATE` now translate. Remaining: `WITH … MERGE`/`SET`/`DELETE` (need append-mode builders) + `UNWIND … WITH … CREATE`. |
 | 36 | `Only one collect(...) is supported in v0` | Multiple `collect()` in one projection. |
 | 22 | `MATCH is required before WITH in v0 subset` | Remaining are write-tail combos (need read+write pipeline integration). |
 | 20 | `Cypher syntax error … no viable alternative` | ANTLR grammar gaps. |

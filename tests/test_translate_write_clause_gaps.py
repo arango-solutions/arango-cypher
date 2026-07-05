@@ -86,6 +86,43 @@ class TestUnwindWriteTail:
         assert exc.value.code == "NOT_IMPLEMENTED"
 
 
+class TestWithCreateTail:
+    """``MATCH … WITH … CREATE …`` — a CREATE nested inside the WITH pipeline.
+    Previously the multi-part path hard-rejected any tail updating clause."""
+
+    def test_with_create(self, pg):
+        out = translate("MATCH (p:Person) WITH p CREATE (m:Movie {title: p.name})", mapping=pg)
+        assert "FOR p IN " in out.aql
+        assert "INSERT {title: p.name} INTO" in out.aql
+
+    def test_with_create_return(self, pg):
+        out = translate(
+            "MATCH (p:Person) WITH p CREATE (m:Movie {title: p.name}) RETURN m",
+            mapping=pg,
+        )
+        assert "LET m = FIRST(INSERT {title: p.name} INTO" in out.aql
+        assert "RETURN m" in out.aql
+
+    def test_with_aggregation_then_create(self, pg):
+        # CREATE consuming an aggregate computed in the WITH stage.
+        out = translate(
+            "MATCH (p:Person) WITH count(p) AS c CREATE (m:Movie {released: c})",
+            mapping=pg,
+        )
+        assert "COLLECT AGGREGATE c = COUNT(p)" in out.aql
+        assert "INSERT {released: c} INTO" in out.aql
+
+    def test_with_merge_rejected(self, pg):
+        with pytest.raises(CoreError) as exc:
+            translate("MATCH (p:Person) WITH p MERGE (m:Movie {title: p.name})", mapping=pg)
+        assert exc.value.code == "NOT_IMPLEMENTED"
+
+    def test_with_set_rejected(self, pg):
+        with pytest.raises(CoreError) as exc:
+            translate("MATCH (p:Person) WITH p SET p.born = 1970", mapping=pg)
+        assert exc.value.code == "NOT_IMPLEMENTED"
+
+
 class TestWholeMapCreateParam:
     def test_collection_style_inserts_param_directly(self, pg):
         out = translate("CREATE (n:Person $props) RETURN n", mapping=pg)

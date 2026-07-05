@@ -1466,10 +1466,6 @@ def _translate_multi_part_query(
     if tail is None:
         raise CoreError("RETURN is required in v0 subset", code="UNSUPPORTED")
 
-    # Fail fast on any updating clause (SET/CREATE/DELETE/etc). v0 is read-only.
-    if tail.oC_UpdatingClause():
-        raise CoreError("Updating clauses are not supported in v0", code="UNSUPPORTED")
-
     # Support a tail MATCH after WITH (e.g. MATCH ... WITH ... MATCH ... RETURN ...).
     # This is limited to patterns that start from an already-bound variable.
     tail_reading = tail.oC_ReadingClause() or []
@@ -1492,6 +1488,18 @@ def _translate_multi_part_query(
                 lines=lines,
             )
 
+    # A tail write after WITH (e.g. MATCH … WITH … CREATE …). The WITH pipeline
+    # is already in ``lines`` with ``var_env`` bound; the CREATE nests inside it.
+    tail_updating = tail.oC_UpdatingClause() or []
+    if tail_updating:
+        return _append_multipart_create_tail(
+            tail_updating,
+            tail=tail,
+            lines=lines,
+            var_env=var_env,
+            bind_vars=bind_vars,
+        )
+
     ret = tail.oC_Return()
     if ret is None:
         raise CoreError("RETURN is required in v0 subset", code="UNSUPPORTED")
@@ -1502,6 +1510,85 @@ def _translate_multi_part_query(
         var_env=var_env,
         rel_type_exprs=rel_type_exprs,
     )
+
+    return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
+
+
+def _append_multipart_create_tail(
+    updating_clauses: list[CypherParser.OC_UpdatingClauseContext],
+    *,
+    tail: CypherParser.OC_SinglePartQueryContext,
+    lines: list[str],
+    var_env: dict[str, str],
+    bind_vars: dict[str, Any],
+) -> AqlQuery:
+    """Emit a CREATE (optionally with trailing SET/REMOVE and a RETURN) tail of
+    a multi-part query, nested inside the already-built WITH pipeline.
+
+    Handles ``MATCH … WITH … CREATE …`` (and ``UNWIND … WITH … CREATE …``):
+    the CREATE reuses the pipeline's ``var_env`` so it can reference / connect
+    already-bound variables (``CREATE (a)-[:R]->(b)`` with ``a``/``b`` bound).
+    Non-CREATE writes after WITH (MERGE / SET / DELETE / standalone) still need
+    the standalone builders' append-mode support and are refused with a
+    specific error rather than mis-compiled.
+    """
+    from .writes import _apply_create_writes, _compile_create, _compile_return_for_create
+
+    create_clauses: list[CypherParser.OC_CreateContext] = []
+    set_clauses: list[CypherParser.OC_SetContext] = []
+    remove_clauses: list[Any] = []
+    for uc in updating_clauses:
+        if uc.oC_Create() is not None:
+            create_clauses.append(uc.oC_Create())
+        elif uc.oC_Set() is not None:
+            set_clauses.append(uc.oC_Set())
+        elif uc.oC_Remove() is not None:
+            remove_clauses.append(uc.oC_Remove())
+        else:
+            raise CoreError(
+                "Only CREATE (optionally with SET/REMOVE) is supported as a write after WITH",
+                code="NOT_IMPLEMENTED",
+            )
+
+    if not create_clauses:
+        raise CoreError(
+            "MERGE/SET/DELETE after WITH are not yet supported; only CREATE is",
+            code="NOT_IMPLEMENTED",
+        )
+
+    ret = tail.oC_Return()
+    has_writes = bool(set_clauses or remove_clauses)
+    var_collections: dict[str, str] = {}
+    num_creates = len(create_clauses)
+    for ci, cc in enumerate(create_clauses):
+        _compile_create(
+            cc,
+            resolver=_active_resolver.get(),
+            bind_vars=bind_vars,
+            var_env=var_env,
+            lines=lines,
+            indent="  ",
+            has_return=ret is not None or ci < num_creates - 1 or has_writes,
+            var_collections=var_collections,
+        )
+
+    if has_writes:
+        _apply_create_writes(
+            set_clauses,
+            remove_clauses,
+            var_collections=var_collections,
+            bind_vars=bind_vars,
+            lines=lines,
+            indent="  ",
+        )
+
+    if ret is not None:
+        _compile_return_for_create(
+            ret.oC_ProjectionBody(),
+            lines=lines,
+            bind_vars=bind_vars,
+            indent="  ",
+        )
 
     return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
 
