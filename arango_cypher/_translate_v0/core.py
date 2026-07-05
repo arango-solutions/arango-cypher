@@ -3727,15 +3727,91 @@ def _compile_where(expr_ctx: CypherParser.OC_ExpressionContext, bind_vars: dict[
     return _compile_expression(expr_ctx, bind_vars)
 
 
+def _compile_single_node_subquery_body(
+    *,
+    start_node: CypherParser.OC_NodePatternContext,
+    match_ctx: CypherParser.OC_MatchContext,
+    resolver: MappingResolver,
+    bind_vars: dict[str, Any],
+) -> str:
+    """Compile a *single-node* EXISTS{}/COUNT{} body (no relationship chain).
+
+    Two shapes, distinguished by whether the node re-uses an outer binding:
+
+    * **Correlated** — a bare named node with no label / properties
+      (``exists { (n) WHERE n.prop = 1 }`` where ``n`` is bound in the
+      enclosing query). Existence collapses to the WHERE predicate on the
+      outer node, so we probe a single-element list ``[n]``; the WHERE
+      references the outer variable directly (valid, since the subquery is
+      inline within the outer ``FOR n`` scope).
+    * **Fresh scan** — a labelled node (``exists { (m:Movie) WHERE m.x>1 }``
+      / ``count { (m:Movie) }``). We scan the label's collection with the
+      usual discriminator + inline-property + WHERE filters.
+
+    An anonymous, unlabelled, uncorrelated node (``exists { () }``) has no
+    collection to scan and is refused. Collision-safe bind keys keep the
+    subquery's collection / type binds from clobbering the outer query's.
+    """
+    var, labels = _extract_node_var_and_labels(start_node, default_var="_sq_v")
+    named = var != "_sq_v"
+    has_props = start_node.oC_Properties() is not None
+    where_ctx = match_ctx.oC_Where()
+
+    # Correlated single outer node: existence == the WHERE predicate on it.
+    if named and not labels and not has_props:
+        sub = f"FOR _sq_probe IN [{var}]"
+        if where_ctx is not None:
+            sub += f" FILTER {_compile_where(where_ctx.oC_Expression(), bind_vars)}"
+        return sub + " RETURN 1"
+
+    if not labels:
+        raise CoreError(
+            "EXISTS/COUNT subquery over an unlabeled, uncorrelated node is not supported",
+            code="UNSUPPORTED",
+        )
+
+    primary = _pick_primary_entity_label(labels, resolver)
+    emap = resolver.resolve_entity(_strip_label_backticks(primary))
+    style = emap.get("style")
+    coll_key = _pick_bind_key("@sqNodeColl", bind_vars)
+    bind_vars[coll_key] = emap.get("collectionName")
+    if not isinstance(bind_vars[coll_key], str) or not bind_vars[coll_key]:
+        raise CoreError(f"Invalid entity mapping collectionName for: {primary}", code="INVALID_MAPPING")
+
+    filters: list[str] = []
+    if style == "LABEL":
+        tf = _pick_bind_key("sqNodeTF", bind_vars)
+        tv = _pick_bind_key("sqNodeTV", bind_vars)
+        bind_vars[tf] = emap.get("typeField")
+        bind_vars[tv] = emap.get("typeValue")
+        filters.append(f"{var}[@{tf}] == @{tv}")
+        filters.extend(f.strip("()") for f in _extra_label_filters(var, labels, primary))
+    elif style != "COLLECTION":
+        raise CoreError(f"Unsupported entity mapping style: {style}", code="INVALID_MAPPING")
+    elif len(labels) > 1:
+        _warn_multi_label_collection(labels, primary)
+
+    filters.extend(_compile_node_pattern_properties(start_node, var=var, bind_vars=bind_vars))
+    if where_ctx is not None:
+        filters.append(_compile_where(where_ctx.oC_Expression(), bind_vars))
+
+    sub = f"FOR {var} IN {_aql_collection_ref(coll_key)}"
+    for f in filters:
+        sub += f" FILTER {f}"
+    return sub + " RETURN 1"
+
+
 def _compile_subquery_body(
     sq_ctx: CypherParser.OC_SubqueryBodyContext,
     bind_vars: dict[str, Any],
 ) -> str:
     """Compile the inner SubqueryBody of an EXISTS{} or COUNT{} subquery to AQL.
 
-    The inner query is expected to contain MATCH clauses with a relationship
-    pattern.  We compile it into an AQL subquery expression (the FOR ...
-    RETURN part, without the outer LENGTH wrapper).
+    The inner query contains a MATCH clause; a relationship pattern compiles
+    to a traversal subquery, and a bare single-node pattern (delegated to
+    :func:`_compile_single_node_subquery_body`) compiles to a collection scan
+    or a correlated single-node probe. Either way the result is the ``FOR ...
+    RETURN 1`` body, without the outer ``LENGTH`` wrapper.
     """
     resolver = _active_resolver.get()
     if resolver is None:
@@ -3769,7 +3845,12 @@ def _compile_subquery_body(
     start_node = pe.oC_NodePattern()
     chains = pe.oC_PatternElementChain() or []
     if not chains:
-        raise CoreError("Subquery MATCH requires a relationship pattern", code="UNSUPPORTED")
+        return _compile_single_node_subquery_body(
+            start_node=start_node,
+            match_ctx=match_ctx,
+            resolver=resolver,
+            bind_vars=bind_vars,
+        )
 
     start_var, start_labels = _extract_node_var_and_labels(start_node, default_var="_sq_start")
     chain = chains[0]

@@ -66,3 +66,62 @@ class TestPatternShorthand:
         )
         assert "MATCH (x)" not in out.aql
         assert "'exists{(x)}'" in out.aql
+
+
+class TestSingleNodeSubquery:
+    """Single-node EXISTS{}/COUNT{} bodies (no relationship chain).
+
+    Previously rejected with "Subquery MATCH requires a relationship
+    pattern"; now a labelled node compiles to a collection scan and a bare
+    correlated node to a single-element probe over the outer binding.
+    """
+
+    def test_labeled_exists_scans_collection(self, pg):
+        out = translate(
+            "MATCH (p:Person) WHERE exists { (m:Movie) WHERE m.released > 2000 } RETURN p.name",
+            mapping=pg,
+        )
+        assert "LENGTH(FOR m IN " in out.aql
+        assert "> 0)" in out.aql
+        assert "m.released" in out.aql
+
+    def test_count_labeled_node(self, pg):
+        out = translate(
+            "MATCH (p:Person) RETURN p.name, count { (m:Movie) } AS c",
+            mapping=pg,
+        )
+        assert "c: LENGTH(FOR m IN " in out.aql
+
+    def test_correlated_bare_outer_node(self, pg):
+        # `(p)` re-uses the outer binding → probe a single-element list so the
+        # WHERE can reference the outer variable directly.
+        out = translate(
+            "MATCH (p:Person) WHERE exists { (p) WHERE p.born > 1970 } RETURN p.name",
+            mapping=pg,
+        )
+        assert "FOR _sq_probe IN [p]" in out.aql
+        assert "p.born" in out.aql
+
+    def test_inline_properties(self, pg):
+        out = translate(
+            "MATCH (p:Person) WHERE exists { (m:Movie {released: 1999}) } RETURN p.name",
+            mapping=pg,
+        )
+        assert "m.released == 1999" in out.aql
+
+    def test_two_subqueries_use_distinct_binds(self, pg):
+        # Collision-safe collection binds across sibling subqueries.
+        out = translate(
+            "MATCH (p:Person) RETURN count { (m:Movie) } AS a, "
+            "count { (d:Movie) WHERE d.released > 2000 } AS b",
+            mapping=pg,
+        )
+        assert "@@sqNodeColl" in out.aql
+        assert "@@sqNodeColl2" in out.aql
+
+    def test_anonymous_unlabeled_node_rejected(self, pg):
+        from arango_query_core import CoreError
+
+        with pytest.raises(CoreError) as exc:
+            translate("MATCH (p:Person) WHERE exists { () } RETURN p.name", mapping=pg)
+        assert exc.value.code == "UNSUPPORTED"

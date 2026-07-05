@@ -255,12 +255,32 @@ Fixes landed from this corpus (each with regression tests):
 
 **Ranked remaining backlog (execution errors, ~39; diminishing returns):**
 - **Transpile gaps (higher leverage):** `count{}` / `exists{}` subquery
-  expression syntax (**58** — the single biggest bucket; needs grammar+compiler),
+  expression syntax — *partially closed 2026-07-05*: single-node bodies
+  (`exists { (m:Label) WHERE … }`, `count { (m:Label) }`, and the correlated
+  bare-outer-node `exists { (n) WHERE … }`) now compile (were hard-rejected
+  as "Subquery MATCH requires a relationship pattern"); relationship /
+  multi-hop / trailing-`RETURN` forms already worked. Still open in this
+  bucket: `WITH`+aggregation subquery bodies (`exists { MATCH … WITH …
+  count(*) … RETURN true }`, needs the full subquery pipeline) and untyped
+  `-->` inside a subquery (the general typeless-relationship bucket). Also
   multi-type hops `[:A|B]`, `collect()` nested in `size()`.
 - **Execution-correctness tail:** ~14 remaining ERR-1511 (auto edge/node
   namespace pollution + multi-`WITH` scope), `FOR IN <alias>` (iterating a
   `collect()` result), var-lost-after-COLLECT (double-aggregation scope),
   UNWIND-var-lost, a few `unexpected INTO` syntax cases, `date()`.
+
+#### WP-V1c — Single-node EXISTS/COUNT subquery bodies · *done 2026-07-05*
+
+`_compile_single_node_subquery_body` handles the no-relationship-chain forms
+the subquery compiler previously refused: a labelled node scans its
+collection (`FOR m IN <coll> FILTER <discriminator> <props> <where> RETURN 1`)
+with collision-safe bind keys; a bare named node that re-uses an outer
+binding probes a single-element list (`FOR _sq_probe IN [n] FILTER <where>`)
+so the predicate references the outer variable directly. Anonymous unlabelled
+uncorrelated nodes (`exists { () }`) are refused cleanly. TCK
+`expressions/existentialSubqueries` 6/10 → 9/10; the bigger win is the
+LLM-corpus, where single-node existentials are common. Tests:
+`tests/test_translate_pattern_subquery_shorthand.py::TestSingleNodeSubquery`.
 
 #### WP-V1b — Leading-clause constraint relaxed (TCK mega-lever) · *done 2026-07-01*
 

@@ -1,5 +1,13 @@
 # openCypher TCK coverage — measured
 
+> Headline re-measured 2026-07-05 after single-node `EXISTS`/`COUNT`
+> subquery support (WP-V1c). The per-category tables below were last
+> refreshed 2026-07-01 and are stale for several categories (a full
+> `analyze_coverage.py` re-run now reports materially higher numbers in
+> `expressions/{list,map,null,precedence,…}` and `useCases/countingSubgraphMatches`);
+> treat the live analyzer output as source of truth until the tables are
+> regenerated. The `expressions/existentialSubqueries` line is updated below.
+
 > Measurement date: 2026-07-01 (was 2026-04-20)
 > Methodology: translation-only dry run (`python tests/tck/analyze_coverage.py`). Each scenario's main Cypher query is parsed and translated; scenarios that translate successfully (or correctly reject an error-expected input) count as passable. No DB execution — this is an upper bound on what the runner could achieve with a live ArangoDB.
 
@@ -7,8 +15,12 @@
 
 | Subset | Passable | Pass rate | (was 2026-04-20) |
 |--------|----------|-----------|------------------|
-| **Full TCK** (all 3,861 scenarios) | 2,063 / 3,861 | **53.4 %** | 32.2 % |
-| **Core TCK** (excludes out-of-scope: `expressions/temporal`, `expressions/quantifier`, `clauses/call` — 2,201 scenarios) | 1,902 / 2,201 | **86.4 %** | 54.8 % |
+| **Full TCK** (all 3,861 scenarios) | 2,067 / 3,861 | **53.5 %** | 32.2 % |
+| **Core TCK** (excludes out-of-scope: `expressions/temporal`, `expressions/quantifier`, `clauses/call` — 2,201 scenarios) | 1,906 / 2,201 | **86.6 %** | 54.8 % |
+
+> 2026-07-05: WP-V1c (single-node `EXISTS`/`COUNT` subquery bodies) took
+> `expressions/existentialSubqueries` from 6/10 → **9/10** and moved the
+> headline +3 (Full 2,064→2,067, Core 1,903→1,906).
 
 The jump (Core 54.8 % → 86.4 %) came from relaxing the leading-clause
 constraint: no-MATCH computational pipelines (leading `WITH`-constants / `UNWIND`
@@ -74,7 +86,7 @@ Measured 2026-07-01:
 | expressions/map | 9 / 44 | 20.5 % | Map constructors in various positions. |
 | expressions/literals | 25 / 131 | 19.1 % | Numeric/string literal edge cases. |
 | expressions/null | 8 / 44 | 18.2 % | `null`-in-context handling. |
-| expressions/existentialSubqueries | 1 / 10 | 10.0 % | `EXISTS { }` subquery; partial support today. |
+| expressions/existentialSubqueries | 9 / 10 | 90.0 % | Relationship, multi-hop, trailing-`RETURN`, and (WP-V1c, 2026-07-05) single-node bodies supported; remaining 1 is the `WITH`+aggregation subquery pipeline. |
 | expressions/comparison | 6 / 72 | 8.3 % | Chained comparisons + type-coercion corners. |
 | expressions/conditional | 1 / 13 | 7.7 % | `CASE` expressions in edge-case contexts. |
 | clauses/with-where | 1 / 19 | 5.3 % | `WITH` + `WHERE` filter placement edge cases. |
