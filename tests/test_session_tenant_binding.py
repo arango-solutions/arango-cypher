@@ -170,6 +170,39 @@ def _app():
     return _fresh_service().app
 
 
+@pytest.fixture(autouse=True)
+def _reset_nl_rate_limit():
+    """Reset the process-global NL rate-limit bucket before each test.
+
+    ``_check_nl_rate_limit`` uses a module-level ``_TokenBucket``
+    (``NL_RATE_LIMIT_PER_MINUTE`` = 10/min) keyed by client identity. Every
+    ``TestClient`` here shares the ``testclient`` key, so NL calls made by
+    *earlier* test files in a full-suite run can drain the bucket and make the
+    ``/nl2cypher`` / ``/nl2aql`` routes here return a spurious 429 — masking
+    what these tests actually assert (tenant precedence + Layer-3 wiring).
+
+    ``test_service_hardening`` reloads ``arango_cypher.service`` via
+    ``importlib``, so several ``security`` module copies (each with its own
+    bucket instance and its own ``_TokenBucket`` class) can be live at once.
+    We therefore scan *every* live ``arango_cypher.service*`` module and clear
+    the per-key state of any bucket-shaped attribute — duck-typed, since an
+    ``isinstance`` check against one class would miss buckets built by another
+    reloaded copy. This restores full capacity regardless of which module
+    instance the route under test actually resolved.
+    """
+    for name, mod in list(sys.modules.items()):
+        if mod is None or not name.startswith("arango_cypher.service"):
+            continue
+        for attr in ("_nl_bucket", "_compute_bucket"):
+            bucket = getattr(mod, attr, None)
+            tokens = getattr(bucket, "_tokens", None)
+            last_refill = getattr(bucket, "_last_refill", None)
+            if isinstance(tokens, dict) and isinstance(last_refill, dict):
+                tokens.clear()
+                last_refill.clear()
+    yield
+
+
 # ---------------------------------------------------------------------------
 # /connect — Layer 1 tenant validation
 # ---------------------------------------------------------------------------
@@ -533,6 +566,142 @@ class TestWorkbenchVsTenantUserMode:
         assert not any("ignored" in m and "tenant-A-uuid" in m for m in warning_messages), (
             f"unexpected override warning when body == session: {warning_messages!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# /nl2cypher — Layer 3 (Cypher AST tenant injection) route wiring (MT-3b)
+# ---------------------------------------------------------------------------
+
+
+class TestNl2CypherLayer3Injection:
+    """MT-3b: ``/nl2cypher`` runs Layer 3 on the generated Cypher.
+
+    Verifies the route wiring (not the core rewriter, which is covered by
+    ``test_tenant_ast_cypher.py``): a tenant-bound session with a mapping
+    gets the bind-var predicate injected and surfaced via ``tenantRewrites``;
+    a literal tenant predicate is refused with a structured HTTP 403.
+    """
+
+    def _mapping(self) -> dict[str, Any]:
+        return {
+            "conceptual_schema": {
+                "entities": [
+                    {"name": "Tenant", "properties": []},
+                    {"name": "Employee", "properties": [{"name": "name"}]},
+                ],
+                "relationships": [],
+            },
+            "physical_mapping": {
+                "entities": {
+                    "Tenant": {"style": "COLLECTION", "collectionName": "Tenant"},
+                    "Employee": {
+                        "style": "COLLECTION",
+                        "collectionName": "Employee",
+                        "tenantScope": {"role": "tenant_scoped", "tenantField": "TENANT_HEX_ID"},
+                    },
+                },
+                "relationships": {},
+            },
+            "metadata": {},
+        }
+
+    def _connect_bound(self) -> str:
+        fake_db = _FakeDb(has_tenant_collection=False)
+        with _patched_arango_client(_make_fake_client(fake_db)):
+            client = TestClient(_app())
+            resp = client.post(
+                "/connect",
+                json={
+                    "url": "http://example.invalid",
+                    "database": "test",
+                    "username": "root",
+                    "password": "",
+                    "tenantId": "tenant-A-uuid",
+                },
+            )
+        assert resp.status_code == 200, resp.text
+        return resp.json()["token"]
+
+    def _stub_nl_to_cypher(self, monkeypatch: pytest.MonkeyPatch, cypher_out: str) -> None:
+        from arango_cypher import nl2cypher as nl_pkg
+        from arango_cypher.nl2cypher import _core as nl_core
+
+        class _Result:
+            cypher = cypher_out
+            explanation = ""
+            confidence = 1.0
+            method = "stub"
+            prompt_tokens = 0
+            completion_tokens = 0
+            total_tokens = 0
+            cached_tokens = 0
+            retries = 0
+            advisories: list[Any] = []
+
+        def _fake(*_args, **_kwargs):
+            return _Result()
+
+        monkeypatch.setattr(nl_pkg, "nl_to_cypher", _fake, raising=True)
+        monkeypatch.setattr(nl_core, "nl_to_cypher", _fake, raising=False)
+
+    def test_scoped_pattern_rewritten_and_surfaced(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("ARANGO_CYPHER_WORKBENCH", raising=False)
+        token = self._connect_bound()
+        self._stub_nl_to_cypher(monkeypatch, "MATCH (e:Employee) RETURN e")
+
+        client = TestClient(_app())
+        resp = client.post(
+            "/nl2cypher",
+            headers={"X-Arango-Session": token},
+            json={"question": "list employees", "use_llm": False, "mapping": self._mapping()},
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert "TENANT_HEX_ID: $tenantId" in body["cypher"]
+        assert body["tenantRewrites"], "expected a non-empty tenantRewrites list"
+        _fresh_service()._sessions.pop(token, None)
+
+    def test_no_mapping_skips_layer3(self, monkeypatch: pytest.MonkeyPatch):
+        """Without a mapping, Layer 3 is skipped — the Cypher passes through
+        unchanged (Layer 5 remains the fail-closed boundary at execute)."""
+        monkeypatch.delenv("ARANGO_CYPHER_WORKBENCH", raising=False)
+        token = self._connect_bound()
+        self._stub_nl_to_cypher(monkeypatch, "MATCH (e:Employee) RETURN e")
+
+        client = TestClient(_app())
+        resp = client.post(
+            "/nl2cypher",
+            headers={"X-Arango-Session": token},
+            json={"question": "list employees", "use_llm": False},
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["cypher"] == "MATCH (e:Employee) RETURN e"
+        assert body["tenantRewrites"] == []
+        _fresh_service()._sessions.pop(token, None)
+
+    def test_literal_tenant_predicate_refused_403(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("ARANGO_CYPHER_WORKBENCH", raising=False)
+        token = self._connect_bound()
+        self._stub_nl_to_cypher(
+            monkeypatch,
+            "MATCH (e:Employee {TENANT_HEX_ID: 'tenant-B-uuid'}) RETURN e",
+        )
+
+        client = TestClient(_app())
+        resp = client.post(
+            "/nl2cypher",
+            headers={"X-Arango-Session": token},
+            json={"question": "list rival employees", "use_llm": False, "mapping": self._mapping()},
+        )
+
+        assert resp.status_code == 403, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error"] == "tenant_scope_violation"
+        assert detail["code"] == "LITERAL_TENANT_PREDICATE"
+        _fresh_service()._sessions.pop(token, None)
 
 
 # ---------------------------------------------------------------------------

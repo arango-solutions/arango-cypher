@@ -19,7 +19,11 @@ from ..observability import (
     log_endpoint_timing,
     log_llm_call,
 )
-from ..safe_exec import apply_layer4_rewrite
+from ..safe_exec import (
+    TenantScopeRewriteRejection,
+    apply_layer3_rewrite,
+    apply_layer4_rewrite,
+)
 from ..security import (
     _COLLECTION_NAME_RE,
     _check_nl_rate_limit,
@@ -162,6 +166,49 @@ def nl2cypher_endpoint(
     )
     elapsed_ms = round((time.perf_counter() - t0) * 1000, 1)
 
+    # Layer 3 (Wave 8a / MT-3) — Cypher AST tenant-injection. For a
+    # tenant-bound session with a mapping, rewrite the generated Cypher so
+    # every tenant-scoped node pattern carries a bind-variable tenant
+    # predicate before it is returned (and later transpiled + executed, where
+    # Layer 4/5 re-enforce). Skipped for workbench/unbound sessions and when
+    # no mapping is supplied (Layer 5 remains the fail-closed boundary).
+    layer3_cypher = result.cypher
+    layer3_changes: list[str] = []
+    rewrite_session = auth_session or bound_session
+    if (
+        rewrite_session is not None
+        and getattr(rewrite_session, "tenant_id", None)
+        and result.cypher
+        and req.mapping
+    ):
+        try:
+            layer3_cypher, layer3_changes = apply_layer3_rewrite(
+                cypher=result.cypher,
+                mapping_dict=req.mapping,
+                session=rewrite_session,
+            )
+        except TenantScopeRewriteRejection as exc:
+            # Literal tenant predicate / unknown label → fail-closed. Same
+            # 403 shape the AQL path uses for a tenant-safety refusal.
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "tenant_scope_violation",
+                    "code": exc.code,
+                    "message": exc.message,
+                    "where": exc.where,
+                },
+            ) from exc
+        except TenantScopeViolation as exc:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "tenant_scope_violation",
+                    "code": exc.code,
+                    "message": exc.message,
+                },
+            ) from exc
+
     provider, model = current_llm_provider_and_model()
     log_llm_call(
         endpoint="/nl2cypher",
@@ -180,13 +227,14 @@ def nl2cypher_endpoint(
         elapsed_ms,
         method=result.method,
         confidence=result.confidence,
-        cypher_len=len(result.cypher or ""),
+        cypher_len=len(layer3_cypher or ""),
         question_len=len(req.question or ""),
         used_entity_resolution=bool(req.use_entity_resolution and db is not None),
         retries=result.retries or 0,
+        tenant_rewrites=len(layer3_changes),
     )
     return {
-        "cypher": result.cypher,
+        "cypher": layer3_cypher,
         "explanation": result.explanation,
         "confidence": result.confidence,
         "method": result.method,
@@ -201,6 +249,9 @@ def nl2cypher_endpoint(
         # one-click creation via POST /schema/index/create. ``getattr`` keeps
         # older/mock result objects (and any non-LLM path) safe.
         "advisories": getattr(result, "advisories", None) or [],
+        # Layer 3 (MT-3) tenant-scope injections applied to the Cypher, one
+        # human-readable line per rewrite, for the UI annotation strip.
+        "tenantRewrites": layer3_changes,
     }
 
 

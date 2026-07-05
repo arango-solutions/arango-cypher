@@ -29,12 +29,21 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from arango_query_core import CoreError
 from arango_query_core import safe_execute as _core_safe_execute
 
+from ..nl2cypher.tenant_ast_cypher import (
+    TenantScopeRewriteIncomplete,
+    TenantScopeRewriteRejection,
+)
+from ..nl2cypher.tenant_ast_cypher import (
+    inject_tenant_scope as _inject_tenant_scope_cypher,
+)
 from ..nl2cypher.tenant_scope import (
     TenantScopeManifest,
     analyze_tenant_scope,
 )
+from ..parser import parse_cypher
 from ..tenant_ast_aql import (
     AqlRewriteError,
     inject_tenant_scope,
@@ -238,8 +247,76 @@ def apply_layer4_rewrite(
     )
 
 
+def apply_layer3_rewrite(
+    *,
+    cypher: str,
+    mapping_dict: dict[str, Any] | None,
+    session: _Session,
+) -> tuple[str, list[str]]:
+    """Layer 3 (Cypher AST tenant-injection) wrapper for routes that
+    produce Cypher (currently ``/nl2cypher``).
+
+    Returns ``(rewritten_cypher, changes)``. Mirrors
+    :func:`apply_layer4_rewrite` for the AQL path:
+
+    * **Tenant-unbound sessions** (workbench / single-tenant) bypass the
+      rewriter — there is no session tenant to scope against.
+    * **Tenant-bound, no mapping** — skip (return the input unchanged).
+      The generated Cypher will be transpiled and submitted via
+      ``/execute``, where Layer 5 refuses fail-closed if it actually
+      leaks. This matches the ``/nl2aql`` Layer-4 gating, which also
+      skips when the request carries no mapping.
+    * **Unparseable Cypher** — return unchanged; the transpiler will
+      surface the parse error to the caller.
+    * **:class:`TenantScopeRewriteIncomplete`** (traversal-path /
+      multi-label cases MT-3a defers) — fall back to the original Cypher
+      and log; Layer 5 is the security boundary and still enforces.
+    * **:class:`TenantScopeRewriteRejection`** (literal tenant predicate,
+      unknown label) — propagates to the route, which surfaces it as an
+      HTTP 403 (fail-closed).
+
+    The tree's token offsets are relative to the *normalized* source
+    (``parse_cypher`` may insert an implicit ``MATCH`` into
+    ``exists{(…)}`` shorthand), so the rewriter is fed
+    ``ParseResult.normalized`` rather than the caller's original text.
+    """
+    tenant_id = getattr(session, "tenant_id", None)
+    tenant_key = getattr(session, "tenant_key", None) or tenant_id or ""
+    if not tenant_id or not cypher:
+        return cypher, []
+
+    manifest, _sharding, _coll_to_entity = _build_validator_inputs(mapping_dict)
+    if manifest is None:
+        # No mapping in tenant-bound mode. Skip Layer 3 (best-effort
+        # rewrite) — Layer 5 enforces fail-closed at execute time.
+        return cypher, []
+
+    try:
+        parsed = parse_cypher(cypher)
+    except CoreError:
+        return cypher, []
+
+    try:
+        return _inject_tenant_scope_cypher(
+            cypher=parsed.normalized,
+            parse_tree=parsed.tree,
+            manifest=manifest,
+            tenant_id=tenant_id,
+            tenant_key=tenant_key,
+        )
+    except TenantScopeRewriteIncomplete as exc:
+        logger.info(
+            "Layer 3 (Cypher AST) rewrite incomplete for %r; falling back to "
+            "original Cypher (Layer 5 enforces at execute)",
+            exc.label,
+        )
+        return cypher, []
+
+
 __all__ = [
     "AqlRewriteError",
+    "TenantScopeRewriteRejection",
+    "apply_layer3_rewrite",
     "apply_layer4_rewrite",
     "safe_execute_aql",
 ]

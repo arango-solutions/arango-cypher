@@ -16,6 +16,10 @@ from ._antlr.CypherParser import CypherParser
 @dataclass(frozen=True)
 class ParseResult:
     tree: Any
+    # The (possibly normalized) source the tree was actually built from. Token
+    # offsets in ``tree`` are relative to this string, not the caller's original
+    # — offset-based rewriters (e.g. Layer-3 tenant injection) must use it.
+    normalized: str = ""
 
 
 # ``EXISTS { (pattern) }`` / ``COUNT { (pattern) }`` — the pattern-shorthand form
@@ -89,4 +93,4 @@ def parse_cypher(cypher: str) -> ParseResult:
     parser.addErrorListener(_RaisingErrorListener())
 
     tree = parser.oC_Cypher()
-    return ParseResult(tree=tree)
+    return ParseResult(tree=tree, normalized=cypher)
