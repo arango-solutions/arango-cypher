@@ -70,7 +70,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
+from threading import Lock
 from typing import Any
 from uuid import uuid4
 
@@ -113,6 +117,207 @@ class TenantScopeViolation(Exception):
         self.message = message
         self.aql_digest = aql_digest
         self.plan_digest = plan_digest
+
+
+# ---------------------------------------------------------------------------
+# MT-6 — plan-shape certification LRU (Layer 5 performance)
+# ---------------------------------------------------------------------------
+#
+# The EXPLAIN round-trip + plan walk is the dominant cost of Layer 5
+# (PRD §9: "One EXPLAIN round-trip per execute. Typical: 5–20 ms.").
+# It is amortisable because the structural pass/fail decision depends
+# ONLY on the query text and the schema — NOT on the tenant's bind-var
+# *value*: :func:`validate_plan` EXPLAINs with a random per-call
+# sentinel substituted for ``@tenantId``, so the resulting plan shape
+# (and therefore whether the walk accepts it) is identical for every
+# session running the same AQL against the same schema. We can thus
+# cache "this (aql, schema) shape is structurally safe" and reuse it
+# across sessions and across bind-var values.
+#
+# Safety invariants (why this cannot leak):
+#   * The cache key fingerprints the AQL text **and** the full schema
+#     inputs the walker reads (manifest roles / denorm fields /
+#     tenant_entity, sharding profile, collection→entity map). Any
+#     schema change yields a different key — a stale certification is
+#     never consulted (PRD §9: "TTL bounded by mapping fingerprint so a
+#     schema change invalidates certifications").
+#   * Only structural PASSes are cached. Violations and transient
+#     EXPLAIN failures are never cached (a transient DB error must not
+#     poison the shape; a real violation is cheap to re-derive).
+#   * The per-call bind-var checks (session has a tenant; a present
+#     ``@tenantId`` bind equals the session tenant) ALWAYS run, even on
+#     a cache hit — the cache only skips the EXPLAIN + structural walk,
+#     never the session-identity gate.
+#   * Every pass is still logged (with the certified plan digest and a
+#     ``cache=hit`` marker) so the audit trail from PRD §9 is intact.
+#
+# The cache is thread-safe (FastAPI runs sync routes on a threadpool)
+# and bounded (LRU eviction). ``TENANT_PLAN_CACHE_SIZE=0`` disables it.
+
+
+@dataclass(frozen=True)
+class _CachedCertification:
+    """A cached Layer-5 structural PASS for one (aql, schema) shape.
+
+    ``touches_tenant_data`` is memoised so the per-call bind-var gate
+    can run on a cache hit without re-walking the plan. ``plan_digest``
+    is the digest of the plan that was certified, echoed into the
+    ``TENANT_SCOPE_OK`` audit line on subsequent hits.
+    """
+
+    touches_tenant_data: bool
+    plan_digest: str
+
+
+class _PlanCertificationCache:
+    """Bounded, thread-safe LRU of structural Layer-5 certifications.
+
+    Keyed by an ``(aql_hash, schema_hash)`` digest (see
+    :func:`_plan_cache_key`). ``maxsize <= 0`` disables caching
+    entirely (env kill-switch). ``ttl_seconds > 0`` adds a wall-clock
+    freshness bound on top of the fingerprint-based invalidation
+    (defence in depth against optimiser plan drift on an unchanged
+    schema); ``0`` relies solely on the schema fingerprint in the key.
+    """
+
+    def __init__(self, *, maxsize: int, ttl_seconds: float) -> None:
+        self._maxsize = maxsize
+        self._ttl = ttl_seconds
+        self._data: OrderedDict[str, tuple[float, _CachedCertification]] = OrderedDict()
+        self._lock = Lock()
+        self._hits = 0
+        self._misses = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self._maxsize > 0
+
+    def get(self, key: str) -> _CachedCertification | None:
+        if not self.enabled:
+            return None
+        with self._lock:
+            item = self._data.get(key)
+            if item is None:
+                self._misses += 1
+                return None
+            ts, cert = item
+            if self._ttl > 0 and (time.monotonic() - ts) > self._ttl:
+                # Expired — treat as a miss and drop the stale entry.
+                del self._data[key]
+                self._misses += 1
+                return None
+            self._data.move_to_end(key)
+            self._hits += 1
+            return cert
+
+    def put(self, key: str, cert: _CachedCertification) -> None:
+        if not self.enabled:
+            return
+        with self._lock:
+            self._data[key] = (time.monotonic(), cert)
+            self._data.move_to_end(key)
+            while len(self._data) > self._maxsize:
+                self._data.popitem(last=False)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+            self._hits = 0
+            self._misses = 0
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            total = self._hits + self._misses
+            return {
+                "enabled": self.enabled,
+                "size": len(self._data),
+                "maxsize": self._maxsize,
+                "ttl_seconds": self._ttl,
+                "hits": self._hits,
+                "misses": self._misses,
+                "hit_rate": (self._hits / total) if total else 0.0,
+            }
+
+
+def _cache_maxsize_from_env() -> int:
+    try:
+        return int(os.getenv("TENANT_PLAN_CACHE_SIZE", "512"))
+    except ValueError:
+        return 512
+
+
+def _cache_ttl_from_env() -> float:
+    try:
+        return max(0.0, float(os.getenv("TENANT_PLAN_CACHE_TTL_SECONDS", "0")))
+    except ValueError:
+        return 0.0
+
+
+_PLAN_CACHE = _PlanCertificationCache(
+    maxsize=_cache_maxsize_from_env(),
+    ttl_seconds=_cache_ttl_from_env(),
+)
+
+
+def plan_cache_stats() -> dict[str, Any]:
+    """Return Layer-5 plan-cache counters (PRD §9 hit-rate reporting)."""
+    return _PLAN_CACHE.stats()
+
+
+def reset_plan_cache() -> None:
+    """Clear the plan-cache and its counters.
+
+    Intended for tests and for an operator-triggered schema-refresh
+    hook; production correctness never depends on it because the schema
+    fingerprint is part of the cache key.
+    """
+    _PLAN_CACHE.clear()
+
+
+def _schema_fingerprint(
+    manifest: TenantScopeManifest,
+    sharding_profile: dict[str, Any] | None,
+    collection_to_entity: dict[str, str] | None,
+) -> str:
+    """Canonical digest of every schema input the plan walker reads.
+
+    Captures the manifest fields that drive per-collection role /
+    tenant-field decisions (``tenant_entity`` and each entity's role,
+    denorm field, reachability and scoping path), the sharding profile
+    (layout kinds + smartgraph attributes), and the collection→entity
+    map. Anything that could change a structural pass/fail decision is
+    in here, so a differing schema always yields a differing key.
+    """
+    entities = {}
+    for name, scope in manifest.entities.items():
+        role = getattr(scope, "role", None)
+        entities[name] = {
+            "role": role.value if isinstance(role, EntityTenantRole) else str(role),
+            "denorm_field": getattr(scope, "denorm_field", None),
+            "reachable_from_tenant": getattr(scope, "reachable_from_tenant", None),
+            "scoping_path": list(getattr(scope, "scoping_path", ()) or ()),
+        }
+    canonical = json.dumps(
+        {
+            "tenant_entity": manifest.tenant_entity,
+            "entities": entities,
+            "sharding_profile": sharding_profile or {},
+            "collection_to_entity": collection_to_entity or {},
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _plan_cache_key(
+    aql: str,
+    manifest: TenantScopeManifest,
+    sharding_profile: dict[str, Any] | None,
+    collection_to_entity: dict[str, str] | None,
+) -> str:
+    payload = aql + "\0" + _schema_fingerprint(manifest, sharding_profile, collection_to_entity)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +388,28 @@ def validate_plan(
     # (unit tests) skip EXPLAIN entirely and so have no sentinel — the
     # walker falls back to accepting only ``parameter``-typed
     # ``@tenantId`` nodes, exactly as before.
+    # MT-6 — plan-shape cache. When the same (aql, schema) shape has
+    # already been certified we skip the EXPLAIN + structural walk, but
+    # still run the per-call bind-var gate and emit the audit line. The
+    # cache is only consulted on the real-EXPLAIN path; ``plan_override``
+    # (unit tests) always walks the supplied plan so tests stay
+    # deterministic and never populate the cache.
+    cache_key: str | None = None
+    if plan_override is None:
+        cache_key = _plan_cache_key(aql, manifest, sharding_profile, collection_to_entity)
+        cached = _PLAN_CACHE.get(cache_key)
+        if cached is not None:
+            digests = _digests(aql=aql, bind_vars=bind_vars, plan=None)
+            digests["plan_digest"] = cached.plan_digest
+            _enforce_tenant_bindvars(
+                touches_tenant_data=cached.touches_tenant_data,
+                bind_vars=bind_vars,
+                session=session,
+                digests=digests,
+            )
+            _log_pass(session=session, cached=True, **digests)
+            return
+
     tenant_sentinel: str | None = None
     if plan_override is not None:
         plan = plan_override
@@ -228,42 +455,73 @@ def validate_plan(
 
     digests = _digests(aql=aql, bind_vars=bind_vars, plan=plan)
 
-    if touches_tenant_data:
-        session_tenant = getattr(session, "tenant_id", None)
-        if session_tenant is None:
-            violation = TenantScopeViolation(
-                code="NO_SESSION_TENANT",
-                message=(
-                    "session has no tenant_id; cannot validate tenant-scoped query under tenant-user mode"
-                ),
-                **digests,
-            )
-            _log_violation(violation, session=session)
-            raise violation
-
-        # Only a *present* tenantId bind that disagrees with the session
-        # is a mismatch. An absent tenantId (the query never references
-        # ``@tenantId``) is not a mismatch — it means the query carries
-        # no tenant predicate, which the per-node walk below refuses
-        # precisely (UNCONSTRAINED_COLLECTION_SCAN) or accepts for a
-        # storage-isolated disjoint smartgraph. Layer 6 guarantees that
-        # when ``tenantId`` *is* present it equals the session value, so
-        # this branch is defence in depth against an upstream that
-        # bypasses the session-spread.
-        if "tenantId" in bind_vars and bind_vars["tenantId"] != session_tenant:
-            bv_tenant = bind_vars["tenantId"]
-            violation = TenantScopeViolation(
-                code="TENANT_BIND_MISMATCH",
-                message=(
-                    f"bind_vars['tenantId']={bv_tenant!r} does not match session.tenant_id={session_tenant!r}"
-                ),
-                **digests,
-            )
-            _log_violation(violation, session=session)
-            raise violation
+    _enforce_tenant_bindvars(
+        touches_tenant_data=touches_tenant_data,
+        bind_vars=bind_vars,
+        session=session,
+        digests=digests,
+    )
 
     walker.walk(nodes, digests=digests, session=session)
+
+    # Certification succeeded — memoise the structural verdict for this
+    # (aql, schema) shape so future calls skip the EXPLAIN + walk. Only
+    # reached on the real-EXPLAIN path (``cache_key`` is ``None`` for
+    # ``plan_override`` callers).
+    if cache_key is not None:
+        _PLAN_CACHE.put(
+            cache_key,
+            _CachedCertification(
+                touches_tenant_data=touches_tenant_data,
+                plan_digest=digests["plan_digest"],
+            ),
+        )
+
     _log_pass(session=session, **digests)
+
+
+def _enforce_tenant_bindvars(
+    *,
+    touches_tenant_data: bool,
+    bind_vars: dict[str, Any],
+    session: Any,
+    digests: dict[str, str],
+) -> None:
+    """Per-call tenant-identity gate (runs on every validate, incl. cache hits).
+
+    Refuses a tenant-touching query when the session has no bound tenant
+    (``NO_SESSION_TENANT``) or when a *present* ``@tenantId`` bind
+    disagrees with the session tenant (``TENANT_BIND_MISMATCH``). An
+    absent ``@tenantId`` bind is not a mismatch — the per-node walk (or
+    the cached structural verdict) is what decides those shapes. This is
+    intentionally independent of the plan so it stays correct behind the
+    MT-6 plan-shape cache, which skips the walk but never this gate.
+    """
+    if not touches_tenant_data:
+        return
+    session_tenant = getattr(session, "tenant_id", None)
+    if session_tenant is None:
+        violation = TenantScopeViolation(
+            code="NO_SESSION_TENANT",
+            message=(
+                "session has no tenant_id; cannot validate tenant-scoped query under tenant-user mode"
+            ),
+            **digests,
+        )
+        _log_violation(violation, session=session)
+        raise violation
+
+    if "tenantId" in bind_vars and bind_vars["tenantId"] != session_tenant:
+        bv_tenant = bind_vars["tenantId"]
+        violation = TenantScopeViolation(
+            code="TENANT_BIND_MISMATCH",
+            message=(
+                f"bind_vars['tenantId']={bv_tenant!r} does not match session.tenant_id={session_tenant!r}"
+            ),
+            **digests,
+        )
+        _log_violation(violation, session=session)
+        raise violation
 
 
 # ---------------------------------------------------------------------------
@@ -1108,14 +1366,16 @@ def _log_pass(
     session: Any,
     aql_digest: str,
     plan_digest: str,
+    cached: bool = False,
 ) -> None:
     token_prefix = _session_token_prefix(session)
     logger.info(
-        "TENANT_SCOPE_OK session=%s tenant=%s aql_digest=%s plan_digest=%s",
+        "TENANT_SCOPE_OK session=%s tenant=%s aql_digest=%s plan_digest=%s cache=%s",
         token_prefix,
         getattr(session, "tenant_id", None),
         aql_digest[:16],
         plan_digest[:16],
+        "hit" if cached else "miss",
     )
 
 
@@ -1126,5 +1386,7 @@ def _session_token_prefix(session: Any) -> str:
 
 __all__ = [
     "TenantScopeViolation",
+    "plan_cache_stats",
+    "reset_plan_cache",
     "validate_plan",
 ]
