@@ -255,15 +255,17 @@ Fixes landed from this corpus (each with regression tests):
 
 **Ranked remaining backlog (execution errors, ~39; diminishing returns):**
 - **Transpile gaps (higher leverage):** `count{}` / `exists{}` subquery
-  expression syntax — *partially closed 2026-07-05*: single-node bodies
-  (`exists { (m:Label) WHERE … }`, `count { (m:Label) }`, and the correlated
-  bare-outer-node `exists { (n) WHERE … }`) now compile (were hard-rejected
-  as "Subquery MATCH requires a relationship pattern"); relationship /
-  multi-hop / trailing-`RETURN` forms already worked. Still open in this
-  bucket: `WITH`+aggregation subquery bodies (`exists { MATCH … WITH …
-  count(*) … RETURN true }`, needs the full subquery pipeline) and untyped
-  `-->` inside a subquery (the general typeless-relationship bucket). Also
-  multi-type hops `[:A|B]`, `collect()` nested in `size()`.
+  expression syntax — *closed 2026-07-05* for the common shapes: single-node
+  bodies (`exists { (m:Label) WHERE … }`, `count { (m:Label) }`, correlated
+  bare-outer-node `exists { (n) WHERE … }`), relationship / multi-hop /
+  trailing-`RETURN` forms, and now `WITH`+aggregation counting existentials
+  (`exists { MATCH (n)-->(m) WITH n, count(*) AS c WHERE c > 3 RETURN true }`,
+  WP-V1d — required an ANTLR grammar change + parser regen). TCK
+  `expressions/existentialSubqueries` is 10/10. Still open here: non-count
+  aggregates / grouping by subquery-local vars / multi-clause `WITH` chains
+  inside a subquery (refused with a clear error rather than mis-compiled), and
+  untyped `-->` inside a subquery (the general typeless-relationship bucket).
+  Also multi-type hops `[:A|B]`, `collect()` nested in `size()`.
 - **Execution-correctness tail:** ~14 remaining ERR-1511 (auto edge/node
   namespace pollution + multi-`WITH` scope), `FOR IN <alias>` (iterating a
   `collect()` result), var-lost-after-COLLECT (double-aggregation scope),
@@ -281,6 +283,27 @@ uncorrelated nodes (`exists { () }`) are refused cleanly. TCK
 `expressions/existentialSubqueries` 6/10 → 9/10; the bigger win is the
 LLM-corpus, where single-node existentials are common. Tests:
 `tests/test_translate_pattern_subquery_shorthand.py::TestSingleNodeSubquery`.
+
+#### WP-V1d — WITH+aggregation counting existentials · *done 2026-07-05*
+
+The `oC_SubqueryBody` grammar rule only accepted `( ReadingClause )+ Return?`,
+so `exists { MATCH … WITH … count(*) … RETURN true }` failed at **parse**
+time ("no viable alternative"). Extended the rule to
+`( ( oC_ReadingClause | oC_With ) SP? )+ ( oC_Return )?` and regenerated the
+ANTLR parser (`grammar/Cypher.g4` → `CypherParser.py` / `Cypher.interp`, via
+ANTLR 4.13.2 in a throwaway `eclipse-temurin` container — lexer byte-identical;
+parser diff confined to the subquery rule + ATN). `UpdatingClause` is
+deliberately *not* accepted, so the openCypher "update-in-existential is an
+error" scenario stays a correct parse-rejection.
+`_compile_subquery_with_aggregation` lowers the counting shape to a fresh
+traversal + `COLLECT WITH COUNT INTO <alias>` + optional post-COLLECT HAVING
+`FILTER`; the target is a fresh loop variable (it's enumerated, not
+correlated). Unsupported `WITH` shapes (DISTINCT, ORDER BY/SKIP/LIMIT,
+non-`count(*)` aggregates, grouping by subquery-local vars, multiple `WITH`s)
+are refused with `UNSUPPORTED` rather than mis-compiled. TCK
+`expressions/existentialSubqueries` 9/10 → **10/10** (Full 2067→2068, Core
+1906→1907). Tests:
+`tests/test_translate_pattern_subquery_shorthand.py::TestAggregationSubquery`.
 
 #### WP-V1b — Leading-clause constraint relaxed (TCK mega-lever) · *done 2026-07-01*
 

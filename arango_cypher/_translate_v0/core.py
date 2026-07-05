@@ -3801,6 +3801,82 @@ def _compile_single_node_subquery_body(
     return sub + " RETURN 1"
 
 
+def _compile_subquery_with_aggregation(
+    *,
+    with_clauses: list[CypherParser.OC_WithContext],
+    sub_prefix: str,
+    start_var: str,
+    bind_vars: dict[str, Any],
+) -> str:
+    """Lower a ``MATCH … WITH … count(*) … [WHERE having]`` subquery body.
+
+    Handles the common counting-existential shape (openCypher TCK
+    ``ExistentialSubquery2`` scenario 2, and typical LLM output):
+
+        exists { MATCH (n)-->(m) WITH n, count(*) AS c WHERE c > 3 RETURN true }
+
+    The traversal ``sub_prefix`` (``FOR _sq_v, _sq_e IN … RETURN``-less) is
+    followed by ``COLLECT WITH COUNT INTO <alias>``, an optional post-COLLECT
+    ``FILTER`` (the WITH's ``WHERE``, i.e. a HAVING), and ``RETURN 1``. Because
+    the subquery is already scoped to the single correlated ``start_var``,
+    grouping by that variable is one group, so a keyless ``COLLECT WITH COUNT``
+    is exactly the per-``start_var`` count; the alias is used verbatim as the
+    AQL COLLECT variable so the HAVING predicate needs no rewriting.
+
+    Only this shape is supported. Anything else — multiple WITHs, ``DISTINCT``,
+    ``ORDER BY``/``SKIP``/``LIMIT``, non-``count(*)`` aggregates, grouping keys
+    other than the correlated ``start_var`` — is refused (rather than emitting
+    silently-wrong AQL) so a fuller subquery pipeline can be added later.
+    """
+    if len(with_clauses) != 1:
+        raise CoreError(
+            "EXISTS/COUNT subquery supports a single WITH clause",
+            code="UNSUPPORTED",
+        )
+    pb = with_clauses[0].oC_ProjectionBody()
+    if pb is None:
+        raise CoreError("Malformed WITH in subquery", code="UNSUPPORTED")
+    if pb.DISTINCT() is not None:
+        raise CoreError("DISTINCT in a subquery WITH is not supported", code="UNSUPPORTED")
+    if pb.oC_Order() is not None or pb.oC_Skip() is not None or pb.oC_Limit() is not None:
+        raise CoreError("ORDER BY/SKIP/LIMIT in a subquery WITH is not supported", code="UNSUPPORTED")
+
+    items_ctx = pb.oC_ProjectionItems()
+    items = (items_ctx.oC_ProjectionItem() if items_ctx is not None else None) or []
+    if not items:
+        # `WITH *` has no oC_ProjectionItem children.
+        raise CoreError("Subquery WITH must project count(*)", code="UNSUPPORTED")
+
+    count_alias: str | None = None
+    for it in items:
+        expr_ctx = it.oC_Expression()
+        alias_ctx = it.oC_Variable()
+        expr_text = expr_ctx.getText() if expr_ctx is not None else ""
+        norm = expr_text.replace(" ", "").lower()
+        if norm == "count(*)":
+            if alias_ctx is None:
+                raise CoreError("count(*) in a subquery WITH requires an alias", code="UNSUPPORTED")
+            count_alias = alias_ctx.getText().strip()
+        elif expr_text.strip() == start_var and alias_ctx is None:
+            # Grouping by the correlated outer node — one group; no-op.
+            continue
+        else:
+            raise CoreError(
+                f"Unsupported WITH item in subquery: {expr_text!r} "
+                "(only count(*) and grouping by the correlated node are supported)",
+                code="UNSUPPORTED",
+            )
+
+    if count_alias is None:
+        raise CoreError("Subquery WITH must aggregate count(*)", code="UNSUPPORTED")
+
+    aql = f"{sub_prefix} COLLECT WITH COUNT INTO {count_alias}"
+    having_ctx = with_clauses[0].oC_Where()
+    if having_ctx is not None:
+        aql += f" FILTER {_compile_where(having_ctx.oC_Expression(), bind_vars)}"
+    return aql + " RETURN 1"
+
+
 def _compile_subquery_body(
     sq_ctx: CypherParser.OC_SubqueryBodyContext,
     bind_vars: dict[str, Any],
@@ -3810,8 +3886,9 @@ def _compile_subquery_body(
     The inner query contains a MATCH clause; a relationship pattern compiles
     to a traversal subquery, and a bare single-node pattern (delegated to
     :func:`_compile_single_node_subquery_body`) compiles to a collection scan
-    or a correlated single-node probe. Either way the result is the ``FOR ...
-    RETURN 1`` body, without the outer ``LENGTH`` wrapper.
+    or a correlated single-node probe. A ``MATCH … WITH count(*) …`` body is
+    lowered by :func:`_compile_subquery_with_aggregation`. Either way the
+    result is the ``FOR … RETURN 1`` body, without the outer ``LENGTH`` wrapper.
     """
     resolver = _active_resolver.get()
     if resolver is None:
@@ -3842,9 +3919,17 @@ def _compile_subquery_body(
         raise CoreError("Named patterns not supported in subquery", code="NOT_IMPLEMENTED")
     pe = anon.oC_PatternElement()
 
+    with_clauses = sq_ctx.oC_With() or []
+    has_with = bool(with_clauses)
+
     start_node = pe.oC_NodePattern()
     chains = pe.oC_PatternElementChain() or []
     if not chains:
+        if has_with:
+            raise CoreError(
+                "WITH aggregation in a single-node subquery is not supported",
+                code="UNSUPPORTED",
+            )
         return _compile_single_node_subquery_body(
             start_node=start_node,
             match_ctx=match_ctx,
@@ -3877,7 +3962,11 @@ def _compile_subquery_body(
     # query ("variable 'm' is assigned multiple times"). A *labeled/propertied*
     # named target (``(m:User)``) is a fresh binding local to the subquery, so it
     # is used as the loop variable directly.
-    correlate_target = target_named and not t_labels and not target_has_props
+    #
+    # In an *aggregation* subquery (``… WITH count(*) …``) the target is being
+    # enumerated/counted, not correlated — so it is always a fresh loop
+    # variable regardless of naming.
+    correlate_target = (not has_with) and target_named and not t_labels and not target_has_props
     sq_v = target_var if (target_named and not correlate_target) else "_sq_v"
 
     filters: list[str] = []
@@ -3915,8 +4004,16 @@ def _compile_subquery_body(
     sub = f"FOR {sq_v}, {sq_e} IN {rmin}..{rmax} {direction} {start_var} {edge_ref}"
     for f in filters:
         sub += f" FILTER {f}"
-    sub += " RETURN 1"
 
+    if has_with:
+        return _compile_subquery_with_aggregation(
+            with_clauses=with_clauses,
+            sub_prefix=sub,
+            start_var=start_var,
+            bind_vars=bind_vars,
+        )
+
+    sub += " RETURN 1"
     return sub
 
 

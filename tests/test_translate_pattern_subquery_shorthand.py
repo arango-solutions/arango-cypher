@@ -125,3 +125,80 @@ class TestSingleNodeSubquery:
         with pytest.raises(CoreError) as exc:
             translate("MATCH (p:Person) WHERE exists { () } RETURN p.name", mapping=pg)
         assert exc.value.code == "UNSUPPORTED"
+
+
+class TestAggregationSubquery:
+    """`MATCH … WITH count(*) … [WHERE having]` subquery bodies.
+
+    Requires the grammar to accept `WITH` inside `EXISTS{}`/`COUNT{}` (the
+    `oC_SubqueryBody` rule was extended + parser regenerated). The counting
+    existential lowers to `COLLECT WITH COUNT INTO <alias>` + a post-COLLECT
+    HAVING filter; unsupported WITH shapes are refused, never mis-compiled.
+    """
+
+    def test_exists_with_count_having(self, pg):
+        out = translate(
+            "MATCH (p:Person) WHERE exists { "
+            "MATCH (p)-[:ACTED_IN]->(m) WITH p, count(*) AS c WHERE c > 3 RETURN true "
+            "} RETURN p.name",
+            mapping=pg,
+        )
+        assert "COLLECT WITH COUNT INTO c" in out.aql
+        assert "c > 3" in out.aql
+        assert "(LENGTH(FOR m, _sq_e IN" in out.aql  # target is a fresh loop var
+        assert "> 0)" in out.aql
+
+    def test_exists_with_count_no_having(self, pg):
+        out = translate(
+            "MATCH (p:Person) WHERE exists { "
+            "MATCH (p)-[:ACTED_IN]->(m) WITH count(*) AS c RETURN true "
+            "} RETURN p.name",
+            mapping=pg,
+        )
+        assert "COLLECT WITH COUNT INTO c" in out.aql
+
+    def test_count_subquery_with_aggregation(self, pg):
+        out = translate(
+            "MATCH (p:Person) RETURN p.name, count { "
+            "MATCH (p)-[:ACTED_IN]->(m) WITH p, count(*) AS c WHERE c > 1 RETURN true "
+            "} AS x",
+            mapping=pg,
+        )
+        assert "x: LENGTH(FOR m, _sq_e IN" in out.aql
+        assert "COLLECT WITH COUNT INTO c" in out.aql
+
+    def test_reject_distinct_in_with(self, pg):
+        from arango_query_core import CoreError
+
+        with pytest.raises(CoreError) as exc:
+            translate(
+                "MATCH (p:Person) WHERE exists { "
+                "MATCH (p)-[:ACTED_IN]->(m) WITH DISTINCT count(*) AS c RETURN true "
+                "} RETURN p.name",
+                mapping=pg,
+            )
+        assert exc.value.code == "UNSUPPORTED"
+
+    def test_reject_group_by_local_var(self, pg):
+        from arango_query_core import CoreError
+
+        with pytest.raises(CoreError) as exc:
+            translate(
+                "MATCH (p:Person) WHERE exists { "
+                "MATCH (p)-[:ACTED_IN]->(m) WITH m, count(*) AS c RETURN true "
+                "} RETURN p.name",
+                mapping=pg,
+            )
+        assert exc.value.code == "UNSUPPORTED"
+
+    def test_reject_update_clause_in_subquery(self, pg):
+        # SET is not part of oC_SubqueryBody → correct parse-time rejection
+        # (openCypher marks the update-in-existential form as an error).
+        from arango_query_core import CoreError
+
+        with pytest.raises(CoreError):
+            translate(
+                "MATCH (p:Person) WHERE exists { MATCH (p)-[:ACTED_IN]->(m) SET m.x = 1 } "
+                "RETURN p.name",
+                mapping=pg,
+            )

@@ -370,7 +370,7 @@ oC_CountSubquery
  : COUNT SP? '{' SP? oC_SubqueryBody SP? '}' ;
 
 oC_SubqueryBody
- : ( oC_ReadingClause SP? )+ ( oC_Return )? ;
+ : ( ( oC_ReadingClause | oC_With ) SP? )+ ( oC_Return )? ;
 
 COUNT : ( 'C' | 'c' ) ( 'O' | 'o' ) ( 'U' | 'u' ) ( 'N' | 'n' ) ( 'T' | 't' ) ;
 
