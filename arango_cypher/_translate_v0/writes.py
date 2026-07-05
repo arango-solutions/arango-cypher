@@ -78,6 +78,97 @@ def _compile_node_pattern_properties(*args, **kwargs):
     return _core_helper("_compile_node_pattern_properties")(*args, **kwargs)
 
 
+def _rewrite_vars(*args, **kwargs):
+    return _core_helper("_rewrite_vars")(*args, **kwargs)
+
+
+def _emit_unwind_for(
+    uw: CypherParser.OC_UnwindContext,
+    *,
+    bind_vars: dict[str, Any],
+    var_env: dict[str, str],
+) -> str:
+    """Compile ``UNWIND <expr> AS <var>`` to an AQL ``FOR <var> IN <expr>`` line.
+
+    Binds ``var`` into ``var_env`` and rewrites already-bound variables in the
+    list expression (so ``MATCH (a) UNWIND a.items AS x`` resolves ``a``).
+    """
+    expr = _compile_expression(uw.oC_Expression(), bind_vars)
+    if var_env:
+        expr = _rewrite_vars(expr, var_env)
+    var = uw.oC_Variable().getText().strip()
+    var_env[var] = var
+    return f"FOR {var} IN {expr}"
+
+
+def _compile_write_reading_clauses(
+    spq: CypherParser.OC_SinglePartQueryContext,
+    *,
+    resolver: MappingResolver,
+    bind_vars: dict[str, Any],
+) -> tuple[list[str], dict[str, str]]:
+    """Compile the MATCH/UNWIND reading clauses preceding a write clause.
+
+    Returns ``(lines, var_env)`` where ``lines`` is the ``FOR …`` prefix that
+    the write (CREATE/MERGE) nests inside (sequential ``FOR``s in AQL are
+    nested loops). Supports MATCH-only, UNWIND-only, and MATCH-then-UNWIND
+    (a following ``UNWIND`` may iterate a matched list). ``UNWIND`` before
+    ``MATCH`` and non-MATCH/UNWIND reading clauses are refused rather than
+    mis-compiled.
+    """
+    reading_clauses = spq.oC_ReadingClause() or []
+    lines: list[str] = []
+    var_env: dict[str, str] = {}
+    if not reading_clauses:
+        return lines, var_env
+
+    match_clauses: list[CypherParser.OC_MatchContext] = []
+    unwind_clauses: list[CypherParser.OC_UnwindContext] = []
+    seen_unwind = False
+    for rc in reading_clauses:
+        m = rc.oC_Match()
+        uw = rc.oC_Unwind()
+        if m is not None:
+            if seen_unwind:
+                raise CoreError(
+                    "MATCH after UNWIND is not supported with write clauses",
+                    code="NOT_IMPLEMENTED",
+                )
+            match_clauses.append(m)
+        elif uw is not None:
+            seen_unwind = True
+            unwind_clauses.append(uw)
+        else:
+            raise CoreError(
+                "Only MATCH/UNWIND reading clauses are supported with write clauses",
+                code="NOT_IMPLEMENTED",
+            )
+
+    if match_clauses:
+        all_parts: list = []
+        extra_wheres: list = []
+        for mc in match_clauses:
+            all_parts.extend(mc.oC_Pattern().oC_PatternPart() or [])
+            wc = mc.oC_Where()
+            if wc is not None:
+                extra_wheres.append(wc)
+        if len(all_parts) == 1 and len(match_clauses) == 1:
+            match_lines, forbidden = _compile_match_pipeline(
+                match_clauses[0], resolver=resolver, bind_vars=bind_vars
+            )
+        else:
+            match_lines, forbidden = _compile_match_multi_parts_from_parts(
+                all_parts, extra_wheres=extra_wheres, resolver=resolver, bind_vars=bind_vars
+            )
+        lines.extend(match_lines)
+        var_env = {v: v for v in forbidden}
+
+    for uw in unwind_clauses:
+        lines.append(_emit_unwind_for(uw, bind_vars=bind_vars, var_env=var_env))
+
+    return lines, var_env
+
+
 def _compile_relationship_pattern_properties(*args, **kwargs):
     return _core_helper("_compile_relationship_pattern_properties")(*args, **kwargs)
 
@@ -449,51 +540,14 @@ def _translate_create_query(
     reading_clauses = spq.oC_ReadingClause() or []
     ret = spq.oC_Return()
 
-    lines: list[str] = []
-    var_env: dict[str, str] = {}
     # Maps each created variable to the bind key of the collection it was
     # inserted into, so a trailing SET/REMOVE can target the right collection.
     var_collections: dict[str, str] = {}
-    indent = ""
 
-    match_clauses: list[CypherParser.OC_MatchContext] = []
-    for rc in reading_clauses:
-        m = rc.oC_Match()
-        if m is not None:
-            match_clauses.append(m)
-        else:
-            raise CoreError(
-                "Only MATCH reading clauses are supported with CREATE",
-                code="NOT_IMPLEMENTED",
-            )
-
-    if match_clauses:
-        all_parts: list = []
-        extra_wheres: list[CypherParser.OC_WhereContext] = []
-        for mc in match_clauses:
-            pattern = mc.oC_Pattern()
-            pp = pattern.oC_PatternPart() or []
-            all_parts.extend(pp)
-            wc = mc.oC_Where()
-            if wc is not None:
-                extra_wheres.append(wc)
-
-        if len(all_parts) == 1 and len(match_clauses) == 1:
-            match_lines, forbidden = _compile_match_pipeline(
-                match_clauses[0],
-                resolver=resolver,
-                bind_vars=bind_vars,
-            )
-        else:
-            match_lines, forbidden = _compile_match_multi_parts_from_parts(
-                all_parts,
-                extra_wheres=extra_wheres,
-                resolver=resolver,
-                bind_vars=bind_vars,
-            )
-        lines.extend(match_lines)
-        var_env = {v: v for v in forbidden}
-        indent = "  "
+    # MATCH/UNWIND reading clauses become the FOR prefix the CREATE nests in
+    # (``UNWIND [..] AS x CREATE (n {p: x})`` → ``FOR x IN [..] INSERT {p: x}``).
+    lines, var_env = _compile_write_reading_clauses(spq, resolver=resolver, bind_vars=bind_vars)
+    indent = "  " if lines else ""
 
     num_creates = len(create_clauses)
     for ci, cc in enumerate(create_clauses):
@@ -1040,38 +1094,15 @@ def _compile_merge_reading_clauses(
     bind_vars: dict[str, Any],
     lines: list[str],
 ) -> None:
-    """Compile preceding MATCH clauses for a MERGE statement."""
-    reading_clauses = spq.oC_ReadingClause() or []
-    if not reading_clauses:
-        return
-    all_parts: list = []
-    extra_wheres: list = []
-    for rc in reading_clauses:
-        m = rc.oC_Match()
-        if m is None:
-            continue
-        pattern = m.oC_Pattern()
-        pp = pattern.oC_PatternPart() or []
-        all_parts.extend(pp)
-        wc = m.oC_Where()
-        if wc is not None:
-            extra_wheres.append(wc)
-    if not all_parts:
-        return
-    if len(all_parts) == 1 and not extra_wheres:
-        match_lines, _ = _compile_match_pipeline(
-            reading_clauses[0].oC_Match(),
-            resolver=resolver,
-            bind_vars=bind_vars,
-        )
-    else:
-        match_lines, _ = _compile_match_multi_parts_from_parts(
-            all_parts,
-            extra_wheres=extra_wheres,
-            resolver=resolver,
-            bind_vars=bind_vars,
-        )
-    lines.extend(match_lines)
+    """Compile the MATCH/UNWIND reading clauses preceding a MERGE statement.
+
+    Emits the ``FOR …`` prefix (matched pipeline and/or ``UNWIND`` loops) that
+    the UPSERT nests inside, so ``UNWIND [..] AS x MERGE (n {p: x})`` becomes
+    ``FOR x IN [..] UPSERT {p: x} …`` — previously the ``UNWIND`` was silently
+    dropped, leaving ``x`` unbound in the UPSERT.
+    """
+    read_lines, _ = _compile_write_reading_clauses(spq, resolver=resolver, bind_vars=bind_vars)
+    lines.extend(read_lines)
 
 
 def _extract_merge_actions(

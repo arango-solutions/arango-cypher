@@ -35,6 +35,57 @@ def naked():
     return mapping_bundle_for("naked_lpg")
 
 
+class TestUnwindWriteTail:
+    """``UNWIND … CREATE`` / ``UNWIND … MERGE`` — the list becomes a ``FOR``
+    prefix the write nests inside. ``UNWIND … MERGE`` previously translated
+    but silently dropped the ``FOR``, leaving the unwound var unbound in the
+    UPSERT."""
+
+    def test_unwind_create(self, pg):
+        out = translate("UNWIND [1, 2, 3] AS x CREATE (n:Movie {released: x})", mapping=pg)
+        assert "FOR x IN [1,2,3]" in out.aql
+        assert "INSERT {released: x} INTO" in out.aql
+
+    def test_unwind_create_over_maps(self, pg):
+        out = translate(
+            "UNWIND [{t: 1}, {t: 2}] AS row CREATE (n:Movie {released: row.t})",
+            mapping=pg,
+        )
+        assert "FOR row IN [{t: 1},{t: 2}]" in out.aql
+        assert "INSERT {released: row.t} INTO" in out.aql
+
+    def test_unwind_merge_binds_loop_var(self, pg):
+        out = translate("UNWIND [1, 2] AS x MERGE (n:Movie {released: x})", mapping=pg)
+        assert "FOR x IN [1,2]" in out.aql
+        assert "UPSERT {released: x}" in out.aql
+
+    def test_match_then_unwind_create(self, pg):
+        # UNWIND over a matched value nests inside the MATCH loop.
+        out = translate(
+            "MATCH (p:Person) UNWIND [1, 2] AS x CREATE (m:Movie {released: x})",
+            mapping=pg,
+        )
+        assert "FOR p IN " in out.aql
+        assert "FOR x IN [1,2]" in out.aql
+        assert "INSERT {released: x} INTO" in out.aql
+
+    def test_multiple_unwind_create_nests(self, pg):
+        out = translate(
+            "UNWIND [1, 2] AS x UNWIND [3, 4] AS y CREATE (n:Movie {released: x})",
+            mapping=pg,
+        )
+        assert "FOR x IN [1,2]" in out.aql
+        assert "FOR y IN [3,4]" in out.aql
+
+    def test_unwind_before_match_rejected(self, pg):
+        with pytest.raises(CoreError) as exc:
+            translate(
+                "UNWIND [1, 2] AS x MATCH (p:Person) CREATE (m:Movie {released: x})",
+                mapping=pg,
+            )
+        assert exc.value.code == "NOT_IMPLEMENTED"
+
+
 class TestWholeMapCreateParam:
     def test_collection_style_inserts_param_directly(self, pg):
         out = translate("CREATE (n:Person $props) RETURN n", mapping=pg)
