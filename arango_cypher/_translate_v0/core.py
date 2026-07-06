@@ -1488,10 +1488,21 @@ def _translate_multi_part_query(
                 lines=lines,
             )
 
-    # A tail write after WITH (e.g. MATCH … WITH … CREATE …). The WITH pipeline
-    # is already in ``lines`` with ``var_env`` bound; the CREATE nests inside it.
+    # A tail write after WITH (e.g. MATCH … WITH … CREATE/MERGE …). The WITH
+    # pipeline is already in ``lines`` with ``var_env`` bound; the write nests
+    # inside it, referencing the bound variables.
     tail_updating = tail.oC_UpdatingClause() or []
     if tail_updating:
+        merge_clauses = [uc.oC_Merge() for uc in tail_updating if uc.oC_Merge() is not None]
+        if merge_clauses:
+            return _append_multipart_merge_tail(
+                merge_clauses,
+                tail=tail,
+                tail_reading=tail_reading,
+                lines=lines,
+                resolver=resolver,
+                bind_vars=bind_vars,
+            )
         return _append_multipart_create_tail(
             tail_updating,
             tail=tail,
@@ -1512,6 +1523,53 @@ def _translate_multi_part_query(
     )
 
     return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
+
+
+def _append_multipart_merge_tail(
+    merge_clauses: list[CypherParser.OC_MergeContext],
+    *,
+    tail: CypherParser.OC_SinglePartQueryContext,
+    tail_reading: list[CypherParser.OC_ReadingClauseContext],
+    lines: list[str],
+    resolver: MappingResolver,
+    bind_vars: dict[str, Any],
+) -> AqlQuery:
+    """Emit a MERGE tail of a multi-part query, nested in the WITH pipeline.
+
+    Handles ``MATCH … WITH … MERGE …`` (single-node and relationship MERGE,
+    incl. between WITH-bound nodes, e.g. ``MATCH (a) MATCH (b) WITH a, b MERGE
+    (a)-[:R]->(b)``). The MERGE translator already renders the UPSERT against
+    the bound variables by name (``a._id`` / ``b._id`` / ``a.prop``); the
+    tail's own reading clauses are empty here (the MATCHes live in the WITH
+    parts), so it emits just the UPSERT, which we splice after the pipeline.
+
+    A tail MATCH before the MERGE would be double-compiled (the multi-part
+    handler already folded it into ``lines``), and mixing MERGE with other
+    write clauses is ambiguous — both are refused rather than mis-compiled.
+    """
+    from .writes import _translate_merge_query
+
+    if tail_reading:
+        raise CoreError(
+            "MATCH after WITH before MERGE is not supported",
+            code="NOT_IMPLEMENTED",
+        )
+    non_merge = [uc for uc in (tail.oC_UpdatingClause() or []) if uc.oC_Merge() is None]
+    if non_merge:
+        raise CoreError(
+            "MERGE after WITH cannot be combined with other write clauses",
+            code="NOT_IMPLEMENTED",
+        )
+
+    merge_q = _translate_merge_query(
+        tail,
+        merge_clauses=merge_clauses,
+        resolver=resolver,
+        bind_vars=bind_vars,
+    )
+    pipeline = "\n".join(lines)
+    text = (pipeline + "\n" + merge_q.text) if pipeline else merge_q.text
+    return AqlQuery(text=text, bind_vars=bind_vars)
 
 
 def _append_multipart_create_tail(

@@ -112,14 +112,61 @@ class TestWithCreateTail:
         assert "COLLECT AGGREGATE c = COUNT(p)" in out.aql
         assert "INSERT {released: c} INTO" in out.aql
 
-    def test_with_merge_rejected(self, pg):
-        with pytest.raises(CoreError) as exc:
-            translate("MATCH (p:Person) WITH p MERGE (m:Movie {title: p.name})", mapping=pg)
-        assert exc.value.code == "NOT_IMPLEMENTED"
-
     def test_with_set_rejected(self, pg):
         with pytest.raises(CoreError) as exc:
             translate("MATCH (p:Person) WITH p SET p.born = 1970", mapping=pg)
+        assert exc.value.code == "NOT_IMPLEMENTED"
+
+
+class TestWithMergeTail:
+    """``MATCH … WITH … MERGE …`` — a MERGE nested inside the WITH pipeline,
+    spliced after it (the UPSERT references the WITH-bound variables)."""
+
+    def test_with_merge_node(self, pg):
+        out = translate("MATCH (p:Person) WITH p MERGE (m:Movie {title: p.name})", mapping=pg)
+        assert "FOR p IN " in out.aql
+        assert "UPSERT {title: p.name}" in out.aql
+
+    def test_with_merge_relationship_between_bound_nodes(self, pg):
+        out = translate(
+            "MATCH (a:Person) MATCH (b:Movie) WITH a, b MERGE (a)-[:ACTED_IN]->(b)",
+            mapping=pg,
+        )
+        assert "FOR a IN " in out.aql
+        assert "FOR b IN " in out.aql
+        assert "UPSERT {_from: a._id, _to: b._id}" in out.aql
+
+    def test_with_aggregation_then_merge(self, pg):
+        out = translate(
+            "MATCH (p:Person) WITH count(p) AS c MERGE (m:Movie {released: c})",
+            mapping=pg,
+        )
+        assert "COLLECT AGGREGATE c = COUNT(p)" in out.aql
+        assert "UPSERT {released: c}" in out.aql
+
+    def test_with_merge_return(self, pg):
+        out = translate(
+            "MATCH (p:Person) WITH p MERGE (m:Movie {title: p.name}) RETURN m",
+            mapping=pg,
+        )
+        assert "LET m = NEW" in out.aql
+        assert "RETURN m" in out.aql
+
+    def test_with_merge_on_create_set(self, pg):
+        out = translate(
+            "MATCH (p:Person) WITH p MERGE (m:Movie {title: p.name}) "
+            "ON CREATE SET m.released = 2020",
+            mapping=pg,
+        )
+        assert "INSERT {title: p.name, released: 2020}" in out.aql
+
+    def test_tail_match_before_merge_rejected(self, pg):
+        # A MATCH after WITH would be double-compiled by the MERGE translator.
+        with pytest.raises(CoreError) as exc:
+            translate(
+                "MATCH (a:Person) WITH a MATCH (b:Movie) MERGE (a)-[:ACTED_IN]->(b)",
+                mapping=pg,
+            )
         assert exc.value.code == "NOT_IMPLEMENTED"
 
 

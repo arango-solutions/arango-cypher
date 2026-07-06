@@ -344,13 +344,19 @@ Two read+write pipeline gaps closed (TCK +6 overall: Full 2068→2074, Core
   CREATE (m {released:c})`). The multi-part handler now emits a tail CREATE
   (`_append_multipart_create_tail`, reusing the append-mode `_compile_create`)
   nested in the already-built WITH pipeline, referencing bound vars.
+- **`MATCH … WITH … MERGE`** (WP-V1f) — single-node and relationship MERGE
+  (incl. between WITH-bound nodes, `MATCH (a) MATCH (b) WITH a, b MERGE
+  (a)-[:R]->(b)`), after aggregation, with `RETURN`, and `ON CREATE/MATCH SET`.
+  `_append_multipart_merge_tail` builds the WITH pipeline then splices the
+  standalone MERGE UPSERT after it (the UPSERT already renders against bound
+  vars by name), so the existing MERGE translator is reused unchanged.
 
 Still deferred (refused with a specific error, never mis-compiled): `WITH …
-MERGE` / `WITH … SET` / `WITH … DELETE` (need the standalone MERGE/mutating
-builders refactored to append-mode) and `UNWIND … WITH … CREATE`
-(leading-UNWIND multi-part routing). Tests:
+SET` / `WITH … DELETE` (need the mutating builders refactored to append-mode),
+`UNWIND … WITH … CREATE`/`MERGE` (leading-UNWIND multi-part routing), and a
+tail MATCH before a MERGE (would double-compile). Tests:
 `tests/test_translate_write_clause_gaps.py` (`TestUnwindWriteTail`,
-`TestWithCreateTail`).
+`TestWithCreateTail`, `TestWithMergeTail`).
 
 ---
 
