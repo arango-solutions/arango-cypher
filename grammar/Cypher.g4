@@ -357,6 +357,7 @@ oC_Atom
  | ( ANY SP? '(' SP? oC_FilterExpression SP? ')' )
  | ( NONE SP? '(' SP? oC_FilterExpression SP? ')' )
  | ( SINGLE SP? '(' SP? oC_FilterExpression SP? ')' )
+ | oC_ReduceExpression
  | oC_RelationshipsPattern
  | oC_ParenthesizedExpression
  | oC_FunctionInvocation
@@ -371,6 +372,11 @@ oC_CountSubquery
 
 oC_SubqueryBody
  : ( ( oC_ReadingClause | oC_With ) SP? )+ ( oC_Return )? ;
+
+oC_ReduceExpression
+ : REDUCE SP? '(' SP? oC_Variable SP? '=' SP? oC_Expression SP? ',' SP? oC_IdInColl SP? '|' SP? oC_Expression SP? ')' ;
+
+REDUCE : ( 'R' | 'r' ) ( 'E' | 'e' ) ( 'D' | 'd' ) ( 'U' | 'u' ) ( 'C' | 'c' ) ( 'E' | 'e' ) ;
 
 COUNT : ( 'C' | 'c' ) ( 'O' | 'o' ) ( 'U' | 'u' ) ( 'N' | 'n' ) ( 'T' | 't' ) ;
 
@@ -660,6 +666,7 @@ oC_SymbolicName
  | COUNT
  | FILTER
  | EXTRACT
+ | REDUCE
  | ANY
  | NONE
  | SINGLE

@@ -4438,6 +4438,83 @@ def _compile_quantifier(
     raise CoreError(f"Unsupported quantifier: {kind}", code="UNSUPPORTED")
 
 
+def _reduce_additive_terms(body_ctx: CypherParser.OC_ExpressionContext) -> Any | None:
+    """If *body_ctx* is a pure additive expression (no OR/XOR/AND/NOT/comparison
+    at the top), return its ``OC_AddOrSubtractExpressionContext``; else ``None``."""
+    or_expr = body_ctx.oC_OrExpression()
+    xs = or_expr.oC_XorExpression()
+    if len(xs) != 1:
+        return None
+    ands = xs[0].oC_AndExpression()
+    if len(ands) != 1:
+        return None
+    nots = ands[0].oC_NotExpression()
+    if len(nots) != 1:
+        return None
+    if nots[0].NOT():
+        return None
+    cmp = nots[0].oC_ComparisonExpression()
+    if cmp.oC_PartialComparisonExpression():
+        return None
+    return cmp.oC_AddOrSubtractExpression()
+
+
+def _compile_reduce(
+    ctx: CypherParser.OC_ReduceExpressionContext,
+    bind_vars: dict[str, Any],
+) -> str:
+    """Compile ``reduce(acc = init, x IN list | body)``.
+
+    AQL has no general fold, so only the dominant **sum-fold** shape is
+    supported: a body that is ``acc + f(x)`` (any additive arrangement where the
+    accumulator appears once and every top-level operator is ``+``). That lowers
+    to ``(init + SUM((FOR x IN list RETURN f(x))))``. Any other accumulation
+    (``*``, string build, multi-reference, conditional) raises a clear
+    capability error rather than mis-translating.
+    """
+    acc_var = ctx.oC_Variable().getText().strip()
+    exprs = ctx.oC_Expression()  # [init, body]
+    id_in_coll = ctx.oC_IdInColl()
+    x_var = id_in_coll.oC_Variable().getText().strip()
+    init_aql = _compile_expression(exprs[0], bind_vars)
+    list_aql = _compile_expression(id_in_coll.oC_Expression(), bind_vars)
+
+    unsupported = CoreError(
+        "reduce() is only supported for sum-style accumulation "
+        "(reduce(acc = init, x IN list | acc + f(x))); AQL has no general fold",
+        code="NOT_IMPLEMENTED",
+    )
+
+    add = _reduce_additive_terms(exprs[1])
+    if add is None:
+        raise unsupported
+    terms = add.oC_MultiplyDivideModuloExpression()
+    if len(terms) < 2:
+        raise unsupported
+    # Every top-level operator must be '+'.
+    for i in range(1, len(terms)):
+        if _extract_interleaved_op(add, i, {"+", "-"}) != "+":
+            raise unsupported
+
+    acc_pattern = re.compile(rf"(?<![\w.])({re.escape(acc_var)})(?![\w])")
+    acc_indices = [i for i, t in enumerate(terms) if t.getText().strip() == acc_var]
+    if len(acc_indices) != 1:
+        raise unsupported  # accumulator must appear exactly once, as a bare term
+    rest = [t for i, t in enumerate(terms) if i != acc_indices[0]]
+    rest_aql_parts = [_compile_expression(t, bind_vars) for t in rest]
+    # The per-element value must not itself reference the accumulator.
+    if any(acc_pattern.search(part) for part in rest_aql_parts):
+        raise unsupported
+    # Refuse string folds: Cypher ``+`` on strings means concatenation, but this
+    # lowering uses AQL ``SUM`` (numeric only). A string literal in the init or a
+    # fold term is the tell — reduce(s = "", x IN xs | s + x + "!") is a concat,
+    # not a sum, so bail rather than emit a wrong numeric aggregate.
+    if any('"' in part or "'" in part for part in [init_aql, *rest_aql_parts]):
+        raise unsupported
+    fold_value = " + ".join(rest_aql_parts)
+    return f"({init_aql} + SUM((FOR {x_var} IN {list_aql} RETURN {fold_value})))"
+
+
 def _compile_list_comprehension(
     ctx: CypherParser.OC_ListComprehensionContext,
     bind_vars: dict[str, Any],
@@ -4822,6 +4899,8 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
             return _compile_list_comprehension(ctx.oC_ListComprehension(), bind_vars)
         if ctx.oC_PatternComprehension() is not None:
             return _compile_pattern_comprehension(ctx.oC_PatternComprehension(), bind_vars)
+        if ctx.oC_ReduceExpression() is not None:
+            return _compile_reduce(ctx.oC_ReduceExpression(), bind_vars)
         # List quantifiers: any/all/none/single(x IN list WHERE pred)
         if ctx.oC_FilterExpression() is not None:
             if ctx.ANY() is not None:

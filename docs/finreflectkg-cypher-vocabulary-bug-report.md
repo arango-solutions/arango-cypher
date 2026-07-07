@@ -20,7 +20,7 @@ The 19 failures split across three owners; the largest share (17/19) is fixed in
 | #1 Resolver exact-match (case / `_-` / lemma) | **arango-cypher-py** (`arango_query_core.mapping.MappingResolver`) | **FIXED** — normalized resolution |
 | #2 Lossy label rename `FIN_METRIC`→`FINMETRIC` | root cause in **arangodb-schema-analyzer** (`export_mapping`); **worked around** here | **RESOLVED here** via normalization; analyzer should still preserve label fidelity |
 | #3 Top-20 entity cap drops `ORG_REG` | **arangodb-schema-analyzer** (`export_mapping` applies the entity cap; `arango-cypher-py/schema_acquire` only caps *relationships*) | **UPSTREAM** — needs a configurable/transparent entity cap in the analyzer |
-| #4 `reduce(...)` unsupported | **arango-cypher-py** (transpiler grammar/compiler) | Open — separate transpiler gap, tracked in `docs/cypher_coverage_plan.md` |
+| #4 `reduce(...)` unsupported | **arango-cypher-py** (transpiler grammar/compiler) | **FIXED (partial)** — grammar + sum-fold lowering; non-sum folds get a clear capability error |
 
 **Fix landed here:** `MappingResolver.resolve_entity` / `resolve_relationship` now fall back to a
 **case- and separator-insensitive** match (build a normalized `casefold` + strip-`_-\s` index, exact
@@ -33,10 +33,16 @@ Tests: `tests/test_mapping_resolver_normalization.py`.
 **Still upstream (analyzer):** `ORG_REG` is *absent* from the mapping (dropped by the analyzer's
 top-N entity cap), so no resolver normalization can recover it — the analyzer needs a configurable /
 transparent entity cap (and, ideally, label fidelity for #2 so the raw `type` value stays an accepted
-key). **Still here (transpiler):** `reduce(...)`.
+key). Filed as `arango-schema-mapper/docs/cypher-vocabulary-fidelity-bug-report.md`.
 
-**Net:** 17 of the 19 failures are addressed by the resolver fix; `ORG_REG` (analyzer cap) and
-`reduce(...)` (transpiler) remain.
+**`reduce(...)` (#4):** now parses (grammar rule + regenerated parser) and the common numeric
+**sum-fold** (`reduce(acc = init, x IN list | acc + f(x))`) lowers to
+`(init + SUM((FOR x IN list RETURN f(x))))`; other accumulations (`*`, string concat, etc.) raise a
+clear `NOT_IMPLEMENTED` capability error instead of a cryptic grammar syntax error (AQL has no general
+fold). Tests: `tests/test_translate_reduce.py`.
+
+**Net:** 17 of the 19 failures are addressed by the resolver fix, plus `reduce(...)` sum-folds now
+translate; only `ORG_REG` (analyzer entity cap, filed upstream) genuinely remains.
 
 ---
 

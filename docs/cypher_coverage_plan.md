@@ -398,6 +398,18 @@ operators) and AND-ing them. TCK +10 (Full 2666→2676, Core 1973→1983);
 `expressions/comparison` 69→83%. Tests:
 `tests/test_translate_chained_comparison.py`.
 
+#### WP-V1j — `reduce()` sum-fold · *done 2026-07-07*
+
+`reduce(acc = init, x IN list | body)` was a grammar gap ("no viable
+alternative"). Added an `oC_ReduceExpression` rule + regenerated the parser
+(ANTLR 4.13.2 in a container), and `_compile_reduce` lowers the numeric
+sum-fold shape (`acc + f(x)`, accumulator once, all top-level `+`, no string
+literals) to `(init + SUM((FOR x IN list RETURN f(x))))`. AQL has no general
+fold, so other accumulations (`*`, string concat, subtraction, multi-reference)
+raise a clear `NOT_IMPLEMENTED` capability error rather than mis-translating.
+No TCK delta (reduce isn't TCK-tested) — this closes item #4 of the
+FinReflectKG vocabulary bug report. Tests: `tests/test_translate_reduce.py`.
+
 ---
 
 ## 4. Sequencing & milestones
