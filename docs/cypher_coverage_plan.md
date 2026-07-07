@@ -388,6 +388,16 @@ semantics for `null` list elements aren't reproduced exactly (the remaining
 ~60 quantifier scenarios) — correct for the common non-null case. Tests:
 `tests/test_translate_quantifiers.py`.
 
+#### WP-V1i — Chained comparisons · *done 2026-07-07*
+
+`a < b < c` (openCypher = `a < b AND b < c`) was rejected ("Chained
+comparisons not supported"). The comparison compiler now walks the partial
+comparisons, compiling each adjacent pair via the extracted
+`_compile_one_comparison` (keeping the per-operand null-guard on ordered
+operators) and AND-ing them. TCK +10 (Full 2666→2676, Core 1973→1983);
+`expressions/comparison` 69→83%. Tests:
+`tests/test_translate_chained_comparison.py`.
+
 ---
 
 ## 4. Sequencing & milestones

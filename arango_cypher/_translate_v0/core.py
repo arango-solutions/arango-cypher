@@ -3983,6 +3983,29 @@ _OBVIOUS_NON_NULL_RE = re.compile(
 )
 
 
+def _compile_one_comparison(left: str, op: str, right: str) -> str:
+    """Compile a single ``left <op> right`` comparison to guarded AQL.
+
+    Cypher uses 3-valued logic: an ordered comparison against ``null`` returns
+    ``null`` (treated as false in WHERE). AQL coerces ``null`` to the lowest
+    sortable value (``null < 1950`` is true there), so ordered comparisons get
+    an explicit ``!= null`` guard on each non-obvious operand. Equality /
+    inequality already match Cypher semantics in AQL.
+    """
+    aql_op = {"=": "==", "<>": "!=", "<": "<", "<=": "<=", ">": ">", ">=": ">="}.get(op)
+    if not aql_op:
+        raise CoreError(f"Unsupported comparison op: {op}", code="UNSUPPORTED")
+    if aql_op in {"<", "<=", ">", ">="}:
+        guards: list[str] = []
+        if not _is_obvious_non_null(left):
+            guards.append(f"{left} != null")
+        if not _is_obvious_non_null(right):
+            guards.append(f"{right} != null")
+        if guards:
+            return "(" + " AND ".join(guards + [f"{left} {aql_op} {right}"]) + ")"
+    return f"({left} {aql_op} {right})"
+
+
 def _is_obvious_non_null(expr: str) -> bool:
     """True when *expr* is a textual form that AQL evaluates as non-null.
 
@@ -4616,28 +4639,18 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
         partials = ctx.oC_PartialComparisonExpression()
         if not partials:
             return left
-        if len(partials) != 1:
-            raise CoreError("Chained comparisons not supported in v0", code="UNSUPPORTED")
-        p = partials[0]
-        op = p.getChild(0).getText()
-        right = _compile_expression(p.oC_AddOrSubtractExpression(), bind_vars)
-        aql_op = {"=": "==", "<>": "!=", "<": "<", "<=": "<=", ">": ">", ">=": ">="}.get(op)
-        if not aql_op:
-            raise CoreError(f"Unsupported comparison op: {op}", code="UNSUPPORTED")
-        # Cypher uses 3-valued logic: ordered comparisons against null
-        # return null (treated as false in WHERE).  AQL coerces null to
-        # the lowest sortable value, so ``null < 1950`` is true.  Guard
-        # ordered comparisons explicitly so WHERE clauses match Cypher.
-        # Equality/inequality already match Cypher semantics in AQL.
-        if aql_op in {"<", "<=", ">", ">="}:
-            guards: list[str] = []
-            if not _is_obvious_non_null(left):
-                guards.append(f"{left} != null")
-            if not _is_obvious_non_null(right):
-                guards.append(f"{right} != null")
-            if guards:
-                return "(" + " AND ".join(guards + [f"{left} {aql_op} {right}"]) + ")"
-        return f"({left} {aql_op} {right})"
+        # A chained comparison ``a < b < c`` means ``a < b AND b < c``
+        # (openCypher §Comparison): compile each adjacent pair and AND them.
+        conjuncts: list[str] = []
+        prev = left
+        for p in partials:
+            op = p.getChild(0).getText()
+            right = _compile_expression(p.oC_AddOrSubtractExpression(), bind_vars)
+            conjuncts.append(_compile_one_comparison(prev, op, right))
+            prev = right
+        if len(conjuncts) == 1:
+            return conjuncts[0]
+        return "(" + " AND ".join(conjuncts) + ")"
 
     if isinstance(ctx, CypherParser.OC_AddOrSubtractExpressionContext):
         terms = ctx.oC_MultiplyDivideModuloExpression()

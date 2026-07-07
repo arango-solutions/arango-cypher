@@ -15,8 +15,11 @@
 
 | Subset | Passable | Pass rate | (was 2026-04-20) |
 |--------|----------|-----------|------------------|
-| **Full TCK** (all 3,861 scenarios) | 2,666 / 3,861 | **69.0 %** | 32.2 % |
-| **Core TCK** (excludes out-of-scope: `expressions/temporal`, `expressions/quantifier`, `clauses/call` — 2,201 scenarios) | 1,973 / 2,201 | **89.6 %** | 54.8 % |
+| **Full TCK** (all 3,861 scenarios) | 2,676 / 3,861 | **69.3 %** | 32.2 % |
+| **Core TCK** (excludes out-of-scope: `expressions/temporal`, `expressions/quantifier`, `clauses/call` — 2,201 scenarios) | 1,983 / 2,201 | **90.1 %** | 54.8 % |
+
+> 2026-07-07: WP-V1i (chained comparisons, `a < b < c`) added +10
+> (Full 2,666→2,676, Core 1,973→1,983); `expressions/comparison` 69→83%.
 
 > 2026-07-07: WP-V1h (`any`/`all`/`none`/`single` list quantifiers) added
 > **+574 Full** (2,092→2,666) — `expressions/quantifier` 12→544 (90%), no
