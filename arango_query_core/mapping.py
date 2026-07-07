@@ -221,6 +221,59 @@ class MappingResolver:
 
     def __init__(self, bundle: MappingBundle):
         self.bundle = bundle
+        # Lazily-built ``normalized_key -> [original_keys]`` indexes for
+        # case/separator-insensitive resolution (see :meth:`_normalize_key`).
+        self._entity_norm_index: dict[str, list[str]] | None = None
+        self._rel_norm_index: dict[str, list[str]] | None = None
+
+    @staticmethod
+    def _normalize_key(name: str) -> str:
+        """Fold a label / relationship type to a case- and separator-insensitive
+        key so vocabulary spellings that differ only by case or ``_``/``-``/space
+        resolve to the same mapping entry.
+
+        Examples: ``Has_Stake_In`` / ``has_stake_in`` → ``hasstakein``;
+        ``FIN_METRIC`` / ``FINMETRIC`` → ``finmetric``. Lemmatisation (plural /
+        singular) is intentionally *not* applied — it is ambiguous and would
+        risk wrong matches; only case and separators are normalised.
+        """
+        return re.sub(r"[_\-\s]+", "", name).casefold()
+
+    @staticmethod
+    def _build_norm_index(keys: Any) -> dict[str, list[str]]:
+        index: dict[str, list[str]] = {}
+        if isinstance(keys, dict):
+            for k in keys:
+                if isinstance(k, str):
+                    index.setdefault(MappingResolver._normalize_key(k), []).append(k)
+        return index
+
+    def _resolve_normalized(
+        self,
+        wanted: str,
+        table: dict[str, Any],
+        index: dict[str, list[str]],
+        *,
+        kind: str,
+    ) -> JsonObj | None:
+        """Return the mapping for *wanted* via normalized match, or ``None`` when
+        there is no normalized candidate. Raises on an ambiguous collision so a
+        silently-wrong match never happens."""
+        if not isinstance(wanted, str):
+            # e.g. an untyped relationship passes ``rel_type=None`` — no
+            # normalized match; fall through to the caller's not-found path.
+            return None
+        candidates = index.get(self._normalize_key(wanted), [])
+        if not candidates:
+            return None
+        if len(candidates) > 1:
+            raise CoreError(
+                f"Ambiguous {kind} {wanted!r}: normalizes to multiple mapping "
+                f"keys {sorted(candidates)}; spell it exactly to disambiguate",
+                code="AMBIGUOUS_MAPPING",
+            )
+        resolved = table.get(candidates[0])
+        return resolved if isinstance(resolved, dict) else None
 
     def resolve_entity(self, label_or_entity: str) -> JsonObj:
         pm = self.bundle.physical_mapping
@@ -229,6 +282,16 @@ class MappingResolver:
             entities = {}
         mapping = entities.get(label_or_entity)
         if not isinstance(mapping, dict):
+            # Fall back to case/separator-insensitive resolution: a Cypher label
+            # like ``FIN_METRIC`` should still resolve when the analyzer exported
+            # it as ``FINMETRIC`` (and vice-versa for casing).
+            if self._entity_norm_index is None:
+                self._entity_norm_index = self._build_norm_index(entities)
+            normalized = self._resolve_normalized(
+                label_or_entity, entities, self._entity_norm_index, kind="entity label"
+            )
+            if normalized is not None:
+                return normalized
             available = sorted(entities.keys()) if entities else []
             hint = (
                 f". Available entities: {', '.join(available)}"
@@ -245,6 +308,15 @@ class MappingResolver:
             rels = {}
         mapping = rels.get(rel_type)
         if not isinstance(mapping, dict):
+            # Case/separator-insensitive fallback: ``Has_Stake_In`` resolves to
+            # the exported ``has_stake_in`` edge type.
+            if self._rel_norm_index is None:
+                self._rel_norm_index = self._build_norm_index(rels)
+            normalized = self._resolve_normalized(
+                rel_type, rels, self._rel_norm_index, kind="relationship type"
+            )
+            if normalized is not None:
+                return normalized
             available = sorted(rels.keys()) if rels else []
             hint = (
                 f". Available relationships: {', '.join(available)}"

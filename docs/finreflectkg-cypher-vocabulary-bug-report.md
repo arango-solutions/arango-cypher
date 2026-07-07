@@ -6,7 +6,39 @@
 **Reporter:** FinReflectKG POC (17.5 M-edge financial knowledge graph on ArangoDB 3.12.x Enterprise)
 **Severity:** High for the "port existing Cypher" / hand-written-Cypher use case — 19/22 real-world
 Cypher queries fail to transpile against a correctly-acquired mapping, all for vocabulary reasons.
-**Status:** OPEN
+**Status:** PARTIALLY RESOLVED (2026-07-07) — see **Resolution** below.
+
+---
+
+## Resolution (2026-07-07) — where each fix belongs
+
+The 19 failures split across three owners; the largest share (17/19) is fixed in
+`arango-cypher-py` by the change below.
+
+| Root cause | Owner | Status |
+|---|---|---|
+| #1 Resolver exact-match (case / `_-` / lemma) | **arango-cypher-py** (`arango_query_core.mapping.MappingResolver`) | **FIXED** — normalized resolution |
+| #2 Lossy label rename `FIN_METRIC`→`FINMETRIC` | root cause in **arangodb-schema-analyzer** (`export_mapping`); **worked around** here | **RESOLVED here** via normalization; analyzer should still preserve label fidelity |
+| #3 Top-20 entity cap drops `ORG_REG` | **arangodb-schema-analyzer** (`export_mapping` applies the entity cap; `arango-cypher-py/schema_acquire` only caps *relationships*) | **UPSTREAM** — needs a configurable/transparent entity cap in the analyzer |
+| #4 `reduce(...)` unsupported | **arango-cypher-py** (transpiler grammar/compiler) | Open — separate transpiler gap, tracked in `docs/cypher_coverage_plan.md` |
+
+**Fix landed here:** `MappingResolver.resolve_entity` / `resolve_relationship` now fall back to a
+**case- and separator-insensitive** match (build a normalized `casefold` + strip-`_-\s` index, exact
+match first, ambiguous collision → `AMBIGUOUS_MAPPING`). This resolves both the Neo4j-vocabulary
+mismatch (`Has_Stake_In` → `has_stake_in`, 11 failures) **and** the analyzer's lossy rename
+(`FIN_METRIC`/`RISK_FACTOR` → `FINMETRIC`/`RISKFACTOR`, 6 of the 7 entity failures) — because the
+normalized forms are equal. Lemmatisation (plural/singular) is intentionally not applied (ambiguous).
+Tests: `tests/test_mapping_resolver_normalization.py`.
+
+**Still upstream (analyzer):** `ORG_REG` is *absent* from the mapping (dropped by the analyzer's
+top-N entity cap), so no resolver normalization can recover it — the analyzer needs a configurable /
+transparent entity cap (and, ideally, label fidelity for #2 so the raw `type` value stays an accepted
+key). **Still here (transpiler):** `reduce(...)`.
+
+**Net:** 17 of the 19 failures are addressed by the resolver fix; `ORG_REG` (analyzer cap) and
+`reduce(...)` (transpiler) remain.
+
+---
 
 ---
 
