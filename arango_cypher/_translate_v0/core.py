@@ -4376,6 +4376,45 @@ def _compile_pattern_predicate(
     return f"(LENGTH({sub}) > 0)"
 
 
+def _compile_quantifier(
+    kind: str,
+    filt_expr: CypherParser.OC_FilterExpressionContext,
+    bind_vars: dict[str, Any],
+) -> str:
+    """Compile a list quantifier — ``any``/``all``/``none``/``single`` —
+    ``<kind>(x IN <list> WHERE <pred>)`` to an AQL count-subquery test:
+
+    * ``any``    → ``LENGTH(FOR x IN list FILTER pred RETURN 1) > 0``
+    * ``none``   → ``… == 0``
+    * ``single`` → ``… == 1``
+    * ``all``    → ``LENGTH(FOR x IN list FILTER NOT (pred) RETURN 1) == 0``
+
+    The bound variable is the subquery loop variable, so the predicate
+    references it directly. A missing ``WHERE`` defaults the predicate to
+    ``true`` (``any`` = non-empty, ``all`` = always true, ``none`` = empty,
+    ``single`` = exactly one). NOTE: AQL treats a ``null`` predicate as false,
+    so Cypher's three-valued semantics for ``null`` list elements are not
+    reproduced exactly — correct for the common (non-null) case.
+    """
+    id_in_coll = filt_expr.oC_IdInColl()
+    var_name = id_in_coll.oC_Variable().getText().strip()
+    list_expr = _compile_expression(id_in_coll.oC_Expression(), bind_vars)
+    where = filt_expr.oC_Where()
+    cond = _compile_expression(where.oC_Expression(), bind_vars) if where is not None else "true"
+
+    if kind == "all":
+        body = f"FOR {var_name} IN {list_expr} FILTER NOT ({cond}) RETURN 1"
+        return f"(LENGTH({body}) == 0)"
+    body = f"FOR {var_name} IN {list_expr} FILTER {cond} RETURN 1"
+    if kind == "any":
+        return f"(LENGTH({body}) > 0)"
+    if kind == "none":
+        return f"(LENGTH({body}) == 0)"
+    if kind == "single":
+        return f"(LENGTH({body}) == 1)"
+    raise CoreError(f"Unsupported quantifier: {kind}", code="UNSUPPORTED")
+
+
 def _compile_list_comprehension(
     ctx: CypherParser.OC_ListComprehensionContext,
     bind_vars: dict[str, Any],
@@ -4770,6 +4809,19 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
             return _compile_list_comprehension(ctx.oC_ListComprehension(), bind_vars)
         if ctx.oC_PatternComprehension() is not None:
             return _compile_pattern_comprehension(ctx.oC_PatternComprehension(), bind_vars)
+        # List quantifiers: any/all/none/single(x IN list WHERE pred)
+        if ctx.oC_FilterExpression() is not None:
+            if ctx.ANY() is not None:
+                kind = "any"
+            elif ctx.ALL() is not None:
+                kind = "all"
+            elif ctx.NONE() is not None:
+                kind = "none"
+            elif ctx.SINGLE() is not None:
+                kind = "single"
+            else:
+                raise CoreError("Unsupported quantifier in v0", code="UNSUPPORTED")
+            return _compile_quantifier(kind, ctx.oC_FilterExpression(), bind_vars)
         # COUNT(*) aggregate
         if ctx.COUNT() is not None:
             raise CoreError("COUNT(*) subquery not supported in v0", code="NOT_IMPLEMENTED")

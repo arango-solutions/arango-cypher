@@ -372,6 +372,22 @@ variable and under `DISTINCT`). This was the single biggest lever in this arc �
 categories. `WITH *, <items>` and `RETURN *` mixed with aggregation are refused
 rather than mis-compiled. Tests: `tests/test_translate_star_projection.py`.
 
+#### WP-V1h — `any`/`all`/`none`/`single` list quantifiers · *done 2026-07-07*
+
+The list-quantifier predicates parsed but weren't compiled ("Unsupported atom
+in v0"). `_compile_quantifier` lowers `<kind>(x IN list WHERE pred)` to a
+count-subquery test binding the quantifier variable as the loop variable:
+`any` → `LENGTH(FOR x IN list FILTER pred RETURN 1) > 0`, `none`/`single` →
+`== 0`/`== 1`, `all` → `LENGTH(FOR x IN list FILTER NOT (pred) RETURN 1) == 0`
+(missing WHERE defaults the predicate to `true`). No grammar change — the atom
+was already in the grammar. This was the single biggest lever of the whole
+arc: **Full TCK +574** (2092→2666) with `expressions/quantifier` 12→544 (90%),
+plus **+42 Core** (quantifiers appear in boolean / match-where scenarios too).
+Caveat: AQL treats a null predicate as false, so Cypher's three-valued
+semantics for `null` list elements aren't reproduced exactly (the remaining
+~60 quantifier scenarios) — correct for the common non-null case. Tests:
+`tests/test_translate_quantifiers.py`.
+
 ---
 
 ## 4. Sequencing & milestones

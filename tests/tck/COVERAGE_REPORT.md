@@ -15,8 +15,13 @@
 
 | Subset | Passable | Pass rate | (was 2026-04-20) |
 |--------|----------|-----------|------------------|
-| **Full TCK** (all 3,861 scenarios) | 2,092 / 3,861 | **54.2 %** | 32.2 % |
-| **Core TCK** (excludes out-of-scope: `expressions/temporal`, `expressions/quantifier`, `clauses/call` — 2,201 scenarios) | 1,931 / 2,201 | **87.7 %** | 54.8 % |
+| **Full TCK** (all 3,861 scenarios) | 2,666 / 3,861 | **69.0 %** | 32.2 % |
+| **Core TCK** (excludes out-of-scope: `expressions/temporal`, `expressions/quantifier`, `clauses/call` — 2,201 scenarios) | 1,973 / 2,201 | **89.6 %** | 54.8 % |
+
+> 2026-07-07: WP-V1h (`any`/`all`/`none`/`single` list quantifiers) added
+> **+574 Full** (2,092→2,666) — `expressions/quantifier` 12→544 (90%), no
+> longer meaningfully out-of-scope — and **+42 Core** (1,931→1,973), since
+> quantifiers also appear in boolean / match-where scenarios.
 
 > 2026-07-05: WP-V1e/V1f (write-tail combos — `UNWIND … CREATE`/`MERGE`,
 > `MATCH … WITH … CREATE`, `MATCH … WITH … MERGE`) added +8 (Full 2,068→2,076,
@@ -104,7 +109,7 @@ Measured 2026-07-01:
 | Category | Passable | Pass rate | Reason |
 |----------|----------|-----------|--------|
 | expressions/temporal | 25 / 1,004 | 2.5 % | TCK temporal types not implemented. |
-| expressions/quantifier | 12 / 604 | 2.0 % | TCK `ANY`/`ALL`/`SINGLE` quantifiers not implemented. |
+| expressions/quantifier | 544 / 604 | 90.1 % | **Implemented 2026-07-07 (WP-V1h)** — `any`/`all`/`none`/`single(x IN list WHERE …)` lower to count-subquery tests; no longer out-of-scope. Remaining ~60 are `null`-list three-valued-logic edge cases (AQL treats a null predicate as false). |
 | clauses/call | 2 / 52 | 3.8 % | `CALL` procedure syntax not implemented (handled via `arango.*` extensions, not TCK `CALL`). |
 
 ## How to reproduce
