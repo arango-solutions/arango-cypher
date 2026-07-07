@@ -37,6 +37,7 @@ from .state import (
     _active_path_vars,
     _active_registry,
     _active_resolver,
+    _active_user_vars,
     _active_warnings,
     _HopMeta,
 )
@@ -75,6 +76,7 @@ def translate_v0(
     warn_token = _active_warnings.set(warnings)
     path_vars: dict[str, tuple[list[str], list[str]]] = {}
     path_token = _active_path_vars.set(path_vars)
+    user_vars_token = _active_user_vars.set([])
 
     try:
         result = _translate_v0_inner(
@@ -91,6 +93,7 @@ def translate_v0(
         )
         return result
     finally:
+        _active_user_vars.reset(user_vars_token)
         _active_path_vars.reset(path_token)
         _active_warnings.reset(warn_token)
         _active_resolver.reset(res_token)
@@ -877,6 +880,7 @@ def _translate_match_body(
         ret = spq.oC_Return()
         if ret is None:
             raise CoreError("RETURN is required in v0 subset", code="UNSUPPORTED")
+        _set_user_vars_from_parts(all_parts)
         _append_return(ret.oC_ProjectionBody(), lines=lines, bind_vars=bind_vars, var_env=var_env)
         return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
 
@@ -949,6 +953,7 @@ def _translate_match_body(
         ret = spq.oC_Return()
         if ret is None:
             raise CoreError("RETURN is required in v0 subset", code="UNSUPPORTED")
+        _set_user_vars_from_parts(all_parts)
         _append_return(
             ret.oC_ProjectionBody(),
             lines=lines,
@@ -1246,6 +1251,7 @@ def _translate_match_body(
     ret = spq.oC_Return()
     if ret is None:
         raise CoreError("RETURN is required in v0 subset", code="UNSUPPORTED")
+    _set_user_vars_from_parts(all_parts)
     _append_return(
         ret.oC_ProjectionBody(),
         lines=lines,
@@ -1450,6 +1456,13 @@ def _translate_multi_part_query(
         )
         forbidden_vars.update(extra_var_env.keys())
 
+    # Seed the in-scope user variables (for RETURN * / WITH *) from the leading
+    # MATCH patterns; each WITH stage then replaces the scope with its output.
+    _mpq_match_parts: list = []
+    for mc in match_ctxs:
+        _mpq_match_parts.extend(mc.oC_Pattern().oC_PatternPart() or [])
+    _set_user_vars_from_parts(_mpq_match_parts)
+
     # Apply all WITH stages
     var_env: dict[str, str] = {v: v for v in forbidden_vars}
     for w in with_ctxs:
@@ -1478,6 +1491,7 @@ def _translate_multi_part_query(
                 tail_match_ctxs.append(m)
         if not tail_match_ctxs:
             raise CoreError("Only MATCH is supported after WITH in v0 subset", code="NOT_IMPLEMENTED")
+        tail_parts: list = []
         for tm in tail_match_ctxs:
             var_env, rel_type_exprs = _compile_match_from_bound(
                 tm,
@@ -1487,6 +1501,8 @@ def _translate_multi_part_query(
                 var_env=var_env,
                 lines=lines,
             )
+            tail_parts.extend(tm.oC_Pattern().oC_PatternPart() or [])
+        _set_user_vars_from_parts(tail_parts)
 
     # A tail write after WITH (e.g. MATCH … WITH … CREATE/MERGE …). The WITH
     # pipeline is already in ``lines`` with ``var_env`` bound; the write nests
@@ -2860,8 +2876,38 @@ def _apply_with(
 
     items_ctx = proj.oC_ProjectionItems()
     items = items_ctx.oC_ProjectionItem()
-    if not items:
+    is_star = _is_star_projection(items_ctx)
+    if not items and not is_star:
         raise CoreError("WITH projection items required", code="UNSUPPORTED")
+
+    if is_star:
+        # `WITH *` carries every in-scope variable forward unchanged; an
+        # optional trailing WHERE becomes a FILTER. `WITH *, <items>` and
+        # DISTINCT/ORDER/SKIP/LIMIT on `*` are deferred (refused, not
+        # mis-compiled).
+        if items:
+            raise CoreError(
+                "WITH *, <projection items> is not supported; list variables explicitly",
+                code="NOT_IMPLEMENTED",
+            )
+        if (
+            distinct
+            or proj.oC_Order() is not None
+            or proj.oC_Skip() is not None
+            or proj.oC_Limit() is not None
+        ):
+            raise CoreError(
+                "WITH * with DISTINCT/ORDER BY/SKIP/LIMIT is not supported",
+                code="NOT_IMPLEMENTED",
+            )
+        env = dict(incoming_env) if incoming_env else {v: v for v in forbidden_vars}
+        where_ctx = with_ctx.oC_Where()
+        if where_ctx is not None:
+            cond = _compile_where(where_ctx.oC_Expression(), bind_vars)
+            if env:
+                cond = _rewrite_vars(cond, env)
+            lines.append(f"  FILTER {cond}")
+        return env
 
     compiled_nonagg: list[tuple[str, str, str]] = []  # (cypher_var, aql_var, expr)
     compiled_agg: list[tuple[str, str, str]] = []  # (cypher_var, aql_var, agg_expr)
@@ -2976,6 +3022,7 @@ def _apply_with(
         if order_ctx is not None:
             lines.append("  " + _compile_order_by(order_ctx, bind_vars, var_env=env))
         _append_skip_limit(lines, skip_value, limit_value)
+        _active_user_vars.set(list(env.keys()))
         return env
 
     # Non-aggregation path: LETs + (optional) DISTINCT (COLLECT)
@@ -2997,6 +3044,7 @@ def _apply_with(
         lines.append("  " + _compile_order_by(order_ctx, bind_vars, var_env=env))
     _append_skip_limit(lines, skip_value, limit_value)
 
+    _active_user_vars.set(list(env.keys()))
     return env
 
 
@@ -3043,6 +3091,71 @@ def _order_env(
     return env
 
 
+def _is_star_projection(items_ctx: CypherParser.OC_ProjectionItemsContext) -> bool:
+    """Whether the projection is a ``*`` (RETURN */WITH *) — the ``*`` token
+    produces no ``oC_ProjectionItem`` children, so it's detected by the leading
+    ``*`` in the rule's text (``*`` or ``*, extra``)."""
+    return items_ctx.getText().lstrip().startswith("*")
+
+
+def _pattern_parts_user_vars(parts: list) -> list[str]:
+    """Ordered, de-duplicated list of *user-named* variables in a set of
+    pattern parts (named path var, node vars, relationship vars) — the
+    variables a following ``RETURN *`` / ``WITH *`` should surface. Anonymous
+    nodes / relationships (no ``oC_Variable``) contribute nothing."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(name: str | None) -> None:
+        n = (name or "").strip()
+        if n and n not in seen:
+            seen.add(n)
+            out.append(n)
+
+    for part in parts:
+        pv = part.oC_Variable() if hasattr(part, "oC_Variable") else None
+        if pv is not None:  # named path: MATCH p = (...)
+            add(pv.getText())
+        anon = part.oC_AnonymousPatternPart()
+        if anon is None:
+            continue
+        elem = anon.oC_PatternElement()
+        node = elem.oC_NodePattern()
+        if node is not None and node.oC_Variable() is not None:
+            add(node.oC_Variable().getText())
+        for chain in elem.oC_PatternElementChain() or []:
+            rp = chain.oC_RelationshipPattern()
+            detail = rp.oC_RelationshipDetail() if rp is not None else None
+            if detail is not None and detail.oC_Variable() is not None:
+                add(detail.oC_Variable().getText())
+            tn = chain.oC_NodePattern()
+            if tn is not None and tn.oC_Variable() is not None:
+                add(tn.oC_Variable().getText())
+    return out
+
+
+def _set_user_vars_from_parts(parts: list) -> None:
+    """Set the in-scope user-variable list (for ``*`` expansion) from a MATCH
+    pattern, appending to any already in scope (multiple MATCH clauses)."""
+    current = list(_active_user_vars.get())
+    for v in _pattern_parts_user_vars(parts):
+        if v not in current:
+            current.append(v)
+    _active_user_vars.set(current)
+
+
+def _expand_star_projection(var_env: dict[str, str] | None) -> list[tuple[str, str]]:
+    """Expand ``*`` to ``(cypher_var, aql_expr)`` for every user variable in
+    scope, in declaration order. The user-variable list is tracked in
+    :data:`_active_user_vars` (auto-generated traversal / anonymous-node
+    bindings are never added there), mapped to their AQL names via *var_env*."""
+    user_vars = [v for v in _active_user_vars.get() if v and not v.startswith("_")]
+    if not user_vars:
+        raise CoreError("RETURN * / WITH * requires variables in scope", code="UNSUPPORTED")
+    env = var_env or {}
+    return [(v, env.get(v, v)) for v in user_vars]
+
+
 def _append_return(
     proj: CypherParser.OC_ProjectionBodyContext,
     *,
@@ -3058,8 +3171,12 @@ def _append_return(
 
     items_ctx = proj.oC_ProjectionItems()
     items = items_ctx.oC_ProjectionItem()
-    if not items:
+    is_star = _is_star_projection(items_ctx)
+    if not items and not is_star:
         raise CoreError("RETURN items required", code="UNSUPPORTED")
+
+    # `RETURN *` / `RETURN *, extra` expands to every user variable in scope.
+    star_items = _expand_star_projection(var_env) if is_star else []
 
     # --- Aggregation detection ---
     has_agg = False
@@ -3072,6 +3189,11 @@ def _append_return(
             break
 
     if has_agg:
+        if is_star:
+            raise CoreError(
+                "RETURN * combined with aggregation is not supported",
+                code="NOT_IMPLEMENTED",
+            )
         _append_return_aggregation(
             items,
             lines=lines,
@@ -3084,7 +3206,7 @@ def _append_return(
         return
 
     # --- Non-aggregation path ---
-    compiled_items: list[tuple[str | None, str]] = []
+    compiled_items: list[tuple[str | None, str]] = list(star_items)
     for it in items:
         expr_ctx = it.oC_Expression()
         alias = it.oC_Variable().getText().strip() if it.oC_Variable() is not None else None
@@ -3101,7 +3223,9 @@ def _append_return(
         compiled_items.append((alias, expr))
 
     if distinct:
-        if len(compiled_items) == 1:
+        # `RETURN *` always projects named columns, so it uses the object form
+        # even for a single variable (a scalar COLLECT would drop the name).
+        if len(compiled_items) == 1 and not is_star:
             alias, expr = compiled_items[0]
             col_var = alias or _infer_key(expr) or "value"
             lines.append(f"  COLLECT {col_var} = {expr}")

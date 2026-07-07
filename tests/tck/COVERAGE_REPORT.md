@@ -15,13 +15,14 @@
 
 | Subset | Passable | Pass rate | (was 2026-04-20) |
 |--------|----------|-----------|------------------|
-| **Full TCK** (all 3,861 scenarios) | 2,076 / 3,861 | **53.8 %** | 32.2 % |
-| **Core TCK** (excludes out-of-scope: `expressions/temporal`, `expressions/quantifier`, `clauses/call` — 2,201 scenarios) | 1,915 / 2,201 | **87.0 %** | 54.8 % |
+| **Full TCK** (all 3,861 scenarios) | 2,092 / 3,861 | **54.2 %** | 32.2 % |
+| **Core TCK** (excludes out-of-scope: `expressions/temporal`, `expressions/quantifier`, `clauses/call` — 2,201 scenarios) | 1,931 / 2,201 | **87.7 %** | 54.8 % |
 
 > 2026-07-05: WP-V1e/V1f (write-tail combos — `UNWIND … CREATE`/`MERGE`,
 > `MATCH … WITH … CREATE`, `MATCH … WITH … MERGE`) added +8 (Full 2,068→2,076,
 > Core 1,907→1,915); `clauses/create` 74→82%, `clauses/unwind` 50→71%,
-> `clauses/merge` 55→59%.
+> `clauses/merge` 55→59%. WP-V1g (`RETURN *` / `WITH *` star projection) added
+> +16 (Full 2,076→2,092, Core 1,915→1,931).
 
 > 2026-07-05: WP-V1c (single-node `EXISTS`/`COUNT` subquery bodies) took
 > `expressions/existentialSubqueries` from 6/10 → 9/10; WP-V1d

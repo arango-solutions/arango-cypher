@@ -358,6 +358,20 @@ tail MATCH before a MERGE (would double-compile). Tests:
 `tests/test_translate_write_clause_gaps.py` (`TestUnwindWriteTail`,
 `TestWithCreateTail`, `TestWithMergeTail`).
 
+#### WP-V1g — `RETURN *` / `WITH *` star projection · *done 2026-07-05*
+
+`RETURN *` / `WITH *` was rejected ("RETURN items required" — the `*` token
+yields no projection items). `*` now expands to every *user-named* variable in
+scope, in declaration order. A new `_active_user_vars` contextvar tracks the
+in-scope user variables (populated from the matched pattern AST; auto-generated
+traversal / anonymous-node bindings are never added), and each `WITH` replaces
+the scope with its projected variables (`WITH *` passes it through, applying an
+optional `WHERE`). `RETURN *` always emits the named-object form (even for one
+variable and under `DISTINCT`). This was the single biggest lever in this arc —
+**TCK +16** (Full 2076→2092, Core 1915→1931), since `*` appears across many
+categories. `WITH *, <items>` and `RETURN *` mixed with aggregation are refused
+rather than mis-compiled. Tests: `tests/test_translate_star_projection.py`.
+
 ---
 
 ## 4. Sequencing & milestones

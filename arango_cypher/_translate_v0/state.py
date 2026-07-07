@@ -24,6 +24,14 @@ _active_path_vars: ContextVar[dict[str, tuple[list[str], list[str]]]] = ContextV
     "_active_path_vars",
     default={},  # noqa: B039  # always .set() before .get() in translate_v0
 )
+# Ordered list of the *user-named* variables currently in scope, used to expand
+# ``RETURN *`` / ``WITH *`` (auto-generated traversal / anonymous-node variables
+# must not appear in a ``*`` projection). Pattern compilation sets it from the
+# matched pattern; ``WITH`` replaces it with the projected variables.
+_active_user_vars: ContextVar[list[str]] = ContextVar(
+    "_active_user_vars",
+    default=[],  # noqa: B039  # always .set() before .get() in translate_v0
+)
 
 
 @dataclass
