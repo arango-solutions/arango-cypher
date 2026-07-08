@@ -46,6 +46,41 @@ translate; only `ORG_REG` (analyzer entity cap, filed upstream) genuinely remain
 
 ---
 
+## Retest verification (FinReflectKG harness, 2026-07-07)
+
+Re-ran `scripts/cypher_eval.py` against the editable install after the fix landed:
+**transpile 3/22 → 14/22, execute 3/22 → 7/22.** Confirmations and two discrepancies vs. the
+Resolution above:
+
+- ✅ **#1 / #2 resolver normalization — verified.** `Has_Stake_In` → `has_stake_in` and
+  `FIN_METRIC` → `FINMETRIC` now resolve; 7 previously-failing queries transpile.
+- ✅ **#3 `ORG_REG` — still fails** `MAPPING_NOT_FOUND` (agrees: analyzer entity cap, upstream).
+- ⚠️ **#4 `reduce(...)` — retest still errors.** Query 22 still returns
+  `CYPHER_SYNTAX_ERROR ... no viable alternative at input 'reduce('` in the installed working tree.
+  The grammar/parser fix does **not** appear active here — likely the regenerated ANTLR parser
+  (`arango_cypher/_antlr`) isn't present on the checked-out branch, or a regen/build step is
+  needed. Please confirm the regenerated parser is committed.
+- 🐞 **NEW — transpiler emits invalid AQL** (surfaced now that vocabulary resolves; not covered by
+  the Resolution above):
+  - **Q8** → `[ERR 1203] collection or view not found: loc` — the generated AQL uses the traversal
+    variable `loc` in a position ArangoDB resolves as a collection.
+  - **Q16** (3-hop `(a)-[:Depends_On]->()-[:Depends_On]->()-[:Depends_On]->()`) →
+    `[ERR 1511] variable 'v' is assigned multiple times` — the var-length expansion reassigns the
+    traversal variable `v` via `LET` and references undefined `r` / `r_1`:
+
+    ```aql
+    FOR v, r_2, _path IN 3..3 OUTBOUND org @@edgeCollection
+      LET v = _path.vertices[1]     -- 'v' already bound by the traversal
+      ...
+      LET v = _path.vertices[2]     -- reassigned again
+      LET path = {nodes: [org, v, v, v], edges: [r, r_1, r_2]}   -- r, r_1 undefined
+    ```
+
+- **Efficiency (not correctness):** 5 queries transpile to valid AQL but were killed at a server
+  runtime limit; the generated AQL is far slower than the hand-written equivalents (e.g. the
+  "orgs in >3 locations" query is ~372 ms by hand). The `WITH ... COUNT(DISTINCT ...)` / multi-hop
+  expansions don't engage the vertex-centric fast path.
+
 ---
 
 ## Summary
