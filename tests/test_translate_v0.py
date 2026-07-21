@@ -6,9 +6,10 @@ targeted cases for label-resolution normalisation (WP-27 D5 backtick strip).
 
 from __future__ import annotations
 
+from arango_query_core import MappingBundle, MappingSource
+
 from arango_cypher import translate
 from arango_cypher.translate_v0 import _strip_label_backticks
-from arango_query_core import MappingBundle, MappingSource
 from tests.helpers.mapping_fixtures import mapping_bundle_for
 
 

@@ -94,7 +94,9 @@ def test_prompt_section_format() -> None:
     """
     paths = sorted(CORPORA_DIR.glob("*.yml"))
     index = FewShotIndex.from_corpus_files(paths)
-    section = index.format_prompt_section("Who directed The Matrix?", k=1)
+    # Post-extraction, the fence language tag is caller-supplied (the
+    # shared FewShotIndex is target-language-agnostic).
+    section = index.format_prompt_section("Who directed The Matrix?", k=1, language="cypher")
     expected = (
         "## Examples\n"
         "Q: Who directed The Matrix?\n"

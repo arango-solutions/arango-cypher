@@ -20,6 +20,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from arango_query_core.exec import explain_aql
 
 from arango_cypher.nl2cypher import (
     _SYSTEM_PROMPT,
@@ -27,7 +28,6 @@ from arango_cypher.nl2cypher import (
     nl_to_cypher,
 )
 from arango_cypher.nl2cypher._core import _call_llm_with_retry
-from arango_query_core.exec import explain_aql
 from tests.helpers.mapping_fixtures import mapping_bundle_for
 
 

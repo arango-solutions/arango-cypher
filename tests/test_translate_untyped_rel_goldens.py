@@ -18,6 +18,7 @@ null-safe fallback to the physical collection name.
 from __future__ import annotations
 
 import pytest
+from arango_query_core import CoreError, MappingBundle, MappingResolver, MappingSource
 
 from arango_cypher import translate
 from arango_cypher._translate_v0.core import (
@@ -25,7 +26,6 @@ from arango_cypher._translate_v0.core import (
     _resolve_relationship_for_pattern,
     _untyped_rel_type_expr,
 )
-from arango_query_core import CoreError, MappingBundle, MappingResolver, MappingSource
 from tests.helpers.mapping_fixtures import mapping_bundle_for
 
 

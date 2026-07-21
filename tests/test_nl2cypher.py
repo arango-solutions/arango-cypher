@@ -378,8 +378,9 @@ class TestValueShapeHints:
         assert _property_quality_hint(None) == ""
 
     def test_schema_summary_includes_value_shape_block(self) -> None:
-        from arango_cypher.nl2cypher import _build_schema_summary
         from arango_query_core.mapping import MappingBundle
+
+        from arango_cypher.nl2cypher import _build_schema_summary
 
         bundle = MappingBundle(
             conceptual_schema={"entityTypes": ["ORG"]},

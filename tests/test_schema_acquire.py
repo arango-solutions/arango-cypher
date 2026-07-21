@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
+from arango_query_core import CoreError, MappingBundle
 
 from arango_cypher.schema_acquire import (
     CACHE_TTL_SECONDS,
@@ -17,7 +18,6 @@ from arango_cypher.schema_acquire import (
     classify_schema,
     get_mapping,
 )
-from arango_query_core import CoreError, MappingBundle
 
 # ---------------------------------------------------------------------------
 # Helpers — mock db factories

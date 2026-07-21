@@ -14,10 +14,10 @@ Covers:
 from __future__ import annotations
 
 import pytest
+from arango_query_core import CoreError, MappingBundle, MappingResolver, MappingSource
 
 from arango_cypher import translate
 from arango_cypher._translate_v0.core import _shared_type_field
-from arango_query_core import CoreError, MappingBundle, MappingResolver, MappingSource
 
 
 def _bundle(entities: dict, relationships: dict | None = None) -> MappingBundle:

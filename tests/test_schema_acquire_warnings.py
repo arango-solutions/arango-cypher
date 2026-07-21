@@ -15,6 +15,8 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from arango_query_core import MappingBundle, MappingSource
+
 from arango_cypher import schema_acquire
 from arango_cypher.schema_acquire import (
     _attach_warning,
@@ -25,7 +27,6 @@ from arango_cypher.schema_acquire import (
     get_mapping,
 )
 from arango_cypher.schema_cache import bundle_from_doc, bundle_to_doc
-from arango_query_core import MappingBundle, MappingSource
 
 # ---------------------------------------------------------------------------
 # Mock db helper — small enough to duplicate rather than import from

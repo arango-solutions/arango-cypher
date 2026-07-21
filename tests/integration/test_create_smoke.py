@@ -10,8 +10,9 @@ try:
 except ImportError:
     ArangoClient = None  # type: ignore[misc, assignment]
 
-from arango_cypher import translate
 from arango_query_core import MappingBundle, MappingSource
+
+from arango_cypher import translate
 
 
 def _make_mapping(collection: str, edge_collection: str) -> MappingBundle:

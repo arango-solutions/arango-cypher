@@ -4,9 +4,9 @@ import json
 
 import pytest
 from arango import ArangoClient
+from arango_query_core.exec import AqlExecutor
 
 from arango_cypher import get_cypher_profile, translate, validate_cypher_profile
-from arango_query_core.exec import AqlExecutor
 from tests.helpers.mapping_fixtures import mapping_bundle_for
 from tests.integration.seed import seed_social_dataset
 

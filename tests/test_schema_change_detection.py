@@ -21,6 +21,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from arango_query_core import MappingBundle, MappingSource
 
 from arango_cypher.schema_acquire import (
     SchemaChangeReport,
@@ -36,7 +37,6 @@ from arango_cypher.schema_cache import (
     bundle_from_doc,
     bundle_to_doc,
 )
-from arango_query_core import MappingBundle, MappingSource
 
 # ---------------------------------------------------------------------------
 # Test doubles

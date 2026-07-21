@@ -13,10 +13,10 @@ resolve unlabeled endpoints via single-collection inference.
 from __future__ import annotations
 
 import pytest
-
-from arango_cypher import translate
 from arango_query_core import MappingResolver
 from arango_query_core.errors import CoreError
+
+from arango_cypher import translate
 from tests.helpers.mapping_fixtures import mapping_bundle_for
 
 

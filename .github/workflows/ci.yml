@@ -35,9 +35,18 @@ jobs:
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
+      # arango-query-core (the extracted mapping/OWL/NL-engine core) is a
+      # hard dependency not yet published to an index, so it is installed
+      # from its own repo first — pip then sees the requirement satisfied
+      # when resolving this package.
+      - uses: actions/checkout@v4
+        with:
+          repository: arango-solutions/arango-query-core
+          path: arango-query-core
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - run: pip install ./arango-query-core
       - run: pip install -e ".[dev]"
       - run: pytest -m "not integration and not tck" --tb=short -q
 
@@ -54,12 +63,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Unpublished hard dependency — see the test job. The packaging
+      # smoke additionally builds this checkout's wheel and serves it to
+      # the clean-venv pip via --find-links (ARANGO_QUERY_CORE_PATH).
+      - uses: actions/checkout@v4
+        with:
+          repository: arango-solutions/arango-query-core
+          path: arango-query-core
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: pip install ./arango-query-core
       - run: pip install -e ".[dev]"
       - env:
           RUN_PACKAGING: "1"
+          ARANGO_QUERY_CORE_PATH: ${{ github.workspace }}/arango-query-core
         run: pytest tests/integration/test_packaging_smoke.py -v --tb=short
 
   integration:
@@ -84,8 +102,14 @@ jobs:
       RUN_INTEGRATION: "1"
     steps:
       - uses: actions/checkout@v4
+      # Unpublished hard dependency — see the test job.
+      - uses: actions/checkout@v4
+        with:
+          repository: arango-solutions/arango-query-core
+          path: arango-query-core
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - run: pip install ./arango-query-core
       - run: pip install -e ".[dev]"
       - run: pytest -m integration --tb=short -q

@@ -15,9 +15,9 @@ multi-label / OR combinations the corpus (q10/q11/q20) needs.
 from __future__ import annotations
 
 import pytest
+from arango_query_core import CoreError, MappingBundle, MappingSource
 
 from arango_cypher import translate
-from arango_query_core import CoreError, MappingBundle, MappingSource
 
 
 def _bundle(entities: dict, relationships: dict | None = None) -> MappingBundle:

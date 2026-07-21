@@ -13,11 +13,11 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from arango_query_core import MappingBundle, MappingSource
 from fastapi.testclient import TestClient
 
 from arango_cypher.schema_acquire import _mapping_cache
 from arango_cypher.service import _get_session, _Session, app
-from arango_query_core import MappingBundle, MappingSource
 
 client = TestClient(app)
 

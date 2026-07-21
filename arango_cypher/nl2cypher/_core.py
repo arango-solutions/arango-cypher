@@ -8,11 +8,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from arango_query_core.mapping import MappingBundle
-
-from .providers import (
+from arango_query_core.nl.providers import (
     LLMProvider,
     _get_default_provider,
 )
+
 from .tenant_guardrail import (
     TenantContext,
     check_tenant_scope,
@@ -27,8 +27,9 @@ from .tenant_scope import (
 )
 
 if TYPE_CHECKING:
+    from arango_query_core.nl.fewshot import FewShotIndex
+
     from .entity_resolution import EntityResolver
-    from .fewshot import FewShotIndex
 
 logger = logging.getLogger(__name__)
 
@@ -716,8 +717,9 @@ def _validate_via_explain(
     if db is None or mapping is None:
         return True, ""
     try:
-        from arango_cypher.api import translate
         from arango_query_core.exec import explain_aql
+
+        from arango_cypher.api import translate
     except Exception as exc:
         logger.info("execution-grounded validation unavailable: %s", exc)
         return True, ""
@@ -1447,7 +1449,7 @@ def _get_default_fewshot_index() -> FewShotIndex | None:
     try:
         from pathlib import Path
 
-        from .fewshot import BM25Retriever, FewShotIndex, _NoopRetriever
+        from arango_query_core.nl.fewshot import BM25Retriever, FewShotIndex, _NoopRetriever
 
         corpora_dir = Path(__file__).parent / "corpora"
         paths = sorted(corpora_dir.glob("*.yml"))

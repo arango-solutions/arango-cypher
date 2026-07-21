@@ -7,9 +7,8 @@ from __future__ import annotations
 import logging as _log
 import time
 
-from fastapi import Depends, HTTPException
-
 from arango_query_core import CoreError
+from fastapi import Depends, HTTPException
 
 from ... import corrections as _corrections
 from ...api import translate, validate_cypher_profile

@@ -6,15 +6,21 @@ Supports pluggable LLM backends via :class:`LLMProvider` and includes
 a rule-based fallback for common NL→Cypher patterns when no LLM is
 configured.
 
-Wave 4a split the former single-file module into submodules:
+Wave 4a split the former single-file module into submodules; the
+language-agnostic pieces (``providers``, ``fewshot``) have since moved
+to :mod:`arango_query_core.nl` and are re-exported here unchanged:
 
-* ``providers`` — HTTP backends (OpenAI, OpenRouter, …) and provider resolution.
-* ``_core``     — schema summarization, :class:`PromptBuilder`,
+* ``arango_query_core.nl.providers`` — HTTP backends (OpenAI,
+  OpenRouter, …) and provider resolution.
+* ``arango_query_core.nl.fewshot``   — :class:`FewShotIndex` /
+  :class:`BM25Retriever` used by :func:`nl_to_cypher` to inject dynamic
+  few-shot examples (WP-25.1).
+* ``_core``   — schema summarization, :class:`PromptBuilder`,
   rule-based fallback, :func:`nl_to_cypher`, :func:`suggest_nl_queries`.
-* ``_aql``      — :func:`nl_to_aql` direct translation path.
-* ``fewshot``   — :class:`FewShotIndex` / :class:`BM25Retriever` used
-  by :func:`nl_to_cypher` to inject dynamic few-shot examples
-  (WP-25.1).
+* ``_aql``    — :func:`nl_to_aql` direct translation path.
+* ``adapter`` — :class:`CypherAdapter`, the Cypher implementation of
+  :class:`arango_query_core.nl.QueryLanguageAdapter` (the five
+  language-specific seams the shared engine delegates to).
 
 The public surface is re-exported here; downstream code should import
 from ``arango_cypher.nl2cypher`` and not reach into the submodules.
@@ -37,6 +43,18 @@ Usage::
 
 from __future__ import annotations
 
+from arango_query_core.nl import (
+    AnthropicProvider,
+    BM25Retriever,
+    FewShotIndex,
+    LLMProvider,
+    OpenAIProvider,
+    OpenRouterProvider,
+    Retriever,
+    get_llm_provider,
+    split_system_for_anthropic_cache,
+)
+
 from ._aql import NL2AqlResult, nl_to_aql
 from ._core import (
     _SYSTEM_PROMPT,
@@ -47,16 +65,8 @@ from ._core import (
     nl_to_cypher,
     suggest_nl_queries,
 )
+from .adapter import CypherAdapter
 from .entity_resolution import EntityResolver, IndexAdvisory, ResolvedEntity
-from .fewshot import BM25Retriever, FewShotIndex, Retriever
-from .providers import (
-    AnthropicProvider,
-    LLMProvider,
-    OpenAIProvider,
-    OpenRouterProvider,
-    get_llm_provider,
-    split_system_for_anthropic_cache,
-)
 from .tenant_guardrail import (
     TenantContext,
     TenantScopeViolation,
@@ -73,6 +83,7 @@ from .tenant_scope import (
 __all__ = [
     "AnthropicProvider",
     "BM25Retriever",
+    "CypherAdapter",
     "EntityResolver",
     "IndexAdvisory",
     "EntityScope",

@@ -25,9 +25,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
+from arango_query_core.errors import CoreError
 
 from arango_cypher.api import translate
-from arango_query_core.errors import CoreError
 from tests.helpers.mapping_fixtures import mapping_bundle_for
 
 

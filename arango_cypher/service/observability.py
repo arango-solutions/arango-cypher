@@ -545,7 +545,7 @@ def current_llm_provider_and_model() -> tuple[str | None, str | None]:
     that case.
 
     Provider preference: ``LLM_PROVIDER`` env (canonical, used by
-    :func:`arango_cypher.nl2cypher.providers.get_default_provider`),
+    :func:`arango_query_core.nl.providers.get_default_provider`),
     falling back to inferring from which model env is set.
     """
     provider = os.getenv("LLM_PROVIDER", "").strip().lower() or None

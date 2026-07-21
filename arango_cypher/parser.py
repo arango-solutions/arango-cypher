@@ -6,7 +6,6 @@ from typing import Any
 
 from antlr4 import CommonTokenStream, InputStream
 from antlr4.error.ErrorListener import ErrorListener
-
 from arango_query_core import CoreError
 
 from ._antlr.CypherLexer import CypherLexer

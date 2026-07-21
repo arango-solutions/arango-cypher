@@ -20,12 +20,12 @@ from typing import Any
 
 import pytest
 
+from arango_cypher import tenant_plan_validator as tpv
 from arango_cypher.nl2cypher.tenant_scope import (
     EntityScope,
     EntityTenantRole,
     TenantScopeManifest,
 )
-from arango_cypher import tenant_plan_validator as tpv
 from arango_cypher.tenant_plan_validator import (
     TenantScopeViolation,
     _CachedCertification,

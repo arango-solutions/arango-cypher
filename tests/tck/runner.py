@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from arango import ArangoClient
-
-from arango_cypher import translate
 from arango_query_core import CoreError, MappingBundle
 from arango_query_core.exec import AqlExecutor
+
+from arango_cypher import translate
 from tests.helpers.mapping_fixtures import mapping_bundle_for
 from tests.integration.seed import (
     _ensure_doc_collection,

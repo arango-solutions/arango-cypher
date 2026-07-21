@@ -10,11 +10,10 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from arango_query_core import CoreError, MappingBundle, MappingSource, mapping_from_wire_dict
 from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
-
-from arango_query_core import CoreError, MappingBundle, MappingSource, mapping_from_wire_dict
 
 from ._env import read_arango_password
 
@@ -209,8 +208,9 @@ def mapping(
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
 ) -> None:
     """Print mapping summary for a database."""
-    from arango_cypher.schema_acquire import get_mapping
     from arango_query_core import MappingResolver
+
+    from arango_cypher.schema_acquire import get_mapping
 
     try:
         database = _connect(host, port, db, user, password)
@@ -295,8 +295,9 @@ def doctor(
     # --- VCI checks ---
     if database is not None:
         try:
-            from arango_cypher.schema_acquire import get_mapping
             from arango_query_core import MappingResolver
+
+            from arango_cypher.schema_acquire import get_mapping
 
             if bundle is None:
                 bundle = get_mapping(database)

@@ -7,17 +7,16 @@ from pathlib import Path
 from typing import Any
 
 from arango.database import StandardDatabase
-from fastapi import Depends, HTTPException
-
 from arango_query_core import MappingResolver
+from fastapi import Depends, HTTPException
 
 from ..app import app
 from ..mapping import _mapping_from_dict
 from ..models import CreateIndexRequest, TranslateRequest
 from ..observability import log_endpoint_timing
 from ..security import (
-    _check_compute_rate_limit,
     _COLLECTION_NAME_RE,
+    _check_compute_rate_limit,
     _get_session,
     _Session,
     _translate_errors,

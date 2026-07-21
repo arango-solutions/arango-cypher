@@ -23,12 +23,13 @@ import logging
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from arango_query_core import MappingBundle, MappingSource
+
 from arango_cypher.nl2cypher._core import (
     _build_schema_summary,
     _deployment_style_hint,
 )
 from arango_cypher.schema_acquire import acquire_mapping_bundle
-from arango_query_core import MappingBundle, MappingSource
 
 
 def _make_db(name: str = "shardingprofile_mock_db") -> MagicMock:

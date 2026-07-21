@@ -23,9 +23,9 @@ from typing import Any
 import pytest
 import yaml
 from arango import ArangoClient
+from arango_query_core.exec import AqlExecutor
 
 from arango_cypher import translate
-from arango_query_core.exec import AqlExecutor
 from tests.helpers.mapping_fixtures import mapping_bundle_for
 from tests.integration.datasets import seed_northwind_dataset
 from tests.integration.test_movies_crossvalidate import assert_result_equivalent

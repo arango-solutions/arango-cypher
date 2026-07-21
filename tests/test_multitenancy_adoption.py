@@ -26,6 +26,8 @@ import logging
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from arango_query_core import MappingBundle, MappingSource
+
 from arango_cypher.nl2cypher.tenant_guardrail import (
     TenantContext,
     TenantScopeViolation,
@@ -38,7 +40,6 @@ from arango_cypher.nl2cypher.tenant_scope import (
     analyze_tenant_scope,
 )
 from arango_cypher.schema_acquire import acquire_mapping_bundle
-from arango_query_core import MappingBundle, MappingSource
 
 # ---------------------------------------------------------------------------
 # Fixture builders

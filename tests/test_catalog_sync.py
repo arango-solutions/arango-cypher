@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from arango_query_core import MappingBundle, MappingSource
+
 import arango_cypher.catalog.sync as sync_mod
 from arango_cypher.catalog.registry import CatalogRegistry, DatabaseEntry
 from arango_cypher.catalog.sync import sync_entry, sync_once
-from arango_query_core import MappingBundle, MappingSource
 
 
 def _bundle(n_entities: int = 2, n_rels: int = 1) -> MappingBundle:

@@ -21,8 +21,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from arango_cypher import translate
 from arango_query_core import CoreError
+
+from arango_cypher import translate
 from tests.tck.gherkin import Scenario, Step, parse_feature
 from tests.tck.runner import _build_mapping_for_scenario  # noqa: PLC2701
 

@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from arango_cypher.schema_acquire import _normalize_open_vocab_edges
 from arango_query_core import MappingBundle, MappingSource
+
+from arango_cypher.schema_acquire import _normalize_open_vocab_edges
 
 
 class _FakeAql:

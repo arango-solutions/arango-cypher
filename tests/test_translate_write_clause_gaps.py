@@ -12,9 +12,9 @@ mis-dispatched:
 from __future__ import annotations
 
 import pytest
+from arango_query_core.errors import CoreError
 
 from arango_cypher import translate
-from arango_query_core.errors import CoreError
 from tests.helpers.mapping_fixtures import mapping_bundle_for
 
 

@@ -28,10 +28,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import pytest
+from arango_query_core import safe_execute
 
 from arango_cypher.service.safe_exec import safe_execute_aql
 from arango_cypher.tenant_plan_validator import TenantScopeViolation
-from arango_query_core import safe_execute
 
 
 @dataclass

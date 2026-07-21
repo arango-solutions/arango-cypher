@@ -9,9 +9,10 @@ layer on top without regressing the baseline prompt.
 
 from __future__ import annotations
 
+from arango_query_core.mapping import MappingBundle
+
 from arango_cypher.nl2cypher import _SYSTEM_PROMPT, PromptBuilder
 from arango_cypher.nl2cypher._core import _build_schema_summary, _escape_label
-from arango_query_core.mapping import MappingBundle
 
 FROZEN_SYSTEM_PROMPT = (
     "You are a Cypher query expert."

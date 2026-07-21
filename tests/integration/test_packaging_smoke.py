@@ -39,6 +39,12 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PYPROJECT = _REPO_ROOT / "pyproject.toml"
 
+# The extracted core (step 2 of the nl-engine extraction) is a hard
+# dependency but not yet published to an index, so the clean-venv install
+# serves its wheel locally via ``--find-links``. Sibling checkout by
+# convention; override with ARANGO_QUERY_CORE_PATH.
+_QUERY_CORE_ROOT = Path(os.environ.get("ARANGO_QUERY_CORE_PATH", _REPO_ROOT.parent / "arango-query-core"))
+
 
 try:
     import tomllib as _toml
@@ -166,6 +172,16 @@ def test_sdist_builds_and_imports_with_service_extras(tmp_path: Path) -> None:
     assert len(sdists) == 1, f"expected exactly one sdist in {dist_dir}, got {sdists!r}"
     sdist = sdists[0]
 
+    if not (_QUERY_CORE_ROOT / "pyproject.toml").exists():
+        pytest.skip(
+            f"arango-query-core checkout not found at {_QUERY_CORE_ROOT} "
+            "(set ARANGO_QUERY_CORE_PATH); required until it is published."
+        )
+    _run_or_fail(
+        [sys.executable, "-m", "build", "--wheel", "--outdir", str(dist_dir), str(_QUERY_CORE_ROOT)],
+        label="arango-query-core wheel build (unpublished dependency)",
+    )
+
     venv_dir = tmp_path / "venv"
     _run_or_fail(
         [sys.executable, "-m", "venv", str(venv_dir)],
@@ -179,7 +195,15 @@ def test_sdist_builds_and_imports_with_service_extras(tmp_path: Path) -> None:
     )
 
     _run_or_fail(
-        [str(venv_python), "-m", "pip", "install", f"{sdist}[service,analyzer]"],
+        [
+            str(venv_python),
+            "-m",
+            "pip",
+            "install",
+            "--find-links",
+            str(dist_dir),
+            f"{sdist}[service,analyzer]",
+        ],
         label="sdist install with [service,analyzer] extras",
     )
 

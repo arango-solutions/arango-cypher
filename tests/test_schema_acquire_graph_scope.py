@@ -19,9 +19,9 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from arango_query_core import CoreError, MappingBundle
 
 from arango_cypher import schema_acquire as sa
-from arango_query_core import CoreError, MappingBundle
 
 
 def _full_bundle() -> MappingBundle:

@@ -14,11 +14,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from arango_query_core import MappingBundle, MappingSource
+
 from arango_cypher.nl2cypher._core import (
     _build_schema_summary,
     _shard_families_block,
 )
-from arango_query_core import MappingBundle, MappingSource
 
 # ---------------------------------------------------------------------------
 # Bundle helpers

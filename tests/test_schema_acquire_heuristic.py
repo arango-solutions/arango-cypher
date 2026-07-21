@@ -15,12 +15,13 @@ import re
 from typing import Any
 from unittest.mock import MagicMock
 
+from arango_query_core import MappingBundle
+
 from arango_cypher.schema_acquire import (
     _build_heuristic_mapping,
     _detect_type_field,
     _looks_class_like,
 )
-from arango_query_core import MappingBundle
 
 _COLLECT_RE = re.compile(r"COLLECT val = doc\.`([^`]+)`")
 
