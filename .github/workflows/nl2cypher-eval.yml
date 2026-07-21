@@ -97,21 +97,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # arango-query-core (the extracted mapping/OWL/NL-engine core) is a
-      # hard dependency not yet published to an index; install it from its
-      # own repo first so the editable install below resolves.
-      - uses: actions/checkout@v4
-        with:
-          repository: arango-solutions/arango-query-core
-          path: arango-query-core
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-
-      - name: Install unpublished arango-query-core dependency
-        run: pip install ./arango-query-core
 
       - name: Install package + dev extras
         run: pip install -e ".[dev]"

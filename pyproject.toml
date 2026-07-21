@@ -10,9 +10,9 @@ dependencies = [
   # language-agnostic NL engine (providers/fewshot/seams) — carved out of
   # this repo into its own distribution (step 2 of the nl-engine
   # extraction; see arango-sparql-py/docs/architecture/proposals/).
-  # Until it is published, install it first (editable sibling checkout or
-  # git URL) — pip skips index resolution when the requirement is already
-  # satisfied; uv users get it via [tool.uv.sources] below.
+  # Published on PyPI (0.1.0, 2026-07-18). For co-development against the
+  # sibling checkout, `pip install -e ../arango-query-core` first — pip
+  # skips index resolution when the requirement is already satisfied.
   "arango-query-core>=0.1.0,<0.2.0",
   "python-arango>=8.1.1",
   "antlr4-python3-runtime",
@@ -130,9 +130,4 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["arango_cypher"]
-
-[tool.uv.sources]
-# Sibling checkout of the extracted core, until it is published to an
-# index (or pushed to GitHub, at which point this can become a git URL).
-arango-query-core = { path = "../arango-query-core", editable = true }
 

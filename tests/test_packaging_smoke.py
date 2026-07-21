@@ -64,12 +64,6 @@ pytestmark = pytest.mark.skipif(
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# The extracted core (step 2 of the nl-engine extraction) is a hard
-# dependency but not yet published to an index, so clean-venv installs
-# need its wheel served locally via ``--find-links``. Located next to
-# this repo by convention; override with ARANGO_QUERY_CORE_PATH.
-QUERY_CORE_ROOT = Path(os.environ.get("ARANGO_QUERY_CORE_PATH", REPO_ROOT.parent / "arango-query-core"))
-
 
 def _venv_python(venv_dir: Path) -> Path:
     if os.name == "nt":
@@ -116,20 +110,6 @@ def _build_sdist(workdir: Path) -> Path:
         dist_dir.glob("arango-cypher-py-*.tar.gz")
     )
     assert sdists, f"No sdist produced in {dist_dir} (contents: {list(dist_dir.iterdir())})"
-
-    # Serve the unpublished arango-query-core dependency from the same
-    # directory: build its wheel so ``pip install --find-links <dist_dir>``
-    # resolves it while every published dependency still comes from PyPI.
-    if not (QUERY_CORE_ROOT / "pyproject.toml").exists():
-        pytest.skip(
-            f"arango-query-core checkout not found at {QUERY_CORE_ROOT} "
-            "(set ARANGO_QUERY_CORE_PATH); required until it is published."
-        )
-    _run(
-        [sys.executable, "-m", "build", "--wheel", "--outdir", str(dist_dir)],
-        cwd=QUERY_CORE_ROOT,
-    )
-
     return sdists[-1]
 
 
@@ -146,18 +126,7 @@ def test_service_extra_installs_in_clean_venv(tmp_path: Path) -> None:
 
     _run([str(py), "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
 
-    _run(
-        [
-            str(py),
-            "-m",
-            "pip",
-            "install",
-            "--quiet",
-            "--find-links",
-            str(sdist.parent),
-            f"{sdist}[service]",
-        ]
-    )
+    _run([str(py), "-m", "pip", "install", "--quiet", f"{sdist}[service]"])
 
     _run([str(py), "-c", "import arango_cypher; import arango_cypher.service"])
 
@@ -188,17 +157,6 @@ def test_base_install_succeeds_without_extras(tmp_path: Path) -> None:
     py = _venv_python(venv_dir)
 
     _run([str(py), "-m", "pip", "install", "--quiet", "--upgrade", "pip"])
-    _run(
-        [
-            str(py),
-            "-m",
-            "pip",
-            "install",
-            "--quiet",
-            "--find-links",
-            str(sdist.parent),
-            str(sdist),
-        ]
-    )
+    _run([str(py), "-m", "pip", "install", "--quiet", str(sdist)])
 
     _run([str(py), "-c", "import arango_cypher, arango_query_core"])

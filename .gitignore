@@ -80,7 +80,3 @@ CLAUDE.md
 
 # Stray root npm lockfile (the real one lives in ui/package-lock.json).
 /package-lock.json
-
-# CI checks out the unpublished arango-query-core dependency into the
-# workspace; keep it out of git and out of hatchling's sdist file set.
-/arango-query-core/
