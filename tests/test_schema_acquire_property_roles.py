@@ -83,7 +83,5 @@ class TestProfileEmitsRole:
         assert profile.get("role") == ROLE_IDENTIFIER
 
     def test_profile_name_role(self) -> None:
-        profile = _profile_property_values(
-            ["Apple Inc", "Microsoft Corporation", "Alphabet Inc"], 3
-        )
+        profile = _profile_property_values(["Apple Inc", "Microsoft Corporation", "Alphabet Inc"], 3)
         assert profile.get("role") == ROLE_NAME

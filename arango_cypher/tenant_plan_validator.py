@@ -543,9 +543,7 @@ def _enforce_tenant_bindvars(
     if session_tenant is None:
         violation = TenantScopeViolation(
             code="NO_SESSION_TENANT",
-            message=(
-                "session has no tenant_id; cannot validate tenant-scoped query under tenant-user mode"
-            ),
+            message=("session has no tenant_id; cannot validate tenant-scoped query under tenant-user mode"),
             **digests,
         )
         _log_violation(violation, session=session)
@@ -971,9 +969,7 @@ class _PlanWalker:
         if not tenant_field:
             return False
         for expr in self._tenant_field_exprs(enum_node, outvar):
-            if _expr_scopes_tenant(
-                expr, var_name=outvar, attr=tenant_field, sentinel=self.tenant_sentinel
-            ):
+            if _expr_scopes_tenant(expr, var_name=outvar, attr=tenant_field, sentinel=self.tenant_sentinel):
                 return True
         return False
 
@@ -1226,7 +1222,9 @@ def _expr_mismatching_tenant_literal(
     if sides is not None:
         lhs, rhs = sides
         for field_side, val_side in ((lhs, rhs), (rhs, lhs)):
-            if _is_attribute_access_on(field_side, var_name=var_name, attr=attr) and _is_value_literal(val_side):
+            if _is_attribute_access_on(field_side, var_name=var_name, attr=attr) and _is_value_literal(
+                val_side
+            ):
                 value = _value_of_literal(val_side)
                 if sentinel is None or value != sentinel:
                     return value

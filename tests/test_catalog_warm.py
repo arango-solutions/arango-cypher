@@ -45,9 +45,7 @@ def test_schedule_warm_runs_get_mapping(monkeypatch):
     calls: list[dict] = []
 
     def _fake_get_mapping(db, *, force_refresh=False, graph_name=None):
-        calls.append(
-            {"db": db, "force_refresh": force_refresh, "graph_name": graph_name}
-        )
+        calls.append({"db": db, "force_refresh": force_refresh, "graph_name": graph_name})
         done.set()
         return object()
 

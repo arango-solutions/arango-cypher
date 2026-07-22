@@ -38,20 +38,14 @@ def bundle():
 
 def _is_path_object(row: object) -> bool:
     """A rendered path is a mapping with list-valued ``nodes`` and ``edges``."""
-    return (
-        isinstance(row, dict)
-        and isinstance(row.get("nodes"), list)
-        and isinstance(row.get("edges"), list)
-    )
+    return isinstance(row, dict) and isinstance(row.get("nodes"), list) and isinstance(row.get("edges"), list)
 
 
 class TestResultShape:
     """The path-vs-scalar distinction the 'as a graph' fix is about."""
 
     def test_scalar_projection_returns_scalar_values(self, live_db, bundle):
-        rows, aql = execute_translated(
-            live_db, "MATCH (n:ORG) RETURN n.name AS name LIMIT 3", bundle
-        )
+        rows, aql = execute_translated(live_db, "MATCH (n:ORG) RETURN n.name AS name LIMIT 3", bundle)
         assert rows, f"expected ORG rows; AQL was:\n{aql}"
         for row in rows:
             assert isinstance(row, dict), f"row not a projection: {row!r}"
@@ -117,8 +111,7 @@ class TestTraversalSemantics:
         # rare typed endpoint explores the whole neighborhood before yielding).
         rows, aql = execute_translated(
             live_db,
-            "MATCH p = (a:ORG)-[:Depends_On*1..2]->(b) "
-            "RETURN [n IN nodes(p) | n.name] AS chain LIMIT 3",
+            "MATCH p = (a:ORG)-[:Depends_On*1..2]->(b) RETURN [n IN nodes(p) | n.name] AS chain LIMIT 3",
             bundle,
         )
         assert rows, f"expected variable-length chains; AQL was:\n{aql}"

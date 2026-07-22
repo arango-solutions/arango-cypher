@@ -120,7 +120,12 @@ class TestUnlabeledMatchResolution:
         # Many side stores (the real-world case: aga_*, benchmark_*, chunks,
         # schema cache). The warning must summarise, not list all of them.
         ents = {
-            "Person": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "Person"},
+            "Person": {
+                "style": "LABEL",
+                "collectionName": "Node",
+                "typeField": "type",
+                "typeValue": "Person",
+            },
         }
         for i in range(12):
             ents[f"Side{i}"] = {"style": "COLLECTION", "collectionName": f"side_store_{i:02d}"}
@@ -137,7 +142,12 @@ class TestUnlabeledMatchResolution:
 
     def test_single_collection_unlabeled_still_resolves(self):
         ents = {
-            "Person": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "Person"},
+            "Person": {
+                "style": "LABEL",
+                "collectionName": "Node",
+                "typeField": "type",
+                "typeValue": "Person",
+            },
             "Org": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "Org"},
         }
         out = translate("MATCH (n) RETURN count(n) AS c", mapping=_bundle(ents))
@@ -145,8 +155,18 @@ class TestUnlabeledMatchResolution:
 
     def test_two_domain_collections_is_ambiguous(self):
         ents = {
-            "Person": {"style": "LABEL", "collectionName": "People", "typeField": "type", "typeValue": "Person"},
-            "Widget": {"style": "GENERIC_WITH_TYPE", "collectionName": "Things", "typeField": "type", "typeValue": "Widget"},
+            "Person": {
+                "style": "LABEL",
+                "collectionName": "People",
+                "typeField": "type",
+                "typeValue": "Person",
+            },
+            "Widget": {
+                "style": "GENERIC_WITH_TYPE",
+                "collectionName": "Things",
+                "typeField": "type",
+                "typeValue": "Widget",
+            },
         }
         with pytest.raises(CoreError) as exc:
             translate("MATCH (n) RETURN count(n) AS c", mapping=_bundle(ents))

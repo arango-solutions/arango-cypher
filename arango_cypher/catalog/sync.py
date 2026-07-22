@@ -74,9 +74,7 @@ def _connect(entry: DatabaseEntry) -> StandardDatabase:
     )
 
 
-def _sync_target(
-    db: StandardDatabase, entry: DatabaseEntry, graph: str | None
-) -> SyncResult:
+def _sync_target(db: StandardDatabase, entry: DatabaseEntry, graph: str | None) -> SyncResult:
     """Force-rebuild and persist one (database, graph-scope) mapping."""
     from ..schema_acquire import get_mapping
 

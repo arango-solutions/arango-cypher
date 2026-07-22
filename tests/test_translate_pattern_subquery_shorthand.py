@@ -52,8 +52,7 @@ class TestPatternShorthand:
     def test_labeled_target_is_fresh_local(self, pg):
         # (f:Person) is a fresh subquery-local binding, not a correlation.
         out = translate(
-            "MATCH (u:Person) WHERE NOT EXISTS { MATCH (u)-[:FOLLOWS]->(f:Person) } "
-            "RETURN u.name",
+            "MATCH (u:Person) WHERE NOT EXISTS { MATCH (u)-[:FOLLOWS]->(f:Person) } RETURN u.name",
             mapping=pg,
         )
         assert "_sq_v._id ==" not in out.aql
@@ -198,7 +197,6 @@ class TestAggregationSubquery:
 
         with pytest.raises(CoreError):
             translate(
-                "MATCH (p:Person) WHERE exists { MATCH (p)-[:ACTED_IN]->(m) SET m.x = 1 } "
-                "RETURN p.name",
+                "MATCH (p:Person) WHERE exists { MATCH (p)-[:ACTED_IN]->(m) SET m.x = 1 } RETURN p.name",
                 mapping=pg,
             )

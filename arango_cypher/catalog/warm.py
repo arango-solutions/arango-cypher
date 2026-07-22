@@ -53,7 +53,7 @@ def is_warming(db_name: str, graph_name: str | None = None) -> bool:
 
 
 def schedule_warm(
-    db: "StandardDatabase",
+    db: StandardDatabase,
     graph_name: str | None = None,
 ) -> bool:
     """Start a one-shot background warm for ``(db, graph_name)`` if not running.
@@ -88,9 +88,7 @@ def schedule_warm(
                 graph_name or "-",
             )
             get_mapping(db, force_refresh=True, graph_name=graph_name)
-            logger.info(
-                "Catalog warm complete: db=%s graph=%s", db_name, graph_name or "-"
-            )
+            logger.info("Catalog warm complete: db=%s graph=%s", db_name, graph_name or "-")
         except Exception:  # noqa: BLE001 - background best-effort; log and move on
             logger.warning(
                 "Catalog warm failed: db=%s graph=%s",
@@ -102,8 +100,6 @@ def schedule_warm(
             with _lock:
                 _inflight.discard(key)
 
-    thread = threading.Thread(
-        target=_run, name=f"catalog-warm-{key}", daemon=True
-    )
+    thread = threading.Thread(target=_run, name=f"catalog-warm-{key}", daemon=True)
     thread.start()
     return True

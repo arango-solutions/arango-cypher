@@ -34,9 +34,7 @@ def _translate_standalone_return(
 
     proj = ret.oC_ProjectionBody()
     if proj.DISTINCT() is not None:
-        raise CoreError(
-            "DISTINCT requires a MATCH/UNWIND source in v0 subset", code="UNSUPPORTED"
-        )
+        raise CoreError("DISTINCT requires a MATCH/UNWIND source in v0 subset", code="UNSUPPORTED")
     if proj.oC_Order() is not None or proj.oC_Skip() is not None or proj.oC_Limit() is not None:
         raise CoreError(
             "ORDER BY/SKIP/LIMIT require a MATCH/UNWIND source in v0 subset",
@@ -48,9 +46,7 @@ def _translate_standalone_return(
     if not items:
         # Covers ``RETURN *`` (no concrete items) — meaningless with no
         # bound variables.
-        raise CoreError(
-            "RETURN * requires a MATCH/UNWIND source in v0 subset", code="UNSUPPORTED"
-        )
+        raise CoreError("RETURN * requires a MATCH/UNWIND source in v0 subset", code="UNSUPPORTED")
 
     compiled_items: list[tuple[str | None, str]] = []
     for it in items:

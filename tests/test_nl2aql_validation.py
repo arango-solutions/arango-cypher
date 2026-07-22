@@ -36,18 +36,14 @@ class TestCollectIntoIsNotACollection:
         assert ok, err
 
     def test_collect_into_with_projection_is_accepted(self):
-        aql = (
-            "FOR a IN Node\n"
-            "  COLLECT k = a.type INTO items = a.text\n"
-            "  RETURN { k, items }"
-        )
+        aql = "FOR a IN Node\n  COLLECT k = a.type INTO items = a.text\n  RETURN { k, items }"
         ok, err = _validate_aql_syntax(aql, known_collections=KNOWN)
         assert ok, err
 
 
 class TestInsertIntoStillValidatesCollection:
     def test_insert_into_unknown_collection_is_rejected(self):
-        aql = 'INSERT { x: 1 } INTO Ghost'
+        aql = "INSERT { x: 1 } INTO Ghost"
         ok, err = _validate_aql_syntax(aql, known_collections=KNOWN)
         assert not ok
         assert "Ghost" in err

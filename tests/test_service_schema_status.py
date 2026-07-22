@@ -462,9 +462,7 @@ class TestIntrospectWarnings:
             indexes={"users": []},
         )
 
-        monkeypatch.setattr(
-            schema_acquire, "read_cached_mapping", lambda db, **kwargs: None
-        )
+        monkeypatch.setattr(schema_acquire, "read_cached_mapping", lambda db, **kwargs: None)
 
         scheduled: list[tuple[object, object]] = []
         monkeypatch.setattr(

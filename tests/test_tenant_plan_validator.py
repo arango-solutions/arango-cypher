@@ -736,7 +736,9 @@ def _global_only_manifest() -> TenantScopeManifest:
         tenant_entity=None,
         entities={
             "ORG": EntityScope(role=EntityTenantRole.GLOBAL, denorm_field=None, reachable_from_tenant=False),
-            "PERSON": EntityScope(role=EntityTenantRole.GLOBAL, denorm_field=None, reachable_from_tenant=False),
+            "PERSON": EntityScope(
+                role=EntityTenantRole.GLOBAL, denorm_field=None, reachable_from_tenant=False
+            ),
         },
     )
 

@@ -54,9 +54,7 @@ class _FakeAql:
         max_runtime: float | None = None,
         **_: Any,
     ) -> _FakeCursor:
-        self.calls.append(
-            {"aql": aql, "bind_vars": dict(bind_vars), "max_runtime": max_runtime}
-        )
+        self.calls.append({"aql": aql, "bind_vars": dict(bind_vars), "max_runtime": max_runtime})
         rows = self._responder(aql, bind_vars)
         return _FakeCursor(rows or [])
 
@@ -125,9 +123,7 @@ class TestExtractCandidates:
     def test_parenthesized_symbol_extracted(self, movies_mapping) -> None:
         """WP-S2b: a ticker in parentheses is captured as a candidate."""
         resolver = EntityResolver(mapping=movies_mapping)
-        cands = resolver.extract_candidates(
-            "companies that Cincinnati Financial (CINF) has a stake in"
-        )
+        cands = resolver.extract_candidates("companies that Cincinnati Financial (CINF) has a stake in")
         assert "CINF" in cands
         assert "Cincinnati Financial" in cands
 
@@ -212,9 +208,7 @@ class TestRoleAwarePropertySelection:
 
     def test_identifier_resolves_without_being_named_ticker(self) -> None:
         """The whole point: a non-"ticker"-named identifier still wins."""
-        r = self._resolver_with_props(
-            {"mnemonic": {"type": "string", "role": "identifier"}}
-        )
+        r = self._resolver_with_props({"mnemonic": {"type": "string", "role": "identifier"}})
         assert r._resolve_properties_for("Thing") == ["mnemonic"]
 
     def test_falls_back_to_name_list_without_roles(self) -> None:
@@ -257,9 +251,7 @@ class TestArangoSearchAdvisory:
         collections = {
             "movies": _FakeCollection(
                 count=10,
-                indexes=[
-                    {"type": "inverted", "fields": [{"name": "title", "analyzer": "text_en"}]}
-                ],
+                indexes=[{"type": "inverted", "fields": [{"name": "title", "analyzer": "text_en"}]}],
             )
         }
         resolver = EntityResolver(
@@ -545,9 +537,7 @@ class TestProbeHardening:
         resolver = EntityResolver(db=object(), mapping=movies_mapping)
         assert resolver.probe_timeout == 5.0
 
-    def test_size_gate_disabled_by_default_probes_large_collection(
-        self, movies_mapping
-    ) -> None:
+    def test_size_gate_disabled_by_default_probes_large_collection(self, movies_mapping) -> None:
         seen: list[str] = []
 
         def responder(aql, bind_vars):
@@ -562,9 +552,7 @@ class TestProbeHardening:
         resolver.resolve('find "The Matrix"')
         assert "movies" in seen, "gate off → large collection still probed"
 
-    def test_size_gate_skips_oversized_unindexed_collection(
-        self, movies_mapping
-    ) -> None:
+    def test_size_gate_skips_oversized_unindexed_collection(self, movies_mapping) -> None:
         seen: list[str] = []
 
         def responder(aql, bind_vars):
@@ -575,9 +563,7 @@ class TestProbeHardening:
             responder,
             collections={"movies": _FakeCollection(count=10_000, indexes=[])},
         )
-        resolver = EntityResolver(
-            db=db, mapping=movies_mapping, max_scan_collection_size=1000
-        )
+        resolver = EntityResolver(db=db, mapping=movies_mapping, max_scan_collection_size=1000)
         resolver.resolve('find "The Matrix"')
         assert "movies" not in seen, "oversized unindexed collection must be skipped"
 
@@ -597,9 +583,7 @@ class TestProbeHardening:
                 )
             },
         )
-        resolver = EntityResolver(
-            db=db, mapping=movies_mapping, max_scan_collection_size=1000
-        )
+        resolver = EntityResolver(db=db, mapping=movies_mapping, max_scan_collection_size=1000)
         hits = resolver.resolve('find "The Matrix"')
         assert "movies" in seen, "indexed collection must still be probed"
         assert any(h.value == "The Matrix" for h in hits)
@@ -613,9 +597,7 @@ class TestProbeHardening:
 
         # No collections registered → count() raises → count unknown → no skip.
         db = _FakeDb(responder)
-        resolver = EntityResolver(
-            db=db, mapping=movies_mapping, max_scan_collection_size=1000
-        )
+        resolver = EntityResolver(db=db, mapping=movies_mapping, max_scan_collection_size=1000)
         resolver.resolve('find "The Matrix"')
         assert "movies" in seen, "unknown count must not skip the probe"
 

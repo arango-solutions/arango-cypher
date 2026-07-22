@@ -56,8 +56,7 @@ class TestBackReferenceSelfCycle:
 
     def test_self_cycle_two_labels(self, pg):
         out = translate(
-            "MATCH (p:Person)-[:ACTED_IN]->(m:Movie)<-[:DIRECTED]-(p) "
-            "WITH p, count(m) AS c RETURN p.name, c",
+            "MATCH (p:Person)-[:ACTED_IN]->(m:Movie)<-[:DIRECTED]-(p) WITH p, count(m) AS c RETURN p.name, c",
             mapping=pg,
         )
         _assert_unique_for_vars(out.aql)
@@ -78,8 +77,7 @@ class TestUnnamedEdgeCollisionAcrossMatches:
 
     def test_unnamed_edge_not_treated_as_backref(self, pg):
         out = translate(
-            "MATCH (p:Person)-[:ACTED_IN]->(:Movie) "
-            "MATCH (p)-[:DIRECTED]->(m:Movie) RETURN m.title",
+            "MATCH (p:Person)-[:ACTED_IN]->(:Movie) MATCH (p)-[:DIRECTED]->(m:Movie) RETURN m.title",
             mapping=pg,
         )
         _assert_unique_for_vars(out.aql)
@@ -128,8 +126,7 @@ class TestCollectGroupVarShadowing:
     def test_plain_aggregation_not_over_renamed(self, pg):
         # No collision → names must stay natural (regression guard).
         out = translate(
-            "MATCH (p:Person)-[:ACTED_IN]->(m:Movie) "
-            "RETURN p.name AS name, count(m) AS c ORDER BY c DESC",
+            "MATCH (p:Person)-[:ACTED_IN]->(m:Movie) RETURN p.name AS name, count(m) AS c ORDER BY c DESC",
             mapping=pg,
         )
         assert "COLLECT name = p.name AGGREGATE c = COUNT(m)" in out.aql

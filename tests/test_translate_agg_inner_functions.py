@@ -26,21 +26,16 @@ class TestAggInnerScalarFns:
         assert "size(" not in out.aql
 
     def test_size_in_max_with(self, pg):
-        out = translate(
-            "MATCH (m:Movie) WITH max(size(m.tagline)) AS x RETURN x", mapping=pg
-        )
+        out = translate("MATCH (m:Movie) WITH max(size(m.tagline)) AS x RETURN x", mapping=pg)
         assert "MAX(LENGTH(m.tagline))" in out.aql
 
     def test_tointeger_in_sum(self, pg):
-        out = translate(
-            "MATCH (m:Movie) RETURN sum(toInteger(m.released)) AS s", mapping=pg
-        )
+        out = translate("MATCH (m:Movie) RETURN sum(toInteger(m.released)) AS s", mapping=pg)
         assert "SUM(TO_NUMBER(m.released))" in out.aql
 
     def test_lower_in_count_distinct(self, pg):
         out = translate(
-            "MATCH (p:Person)-[:ACTED_IN]->(m:Movie) "
-            "RETURN count(DISTINCT lower(m.title)) AS c",
+            "MATCH (p:Person)-[:ACTED_IN]->(m:Movie) RETURN count(DISTINCT lower(m.title)) AS c",
             mapping=pg,
         )
         assert "COUNT_DISTINCT(LOWER(m.title))" in out.aql

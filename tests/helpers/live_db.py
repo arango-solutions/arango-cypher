@@ -80,9 +80,7 @@ def execute_translated(
 
     result = translate(cypher, mapping=bundle)
     try:
-        cursor = db.aql.execute(
-            result.aql, bind_vars=result.bind_vars, max_runtime=max_runtime
-        )
+        cursor = db.aql.execute(result.aql, bind_vars=result.bind_vars, max_runtime=max_runtime)
     except TypeError:
         # Older python-arango without ``max_runtime`` support.
         cursor = db.aql.execute(result.aql, bind_vars=result.bind_vars)

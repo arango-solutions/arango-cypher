@@ -65,23 +65,19 @@ class TestPgEndpointInference:
         assert "persons" in out.aql  # WITH prelude lists the resolved vertex coll
 
     def test_leading_unlabeled_anchor(self, pg):
-        out = translate(
-            "MATCH ()-[:REVIEWED]->(m:Movie) RETURN avg(m.rating)", mapping=pg
-        )
+        out = translate("MATCH ()-[:REVIEWED]->(m:Movie) RETURN avg(m.rating)", mapping=pg)
         assert out.bind_vars.get("@uCollection") == "persons"
 
     def test_with_aggregation_pipeline(self, pg):
         out = translate(
-            "MATCH (m:Movie)<-[r:REVIEWED]-() WITH m, avg(r.rating) AS a "
-            "RETURN m.title, a",
+            "MATCH (m:Movie)<-[r:REVIEWED]-() WITH m, avg(r.rating) AS a RETURN m.title, a",
             mapping=pg,
         )
         assert "INBOUND" in out.aql
 
     def test_tail_match_after_with(self, pg):
         out = translate(
-            "MATCH (m:Movie) WHERE m.released > 2000 WITH m "
-            "MATCH (m)<-[r:REVIEWED]-() RETURN avg(r.rating)",
+            "MATCH (m:Movie) WHERE m.released > 2000 WITH m MATCH (m)<-[r:REVIEWED]-() RETURN avg(r.rating)",
             mapping=pg,
         )
         assert "INBOUND" in out.aql

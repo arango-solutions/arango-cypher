@@ -44,8 +44,7 @@ CORPUS: list[CorpusEntry] = [
     CorpusEntry(
         "q01_entity_type_distribution",
         "What are the 20 most common entity types in the knowledge graph?",
-        "MATCH (n) RETURN labels(n)[0] AS entity_type, COUNT(n) AS count "
-        "ORDER BY count DESC LIMIT 20",
+        "MATCH (n) RETURN labels(n)[0] AS entity_type, COUNT(n) AS count ORDER BY count DESC LIMIT 20",
         supported=True,
     ),
     CorpusEntry(
@@ -57,8 +56,7 @@ CORPUS: list[CorpusEntry] = [
     ),
     CorpusEntry(
         "q03_cinf_stakes_as_paths",
-        "Show me, as a graph, the publicly-traded companies that CINF has a "
-        "stake in.",
+        "Show me, as a graph, the publicly-traded companies that CINF has a stake in.",
         "MATCH p = (a {id: 'CINF'})-[r:Has_Stake_In]->(b) "
         "WHERE b.id IS NOT NULL AND size(b.id) < 6 AND b.id = upper(b.id) "
         "AND b.id <> 'CINF' RETURN p LIMIT 50",
@@ -87,8 +85,7 @@ CORPUS: list[CorpusEntry] = [
     ),
     CorpusEntry(
         "q06_metrics_of_cinf_holdings_paths",
-        "Show the financial metrics disclosed by the companies that CINF has a "
-        "stake in, as connected paths.",
+        "Show the financial metrics disclosed by the companies that CINF has a stake in, as connected paths.",
         "MATCH path = (a {id: 'CINF'})-[:Has_Stake_In]->(b)"
         "-[:Discloses]->(c:FIN_METRIC) "
         "WHERE b.id IS NOT NULL AND size(b.id) < 6 AND b.id = upper(b.id) "
@@ -97,8 +94,7 @@ CORPUS: list[CorpusEntry] = [
     ),
     CorpusEntry(
         "q07_metrics_by_apple_held_by_cinf",
-        "What financial metrics does Apple (AAPL) - a company CINF has a stake "
-        "in - disclose?",
+        "What financial metrics does Apple (AAPL) - a company CINF has a stake in - disclose?",
         "MATCH ({id: 'CINF'})-[:Has_Stake_In]->({id: 'AAPL'})"
         "-[:Discloses]->(m:FIN_METRIC) RETURN DISTINCT m.name LIMIT 25",
         supported=True,
@@ -169,8 +165,7 @@ CORPUS: list[CorpusEntry] = [
     ),
     CorpusEntry(
         "q13_revenue_cost_metrics",
-        "Which organizations disclose a revenue/income/profit metric and also a "
-        "cost/expense/loss metric?",
+        "Which organizations disclose a revenue/income/profit metric and also a cost/expense/loss metric?",
         "MATCH (org:ORG)-[:Discloses]->(metric1:FIN_METRIC) "
         "WHERE metric1.name =~ '(?i).*(revenue|income|profit).*' WITH org, metric1 LIMIT 500 "
         "MATCH (org)-[:Discloses]->(metric2:FIN_METRIC) "
@@ -231,8 +226,7 @@ CORPUS: list[CorpusEntry] = [
     ),
     CorpusEntry(
         "q18_circular_deps_all_orgs",
-        "Are there circular dependency loops among organizations, 2 to 4 hops "
-        "back to themselves?",
+        "Are there circular dependency loops among organizations, 2 to 4 hops back to themselves?",
         "MATCH path = (org:ORG)-[:Depends_On*2..4]->(org) "
         "RETURN org.name AS organization, LENGTH(path) AS cycle_length, "
         "[n IN nodes(path) | n.name] AS cycle_participants LIMIT 10",
@@ -276,8 +270,7 @@ CORPUS: list[CorpusEntry] = [
     ),
     CorpusEntry(
         "q22_circular_deps_named",
-        "Are there circular dependency chains of length 2-3 among named "
-        "big-tech firms?",
+        "Are there circular dependency chains of length 2-3 among named big-tech firms?",
         "MATCH path = (org:ORG)-[:Depends_On*2..3]->(org) "
         "WHERE org.name IN ['aapl','msft','googl'] "
         "RETURN [n IN nodes(path) | n.name] AS circular_chain LIMIT 5",

@@ -25,7 +25,7 @@ class TestQuantifiers:
             'MATCH (p:Person) WHERE any(x IN p.roles WHERE x = "lead") RETURN p.name',
             mapping=pg,
         )
-        assert "LENGTH(FOR x IN p.roles FILTER (x == \"lead\") RETURN 1) > 0" in out.aql
+        assert 'LENGTH(FOR x IN p.roles FILTER (x == "lead") RETURN 1) > 0' in out.aql
 
     def test_all_in_where(self, pg):
         out = translate(
@@ -40,7 +40,7 @@ class TestQuantifiers:
             'MATCH (p:Person) WHERE none(x IN p.roles WHERE x = "bad") RETURN p.name',
             mapping=pg,
         )
-        assert "FILTER (x == \"bad\") RETURN 1) == 0)" in out.aql
+        assert 'FILTER (x == "bad") RETURN 1) == 0)' in out.aql
 
     def test_single_in_where(self, pg):
         out = translate(

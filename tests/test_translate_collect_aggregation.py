@@ -23,8 +23,7 @@ def bundle():
 
 def test_plain_collect_uses_push(bundle) -> None:
     out = translate(
-        "MATCH (o:ORG)-[:Operates_In]->(g:GPE) WITH o, collect(g.name) AS names "
-        "RETURN o.name, names",
+        "MATCH (o:ORG)-[:Operates_In]->(g:GPE) WITH o, collect(g.name) AS names RETURN o.name, names",
         mapping=bundle,
     )
     assert "AGGREGATE names = PUSH(g.name)" in out.aql
@@ -66,8 +65,7 @@ def test_collect_mixed_with_count(bundle) -> None:
 
 def test_collect_in_return(bundle) -> None:
     out = translate(
-        "MATCH (o:ORG)-[:Operates_In]->(g:GPE) "
-        "RETURN o.name AS org, collect(DISTINCT g.name) AS names",
+        "MATCH (o:ORG)-[:Operates_In]->(g:GPE) RETURN o.name AS org, collect(DISTINCT g.name) AS names",
         mapping=bundle,
     )
     assert "AGGREGATE names = UNIQUE(g.name)" in out.aql

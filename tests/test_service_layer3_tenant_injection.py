@@ -88,9 +88,7 @@ class TestApplyLayer3Rewrite:
     def test_idempotent_when_bindvar_already_present(self) -> None:
         # A query that already references the tenant bind var is left unchanged.
         cy = "MATCH (e:Employee {TENANT_HEX_ID: $tenantId}) RETURN e"
-        out, changes = apply_layer3_rewrite(
-            cypher=cy, mapping_dict=_mapping(), session=_session()
-        )
+        out, changes = apply_layer3_rewrite(cypher=cy, mapping_dict=_mapping(), session=_session())
         assert out == cy
         assert changes == []
 
@@ -107,16 +105,12 @@ class TestApplyLayer3Rewrite:
         # Multi-label patterns are deferred by MT-3a (raise Incomplete); the
         # adapter must fall back to the original Cypher (Layer 5 enforces).
         cy = "MATCH (e:Employee:Person) RETURN e"
-        out, changes = apply_layer3_rewrite(
-            cypher=cy, mapping_dict=_mapping(), session=_session()
-        )
+        out, changes = apply_layer3_rewrite(cypher=cy, mapping_dict=_mapping(), session=_session())
         assert out == cy
         assert changes == []
 
     def test_unparseable_cypher_is_noop(self) -> None:
         cy = "this is not cypher {{{"
-        out, changes = apply_layer3_rewrite(
-            cypher=cy, mapping_dict=_mapping(), session=_session()
-        )
+        out, changes = apply_layer3_rewrite(cypher=cy, mapping_dict=_mapping(), session=_session())
         assert out == cy
         assert changes == []

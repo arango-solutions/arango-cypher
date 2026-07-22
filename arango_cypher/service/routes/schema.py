@@ -546,10 +546,7 @@ def create_index(
         for idx in collection.indexes():
             if str(idx.get("type", "")).lower() != "inverted":
                 continue
-            names = {
-                (f.get("name") if isinstance(f, dict) else f)
-                for f in (idx.get("fields") or [])
-            }
+            names = {(f.get("name") if isinstance(f, dict) else f) for f in (idx.get("fields") or [])}
             if field in names:
                 log_endpoint_timing(
                     "/schema/index/create",

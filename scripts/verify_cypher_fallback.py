@@ -21,11 +21,11 @@ from pathlib import Path
 
 import requests
 from arango import ArangoClient
+from arango_query_core import MappingResolver
+from arango_query_core.errors import CoreError
 
 from arango_cypher.api import translate
 from arango_cypher.schema_acquire import get_mapping
-from arango_query_core import MappingResolver
-from arango_query_core.errors import CoreError
 
 BASE = os.environ.get("VERIFY_BASE", "http://localhost:8001")
 

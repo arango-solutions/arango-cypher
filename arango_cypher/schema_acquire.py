@@ -322,9 +322,7 @@ def _reconstruct_graph_membership(physical_mapping: dict[str, Any]) -> dict[str,
     }
 
 
-def _graph_membership_collections(
-    bundle: MappingBundle, graph_name: str
-) -> tuple[set[str], set[str]] | None:
+def _graph_membership_collections(bundle: MappingBundle, graph_name: str) -> tuple[set[str], set[str]] | None:
     """Resolve a named graph's collection membership from the bundle itself.
 
     Reads ``metadata.graphMembership`` (populated by :func:`acquire_mapping_bundle`
@@ -362,9 +360,7 @@ def _graph_membership_collections(
     return vertex, edges
 
 
-def _scope_bundle_to_graph(
-    db: StandardDatabase, bundle: MappingBundle, graph_name: str
-) -> MappingBundle:
+def _scope_bundle_to_graph(db: StandardDatabase, bundle: MappingBundle, graph_name: str) -> MappingBundle:
     """Filter ``bundle`` to a named graph, preferring embedded membership.
 
     When the bundle carries analyzer-provided graph membership the scope is
@@ -824,9 +820,7 @@ ROLE_NUMERIC = "numeric"
 ROLE_BOOLEAN = "boolean"
 ROLE_OTHER = "other"
 
-_ISO_DATE_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$"
-)
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?)?$")
 
 
 def _classify_property_role(
@@ -871,12 +865,7 @@ def _classify_property_role(
     token_share = sum(1 for s in lowered if " " not in s and len(s) <= 24) / n
 
     # Identifier: (near-)unique, short, single-token (e.g. tickers, codes, keys).
-    if (
-        distinct_ratio >= 0.9
-        and max_len <= 32
-        and token_share >= 0.8
-        and multiword_share < 0.2
-    ):
+    if distinct_ratio >= 0.9 and max_len <= 32 and token_share >= 0.8 and multiword_share < 0.2:
         return ROLE_IDENTIFIER
 
     # Categorical: few distinct values relative to the sample, not long.
@@ -1445,8 +1434,7 @@ def _normalize_open_vocab_edges(
 
     new_pm: dict[str, Any] = {t: r for t, r in rels_pm.items() if _coll_of(t) not in shared}
     new_cs: list[Any] = [
-        r for r in cs_rels
-        if not (isinstance(r, dict) and _coll_of(str(r.get("type"))) in shared)
+        r for r in cs_rels if not (isinstance(r, dict) and _coll_of(str(r.get("type"))) in shared)
     ]
     cap_notes: list[dict[str, Any]] = []
 
@@ -1489,9 +1477,7 @@ def _normalize_open_vocab_edges(
             edge_count = int(row.get("n", 0) or 0)
             ft, tt = endpoints.get(t, (None, None))
             domain, range_ = _label_for(ft), _label_for(tt)
-            new_cs.append(
-                {"type": t, "fromEntity": domain, "toEntity": range_, "properties": shared_props}
-            )
+            new_cs.append({"type": t, "fromEntity": domain, "toEntity": range_, "properties": shared_props})
             new_pm[t] = {
                 "style": "GENERIC_WITH_TYPE",
                 "edgeCollectionName": coll,
@@ -1507,9 +1493,7 @@ def _normalize_open_vocab_edges(
             kept += 1
 
         if isinstance(total_types, int) and total_types > kept:
-            cap_notes.append(
-                {"edgeCollection": coll, "totalTypes": total_types, "keptTypes": kept}
-            )
+            cap_notes.append({"edgeCollection": coll, "totalTypes": total_types, "keptTypes": kept})
             logger.info(
                 "normalize edges: capped %s to top %d of %d relationship types",
                 coll,
@@ -2139,9 +2123,7 @@ def _read_cached_slot(
         return mem[0]
     if not cache_collection:
         return None
-    persistent = ArangoSchemaCache(
-        collection_name=cache_collection, cache_key=persistent_cache_key
-    )
+    persistent = ArangoSchemaCache(collection_name=cache_collection, cache_key=persistent_cache_key)
     hit = persistent.get(db)
     if hit is None:
         return None

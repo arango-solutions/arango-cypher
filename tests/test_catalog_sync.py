@@ -42,9 +42,7 @@ class TestSyncEntry:
             return _bundle()
 
         monkeypatch.setattr(sync_mod, "_connect", lambda entry: object())
-        monkeypatch.setattr(
-            "arango_cypher.schema_acquire.get_mapping", fake_get_mapping
-        )
+        monkeypatch.setattr("arango_cypher.schema_acquire.get_mapping", fake_get_mapping)
 
         results = sync_entry(_entry(graphs=["G1", "G2"]))
 
@@ -73,9 +71,7 @@ class TestSyncEntry:
             return _bundle()
 
         monkeypatch.setattr(sync_mod, "_connect", lambda entry: object())
-        monkeypatch.setattr(
-            "arango_cypher.schema_acquire.get_mapping", fake_get_mapping
-        )
+        monkeypatch.setattr("arango_cypher.schema_acquire.get_mapping", fake_get_mapping)
 
         results = sync_entry(_entry(graphs=["G1", "G2"]))
         by_graph = {r.graph: r for r in results}
@@ -106,9 +102,7 @@ class TestSyncOnce:
             source="test",
         )
         monkeypatch.setattr(sync_mod, "_connect", lambda entry: _DB(entry.database))
-        monkeypatch.setattr(
-            "arango_cypher.schema_acquire.get_mapping", fake_get_mapping
-        )
+        monkeypatch.setattr("arango_cypher.schema_acquire.get_mapping", fake_get_mapping)
 
         results = sync_once(registry)
         assert len(results) == 2

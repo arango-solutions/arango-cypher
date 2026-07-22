@@ -62,7 +62,12 @@ def _bundle() -> MappingBundle:
         physical_mapping={
             "entities": {
                 "ORG": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "ORG"},
-                "COMP": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "COMP"},
+                "COMP": {
+                    "style": "LABEL",
+                    "collectionName": "Node",
+                    "typeField": "type",
+                    "typeValue": "COMP",
+                },
                 "GPE": {"style": "LABEL", "collectionName": "Node", "typeField": "type", "typeValue": "GPE"},
             },
             "relationships": {

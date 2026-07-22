@@ -154,8 +154,7 @@ class TestWithMergeTail:
 
     def test_with_merge_on_create_set(self, pg):
         out = translate(
-            "MATCH (p:Person) WITH p MERGE (m:Movie {title: p.name}) "
-            "ON CREATE SET m.released = 2020",
+            "MATCH (p:Person) WITH p MERGE (m:Movie {title: p.name}) ON CREATE SET m.released = 2020",
             mapping=pg,
         )
         assert "INSERT {title: p.name, released: 2020}" in out.aql
@@ -193,23 +192,17 @@ class TestWholeMapCreateParam:
 
 class TestCreateThenWrite:
     def test_create_then_set(self, pg):
-        out = translate(
-            "CREATE (n:Person {name: 'A'}) SET n.born = 1990", mapping=pg
-        )
+        out = translate("CREATE (n:Person {name: 'A'}) SET n.born = 1990", mapping=pg)
         assert "INSERT {name: 'A'} INTO" in out.aql
         # SET becomes a subquery-wrapped UPDATE on the created var.
         assert "LET _w0 = (UPDATE n WITH {born: 1990} IN" in out.aql
 
     def test_create_then_set_map(self, pg):
-        out = translate(
-            "CREATE (n:Person {name: 'A'}) SET n += {born: 1990}", mapping=pg
-        )
+        out = translate("CREATE (n:Person {name: 'A'}) SET n += {born: 1990}", mapping=pg)
         assert "MERGE(n," in out.aql
 
     def test_create_then_remove(self, pg):
-        out = translate(
-            "CREATE (n:Person {name: 'A', tmp: 1}) REMOVE n.tmp", mapping=pg
-        )
+        out = translate("CREATE (n:Person {name: 'A', tmp: 1}) REMOVE n.tmp", mapping=pg)
         assert 'UNSET(n, "tmp")' in out.aql
 
     def test_create_then_set_label_keeps_discriminator(self, lpg):
@@ -219,9 +212,7 @@ class TestCreateThenWrite:
 
     def test_create_combined_with_delete_is_rejected(self, pg):
         with pytest.raises(CoreError) as exc:
-            translate(
-                "MATCH (n:Person) CREATE (m:Person {name: 'A'}) DELETE n", mapping=pg
-            )
+            translate("MATCH (n:Person) CREATE (m:Person {name: 'A'}) DELETE n", mapping=pg)
         assert "DELETE" in str(exc.value)
 
 
@@ -271,9 +262,7 @@ class TestMultipleMerge:
     """
 
     def test_two_node_merges_distinct_collections(self, pg):
-        out = translate(
-            "MERGE (a:Person {name:'A'}) MERGE (b:Movie {title:'M'})", mapping=pg
-        )
+        out = translate("MERGE (a:Person {name:'A'}) MERGE (b:Movie {title:'M'})", mapping=pg)
         assert out.aql.count("UPSERT") == 2
         assert "LET a = FIRST(UPSERT {name: 'A'}" in out.aql
         assert "LET b = FIRST(UPSERT {title: 'M'}" in out.aql
@@ -282,8 +271,7 @@ class TestMultipleMerge:
 
     def test_node_node_edge_merge(self, pg):
         out = translate(
-            "MERGE (a:Person {name:'A'}) MERGE (b:Movie {title:'M'}) "
-            "MERGE (a)-[:ACTED_IN]->(b)",
+            "MERGE (a:Person {name:'A'}) MERGE (b:Movie {title:'M'}) MERGE (a)-[:ACTED_IN]->(b)",
             mapping=pg,
         )
         assert out.aql.count("UPSERT") == 3
@@ -298,25 +286,20 @@ class TestMultipleMerge:
 
     def test_same_collection_fails_closed(self, pg):
         with pytest.raises(CoreError) as exc:
-            translate(
-                "MERGE (a:Person {name:'A'}) MERGE (b:Person {name:'B'})", mapping=pg
-            )
+            translate("MERGE (a:Person {name:'A'}) MERGE (b:Person {name:'B'})", mapping=pg)
         assert "same collection" in str(exc.value)
 
     def test_match_prefixed_multi_merge_fails_closed(self, pg):
         with pytest.raises(CoreError) as exc:
             translate(
-                "MATCH (x:Person) MERGE (a:Person {name:'A'}) "
-                "MERGE (b:Movie {title:'M'})",
+                "MATCH (x:Person) MERGE (a:Person {name:'A'}) MERGE (b:Movie {title:'M'})",
                 mapping=pg,
             )
         assert "MATCH" in str(exc.value)
 
     def test_unbound_rel_endpoint_fails_closed(self, pg):
         with pytest.raises(CoreError) as exc:
-            translate(
-                "MERGE (a:Person {name:'A'}) MERGE (a)-[:ACTED_IN]->(c)", mapping=pg
-            )
+            translate("MERGE (a:Person {name:'A'}) MERGE (a)-[:ACTED_IN]->(c)", mapping=pg)
         assert "endpoint" in str(exc.value)
 
 
@@ -353,8 +336,7 @@ class TestMultiHopMerge:
     def test_return_fails_closed(self, pg):
         with pytest.raises(CoreError):
             translate(
-                "MATCH (a:Person),(b:Person),(c:Movie) "
-                "MERGE (a)-[:FOLLOWS]->(b)-[:REVIEWED]->(c) RETURN a",
+                "MATCH (a:Person),(b:Person),(c:Movie) MERGE (a)-[:FOLLOWS]->(b)-[:REVIEWED]->(c) RETURN a",
                 mapping=pg,
             )
 
@@ -384,9 +366,7 @@ class TestForeachWrites:
         assert "INSERT {name: name} INTO @@collection" in out.aql
 
     def test_foreach_create_keeps_discriminator(self, naked):
-        out = translate(
-            "FOREACH (x IN [1,2] | CREATE (m:User {n: x}))", mapping=naked
-        )
+        out = translate("FOREACH (x IN [1,2] | CREATE (m:User {n: x}))", mapping=naked)
         assert "INSERT {type: @typeValue, n: x} INTO @@collection" in out.aql
 
     def test_foreach_delete(self, naked):

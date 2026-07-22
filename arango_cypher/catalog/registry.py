@@ -87,9 +87,7 @@ class CatalogRegistry:
         return bool(self.databases)
 
 
-def _resolve_secret(
-    *, literal: Any, env_name: Any, what: str, entry_name: str
-) -> str:
+def _resolve_secret(*, literal: Any, env_name: Any, what: str, entry_name: str) -> str:
     """Resolve a credential from a literal or an env-var reference.
 
     Env-var reference (``*_env``) wins when both are present so a checked-in
@@ -98,9 +96,7 @@ def _resolve_secret(
     """
     if env_name is not None:
         if not isinstance(env_name, str) or not env_name.strip():
-            raise CatalogConfigError(
-                f"database {entry_name!r}: {what}_env must be a non-empty string"
-            )
+            raise CatalogConfigError(f"database {entry_name!r}: {what}_env must be a non-empty string")
         val = os.environ.get(env_name)
         if val is None:
             raise CatalogConfigError(
@@ -168,8 +164,7 @@ def _registry_from_env() -> CatalogRegistry:
     database = os.environ.get("ARANGO_DB")
     if not url or not database:
         logger.warning(
-            "No catalog config file and ARANGO_URL/ARANGO_DB are not both set; "
-            "catalog registry is empty"
+            "No catalog config file and ARANGO_URL/ARANGO_DB are not both set; catalog registry is empty"
         )
         return CatalogRegistry(databases=(), source="env-empty")
 
@@ -201,19 +196,13 @@ def _registry_from_yaml(path: Path) -> CatalogRegistry:
     try:
         interval = int(interval)
     except (TypeError, ValueError) as exc:
-        raise CatalogConfigError(
-            f"catalog config {path}: sync.interval_seconds must be an integer"
-        ) from exc
+        raise CatalogConfigError(f"catalog config {path}: sync.interval_seconds must be an integer") from exc
     if interval <= 0:
-        raise CatalogConfigError(
-            f"catalog config {path}: sync.interval_seconds must be positive"
-        )
+        raise CatalogConfigError(f"catalog config {path}: sync.interval_seconds must be positive")
 
     dbs_raw = raw.get("databases")
     if not isinstance(dbs_raw, list) or not dbs_raw:
-        raise CatalogConfigError(
-            f"catalog config {path}: 'databases' must be a non-empty list"
-        )
+        raise CatalogConfigError(f"catalog config {path}: 'databases' must be a non-empty list")
     entries = tuple(_entry_from_dict(d) for d in dbs_raw)
 
     # Guard against duplicate (database, graph-scope) targets that would have
@@ -223,9 +212,7 @@ def _registry_from_yaml(path: Path) -> CatalogRegistry:
         for scope in (None, *e.graphs):
             target = f"{e.database}::{scope or ''}"
             if target in seen:
-                raise CatalogConfigError(
-                    f"catalog config {path}: duplicate target {target!r}"
-                )
+                raise CatalogConfigError(f"catalog config {path}: duplicate target {target!r}")
             seen.add(target)
 
     return CatalogRegistry(
@@ -254,9 +241,7 @@ def load_registry(path: str | Path | None = None) -> CatalogRegistry:
         if env_path:
             candidate = Path(env_path)
             if not candidate.exists():
-                raise CatalogConfigError(
-                    f"{DEFAULT_CONFIG_ENV}={env_path!r} points at a missing file"
-                )
+                raise CatalogConfigError(f"{DEFAULT_CONFIG_ENV}={env_path!r} points at a missing file")
         elif DEFAULT_CONFIG_PATH.exists():
             candidate = DEFAULT_CONFIG_PATH
 

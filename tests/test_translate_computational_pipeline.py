@@ -33,8 +33,7 @@ class TestComputationalPipeline:
 
     def test_leading_unwind_with_aggregate_then_unwind(self, pg):
         out = translate(
-            "UNWIND range(1,2) AS row WITH collect(row) AS rows "
-            "UNWIND rows AS x RETURN x",
+            "UNWIND range(1,2) AS row WITH collect(row) AS rows UNWIND rows AS x RETURN x",
             mapping=pg,
         )
         assert "FOR row IN RANGE(1, 2)" in out.aql

@@ -93,7 +93,11 @@ def _sharding() -> dict[str, Any]:
 
 
 def _attr(var: str, name: str) -> dict[str, Any]:
-    return {"type": "attribute access", "name": name, "subNodes": [{"type": "reference", "name": var, "id": 100}]}
+    return {
+        "type": "attribute access",
+        "name": name,
+        "subNodes": [{"type": "reference", "name": var, "id": 100}],
+    }
 
 
 def _param(name: str) -> dict[str, Any]:

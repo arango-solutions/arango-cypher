@@ -998,9 +998,7 @@ def _translate_match_body(
         _rp0 = chains[0].oC_RelationshipPattern()
         if _rp0 is not None:
             _rt0, _, _ = _extract_relationship_type_and_var(_rp0, default_var="r")
-            _rev0 = {"OUTBOUND": "INBOUND", "INBOUND": "OUTBOUND"}.get(
-                _relationship_direction(_rp0), "ANY"
-            )
+            _rev0 = {"OUTBOUND": "INBOUND", "INBOUND": "OUTBOUND"}.get(_relationship_direction(_rp0), "ANY")
             if _rt0:
                 _inferred_u = resolver.infer_endpoint_label(_rt0, _rev0)
                 if _inferred_u:
@@ -1423,9 +1421,7 @@ def _translate_multi_part_query(
     _has_match = any(rc.oC_Match() is not None for rc in _prefix_reading) or any(
         rc.oC_Match() is not None for rc in _tail_reading
     )
-    _has_updating = bool(mpq.oC_UpdatingClause()) or (
-        _tail is not None and bool(_tail.oC_UpdatingClause())
-    )
+    _has_updating = bool(mpq.oC_UpdatingClause()) or (_tail is not None and bool(_tail.oC_UpdatingClause()))
     if not _has_match and not _has_updating:
         return _translate_computational_multi_part(mpq, bind_vars=bind_vars)
     if mpq.oC_UpdatingClause():
@@ -2202,9 +2198,7 @@ def _compile_match_multi_parts_from_parts(
             # edge-constrains optimization) applies. Falls through to the
             # single-collection inference below when it cannot be resolved.
             if not v_bound and not v_labels and rel_type:
-                _inferred_v = resolver.infer_endpoint_label(
-                    rel_type, _relationship_direction(rel_pat)
-                )
+                _inferred_v = resolver.infer_endpoint_label(rel_type, _relationship_direction(rel_pat))
                 if _inferred_v:
                     v_labels = [_inferred_v]
             detail = rel_pat.oC_RelationshipDetail()
@@ -2744,9 +2738,7 @@ _AGG_INNER_FN_ALIASES = {
     "toboolean": "TO_BOOL",
     "tobool": "TO_BOOL",
 }
-_AGG_INNER_FN_RE = re.compile(
-    r"\b(" + "|".join(_AGG_INNER_FN_ALIASES) + r")\s*\(", re.IGNORECASE
-)
+_AGG_INNER_FN_RE = re.compile(r"\b(" + "|".join(_AGG_INNER_FN_ALIASES) + r")\s*\(", re.IGNORECASE)
 
 
 def _lower_agg_inner_fns(text: str) -> str:
@@ -3236,7 +3228,8 @@ def _append_return(
         else:
             if order_ctx is not None:
                 lines.append(
-                    "  " + _compile_order_by(order_ctx, bind_vars, var_env=_order_env(var_env, compiled_items))
+                    "  "
+                    + _compile_order_by(order_ctx, bind_vars, var_env=_order_env(var_env, compiled_items))
                 )
             _append_skip_limit(lines, skip_value, limit_value)
             lines.append("  RETURN DISTINCT " + _compile_return_object(compiled_items))
@@ -3381,7 +3374,7 @@ def _append_return_aggregation(
         agg_env[key] = aql
     for key, aql, _s in compiled_collects:
         agg_env[key] = aql
-    for key, aql, expr in compiled_nonagg:
+    for _key, aql, expr in compiled_nonagg:
         if expr not in agg_env:
             agg_env[expr] = aql
 

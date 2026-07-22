@@ -171,9 +171,7 @@ class TestEnvFallback:
 
 
 def test_redacted_hides_password():
-    e = DatabaseEntry(
-        name="kg", url="u", database="KG", username="root", password="secret"
-    )
+    e = DatabaseEntry(name="kg", url="u", database="KG", username="root", password="secret")
     red = e.redacted()
     assert red["password"] == "***"
     assert "secret" not in str(red)

@@ -158,8 +158,8 @@ _VALUE_SHAPE_BLOCK_CYPHER = (
     "\nValue-shape hints:\n"
     "  - When a property shows 'shape: ...' or 'e.g. \"...\"', match against "
     "that value form. Do NOT invent a full legal/long name for a token- or "
-    "code-shaped field (e.g. filter `WHERE o.name = \"cinf\"`, not "
-    "`\"Cincinnati Financial Corporation\"`).\n"
+    'code-shaped field (e.g. filter `WHERE o.name = "cinf"`, not '
+    '`"Cincinnati Financial Corporation"`).\n'
     "  - If unsure of the exact stored value, prefer a case-insensitive or "
     "CONTAINS match over a brittle exact equality."
 )
@@ -636,11 +636,10 @@ class PromptBuilder:
             "- Use the EXACT label shown as the node label (e.g. `(a:ORG)`), not "
             "a different or more specific label.",
             "- Filter on the EXACT property and value shown "
-            "(e.g. `WHERE a.name == \"cinf\"` or `(a {name: \"cinf\"})`).",
+            '(e.g. `WHERE a.name == "cinf"` or `(a {name: "cinf"})`).',
             "- Do NOT invent, expand, or 'correct' the value (never turn "
-            "\"cinf\" into \"cincinnati financial corporation\").",
-            "- When several rows resolve the same mention, prefer the highest "
-            "similarity.",
+            '"cinf" into "cincinnati financial corporation").',
+            "- When several rows resolve the same mention, prefer the highest similarity.",
             "",
             "Resolutions:",
         ]
@@ -1525,7 +1524,7 @@ def _detect_literal_return(question: str) -> str | None:
         value = value.lower()
     alias = m.group("alias")
     if alias:
-        return f'RETURN {value} AS {alias}'
+        return f"RETURN {value} AS {alias}"
     return f"RETURN {value}"
 
 
@@ -1610,10 +1609,7 @@ def nl_to_cypher(
     if literal_cypher is not None:
         return NL2CypherResult(
             cypher=literal_cypher,
-            explanation=(
-                "Constant expression — returned directly without querying the "
-                "graph."
-            ),
+            explanation=("Constant expression — returned directly without querying the graph."),
             confidence=1.0,
             method="literal_return",
         )

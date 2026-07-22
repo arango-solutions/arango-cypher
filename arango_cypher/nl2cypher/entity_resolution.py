@@ -148,9 +148,7 @@ _RESOLVABLE_ROLE_PRIORITY: dict[str, int] = {
     "other": 3,
 }
 # Roles that must NEVER be probed as entity-name targets.
-_NON_RESOLVABLE_ROLES: frozenset[str] = frozenset(
-    {"categorical", "temporal", "numeric", "boolean"}
-)
+_NON_RESOLVABLE_ROLES: frozenset[str] = frozenset({"categorical", "temporal", "numeric", "boolean"})
 _ROLE_OTHER = "other"
 
 
@@ -731,9 +729,7 @@ class EntityResolver:
         if self._resolver is None:
             return ()
         try:
-            best_coll = (self._resolver.resolve_entity(best.label) or {}).get(
-                "collectionName"
-            ) or best.label
+            best_coll = (self._resolver.resolve_entity(best.label) or {}).get("collectionName") or best.label
         except Exception:
             return ()
         alts: list[str] = []
@@ -748,15 +744,9 @@ class EntityResolver:
                 continue
             if best.property not in self._resolve_properties_for(label):
                 continue
-            bucket = self._scan_collection_field(
-                best_coll, best.property, emap.get("typeField"), mention
-            )
+            bucket = self._scan_collection_field(best_coll, best.property, emap.get("typeField"), mention)
             type_value = emap.get("typeValue")
-            entry = (
-                bucket.get(str(type_value))
-                if emap.get("typeField") and type_value
-                else bucket.get("")
-            )
+            entry = bucket.get(str(type_value)) if emap.get("typeField") and type_value else bucket.get("")
             if entry and entry[0] == best.value and entry[1] >= 0.99:
                 alts.append(label)
         return tuple(alts)
@@ -846,8 +836,7 @@ class EntityResolver:
         self._advisory_keys.add(key)
         self.advisories.append(IndexAdvisory(collection=collection, field=field_name))
         logger.info(
-            "EntityResolver: fuzzy probe on %r.%r has no inverted/ArangoSearch "
-            "index; emitting advisory",
+            "EntityResolver: fuzzy probe on %r.%r has no inverted/ArangoSearch index; emitting advisory",
             collection,
             field_name,
         )
@@ -869,8 +858,7 @@ class EntityResolver:
         if field_name in self._indexed_fields(collection):
             return False
         logger.info(
-            "EntityResolver: skipping probe on oversized collection %r "
-            "(%d docs > %d, no index on %r)",
+            "EntityResolver: skipping probe on oversized collection %r (%d docs > %d, no index on %r)",
             collection,
             count,
             self.max_scan_collection_size,
@@ -975,9 +963,7 @@ class EntityResolver:
 
         type_return = "d[@type_field]" if type_field else "null"
         length_filter = (
-            "  FILTER LENGTH(d[@field]) <= @max_value_length\n"
-            if self.max_value_length > 0
-            else ""
+            "  FILTER LENGTH(d[@field]) <= @max_value_length\n" if self.max_value_length > 0 else ""
         )
         base_bind: dict[str, Any] = {
             "@c": collection,
@@ -1040,9 +1026,7 @@ class EntityResolver:
             f"  RETURN {{t: {type_return}, value: d[@field], score: score}}"
         )
         fuzzy_bind = dict(base_bind)
-        fuzzy_bind.update(
-            {"fuzzy_threshold": self.fuzzy_threshold, "lv_min": lv_min, "lv_max": lv_max}
-        )
+        fuzzy_bind.update({"fuzzy_threshold": self.fuzzy_threshold, "lv_min": lv_min, "lv_max": lv_max})
         bucket = self._run_scan(fuzzy_aql, fuzzy_bind, collection, field_name, mention)
         self._scan_cache[cache_key] = bucket
         return bucket
@@ -1099,16 +1083,13 @@ class EntityResolver:
         """
         out: list[str] = []
         for r in resolved:
-            line = (
-                f'"{r.mention}" → {r.label}.{r.property} = "{r.value}" '
-                f"(similarity {r.score:.2f})"
-            )
+            line = f'"{r.mention}" → {r.label}.{r.property} = "{r.value}" (similarity {r.score:.2f})'
             if r.alt_labels:
                 all_labels = ", ".join((r.label, *r.alt_labels))
                 line += (
                     f" — this value exists under MULTIPLE labels ({all_labels}), "
                     f"so do NOT pin a single label for it; anchor WITHOUT a label "
-                    f'using just the property filter, e.g. ({r.property[:1]} '
+                    f"using just the property filter, e.g. ({r.property[:1]} "
                     f'{{{r.property}: "{r.value}"}}), so the match works whichever '
                     f"label actually carries the relationship"
                 )

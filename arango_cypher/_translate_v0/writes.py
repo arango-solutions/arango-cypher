@@ -310,8 +310,7 @@ def _compile_foreach_delete(
     """
     if delete_ctx.DETACH() is not None:
         raise CoreError(
-            "DETACH DELETE inside FOREACH is not supported; use a top-level "
-            "MATCH … DETACH DELETE",
+            "DETACH DELETE inside FOREACH is not supported; use a top-level MATCH … DETACH DELETE",
             code="NOT_IMPLEMENTED",
         )
 
@@ -537,7 +536,6 @@ def _translate_create_query(
     set_clauses = set_clauses or []
     remove_clauses = remove_clauses or []
     has_writes = bool(set_clauses or remove_clauses)
-    reading_clauses = spq.oC_ReadingClause() or []
     ret = spq.oC_Return()
 
     # Maps each created variable to the bind key of the collection it was
@@ -608,8 +606,7 @@ def _apply_create_writes(
         key = var_collections.get(target_var)
         if not key:
             raise CoreError(
-                f"SET/REMOVE after CREATE targets variable {target_var!r} that "
-                "was not created in this query",
+                f"SET/REMOVE after CREATE targets variable {target_var!r} that was not created in this query",
                 code="NOT_IMPLEMENTED",
             )
         return _aql_collection_ref(key)
@@ -624,11 +621,7 @@ def _apply_create_writes(
             prop_expr = si.oC_PropertyExpression()
             if prop_expr is not None:
                 atom = prop_expr.oC_Atom()
-                target_var = (
-                    atom.oC_Variable().getText().strip()
-                    if atom.oC_Variable() is not None
-                    else None
-                )
+                target_var = atom.oC_Variable().getText().strip() if atom.oC_Variable() is not None else None
                 lookups = prop_expr.oC_PropertyLookup() or []
                 if target_var is None or not lookups:
                     raise CoreError("SET requires a property expression", code="UNSUPPORTED")
@@ -653,18 +646,13 @@ def _apply_create_writes(
             if prop_expr is None:
                 continue
             atom = prop_expr.oC_Atom()
-            target_var = (
-                atom.oC_Variable().getText().strip()
-                if atom.oC_Variable() is not None
-                else None
-            )
+            target_var = atom.oC_Variable().getText().strip() if atom.oC_Variable() is not None else None
             lookups = prop_expr.oC_PropertyLookup() or []
             if target_var is None or not lookups:
                 raise CoreError("REMOVE requires a property expression", code="UNSUPPORTED")
             prop_name = lookups[-1].oC_PropertyKeyName().getText().strip()
             _emit(
-                f'UPDATE {target_var} WITH UNSET({target_var}, "{prop_name}") '
-                f"IN {_coll_ref_for(target_var)}"
+                f'UPDATE {target_var} WITH UNSET({target_var}, "{prop_name}") IN {_coll_ref_for(target_var)}'
             )
 
 
@@ -1268,8 +1256,7 @@ def _translate_merge_multi_hop(
     """
     if merge_ctx.oC_MergeAction():
         raise CoreError(
-            "ON CREATE/ON MATCH SET is not supported with multi-hop MERGE; "
-            "use single-hop MERGE statements",
+            "ON CREATE/ON MATCH SET is not supported with multi-hop MERGE; use single-hop MERGE statements",
             code="NOT_IMPLEMENTED",
         )
 
@@ -1299,9 +1286,7 @@ def _translate_merge_multi_hop(
             raise CoreError("Relationship type is required for MERGE", code="UNSUPPORTED")
         type_names = types_ctx.oC_RelTypeName()
         if not type_names or len(type_names) != 1:
-            raise CoreError(
-                "Exactly one relationship type is required for MERGE", code="UNSUPPORTED"
-            )
+            raise CoreError("Exactly one relationship type is required for MERGE", code="UNSUPPORTED")
         rel_type = type_names[0].getText().strip()
 
         direction = _relationship_direction(rel_pat)
@@ -1318,9 +1303,7 @@ def _translate_merge_multi_hop(
                 f"Invalid relationship mapping collection for: {rel_type}",
                 code="INVALID_MAPPING",
             )
-        edge_coll_key = _find_or_create_collection_bind_key(
-            "@edgeCollection", edge_coll_name, bind_vars
-        )
+        edge_coll_key = _find_or_create_collection_bind_key("@edgeCollection", edge_coll_name, bind_vars)
         if edge_coll_key in used_edge_keys:
             raise CoreError(
                 f"Multi-hop MERGE reuses edge collection ({edge_coll_name!r}); AQL "
@@ -1349,8 +1332,7 @@ def _translate_merge_multi_hop(
 
     if spq.oC_Return() is not None:
         raise CoreError(
-            "RETURN after multi-hop MERGE is not supported; a trailing RETURN "
-            "only sees the last edge",
+            "RETURN after multi-hop MERGE is not supported; a trailing RETURN only sees the last edge",
             code="NOT_IMPLEMENTED",
         )
 
@@ -1516,8 +1498,7 @@ def _translate_multi_merge_query(
     reading_clauses = spq.oC_ReadingClause() or []
     if any(rc.oC_Match() is not None for rc in reading_clauses):
         raise CoreError(
-            "MATCH combined with multiple MERGE clauses is not supported; "
-            "split into separate statements",
+            "MATCH combined with multiple MERGE clauses is not supported; split into separate statements",
             code="NOT_IMPLEMENTED",
         )
 

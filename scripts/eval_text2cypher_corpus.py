@@ -45,8 +45,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from arango_cypher import translate  # noqa: E402
 from arango_query_core.errors import CoreError  # noqa: E402
+
+from arango_cypher import translate  # noqa: E402
 from tests.helpers.mapping_fixtures import mapping_bundle_for  # noqa: E402
 
 _DEFAULT_DATASET = "~/Downloads/dataset_neo4j/aql_cypher_comparison.csv"
@@ -54,11 +55,25 @@ _DEFAULT_DATASET = "~/Downloads/dataset_neo4j/aql_cypher_comparison.csv"
 # The AQL-keyword feature columns in aql_cypher_comparison.csv (describe the
 # dataset's *own* AQL translation — a coarse proxy for query construct/complexity).
 _FEATURE_COLUMNS = [
-    "COLLECT", "Graph_Traversal", "WITH", "FILTER", "LIMIT", "COUNT",
-    "Sorting_and_Pagination", "Distinct_and_Set_Operators", "array_functions",
-    "string_functions", "numeric_functions", "Control_Flow_and_Boolean",
-    "Graph_Operations", "Graph_Logic", "document_object_functions",
-    "date_functions", "arangosearch_functions", "SEARCH", "Data_Modification",
+    "COLLECT",
+    "Graph_Traversal",
+    "WITH",
+    "FILTER",
+    "LIMIT",
+    "COUNT",
+    "Sorting_and_Pagination",
+    "Distinct_and_Set_Operators",
+    "array_functions",
+    "string_functions",
+    "numeric_functions",
+    "Control_Flow_and_Boolean",
+    "Graph_Operations",
+    "Graph_Logic",
+    "document_object_functions",
+    "date_functions",
+    "arangosearch_functions",
+    "SEARCH",
+    "Data_Modification",
 ]
 
 # Data-modification errors we surface as a signal rather than double-count.
@@ -110,12 +125,19 @@ def _transpile_one(cypher: str, mapping) -> Outcome:
         translate(cypher, mapping=mapping)
         return Outcome(ok=True)
     except CoreError as e:
-        return Outcome(ok=False, code=getattr(e, "code", "CORE_ERROR"),
-                       bucket=_normalize_message(str(e)), raw_message=str(e))
+        return Outcome(
+            ok=False,
+            code=getattr(e, "code", "CORE_ERROR"),
+            bucket=_normalize_message(str(e)),
+            raw_message=str(e),
+        )
     except Exception as e:  # parser / unexpected — still a real gap
-        return Outcome(ok=False, code=type(e).__name__,
-                       bucket=_normalize_message(f"{type(e).__name__}: {e}"),
-                       raw_message=str(e))
+        return Outcome(
+            ok=False,
+            code=type(e).__name__,
+            bucket=_normalize_message(f"{type(e).__name__}: {e}"),
+            raw_message=str(e),
+        )
 
 
 def _load_rows(path: Path, limit: int | None) -> list[dict[str, str]]:
@@ -255,8 +277,11 @@ def _open_db(args):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--dataset", default=_DEFAULT_DATASET,
-                    help=f"path to aql_cypher_comparison.csv (default: {_DEFAULT_DATASET})")
+    ap.add_argument(
+        "--dataset",
+        default=_DEFAULT_DATASET,
+        help=f"path to aql_cypher_comparison.csv (default: {_DEFAULT_DATASET})",
+    )
     ap.add_argument("--mapping", default="movies_pg", help="mapping fixture name (default: movies_pg)")
     ap.add_argument("--limit", type=int, default=None, help="only evaluate the first N rows")
     ap.add_argument("--show", type=int, default=2, help="sample Cypher per gap bucket (default: 2)")
