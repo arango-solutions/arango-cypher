@@ -1,7 +1,7 @@
 # arango-cypher-py — Product Requirements Document (Consolidated)
 
-**Status:** Active development · **v0.1.0**
-**Last updated:** 2026-06-29
+**Status:** Active development · **v0.2.0**
+**Last updated:** 2026-08-01
 **Owner:** arango-cypher-py maintainers
 
 > **This is the single, all-encompassing PRD for the project.** It consolidates the
@@ -289,7 +289,7 @@ right-click acts, overlays over routes) are enforced project-wide.
 
 ### 7.1 Mapping model
 
-`arangodb-schema-analyzer` (>=0.6.1,<0.7, from PyPI) is the **primary tier** for
+`arangodb-schema-analyzer` (>=0.9.0,<0.10.0, from PyPI) is the **primary tier** for
 all schema types. It produces a `MappingBundle` (conceptual schema + physical
 mapping + metadata). When the analyzer is unavailable, a heuristic fallback runs
 and emits an `ANALYZER_NOT_INSTALLED` warning; the service refuses to start on a
@@ -462,14 +462,25 @@ The pipeline implements the SOTA Text2Cypher reference architecture
   (`movies_pg` + `northwind_pg`, 5 categories), reproducible runner, tolerance
   policy (5 pp / +20% / +0.3 retry), nightly CI matrix over OpenAI + Anthropic.
 
+> **Shared NL engine (2026-07).** The language-agnostic primitives — LLM providers,
+> BM25 few-shot retrieval, and the generate→validate→repair loop — were extracted into
+> the published `arango-query-core` distribution behind a `QueryLanguageAdapter` seam.
+> `arango_cypher.nl2cypher` now supplies the Cypher adapter (`CypherAdapter`) and
+> re-exports the engine's public surface, so `nl2cypher` and a future `nl2sparql` share
+> one engine. The re-point was behavior-preserving (per-case eval identical).
+
 **Quality baseline (live, 31 cases, both fixtures seeded):**
 
 | Metric | OpenAI `gpt-4o-mini` | Anthropic `claude-haiku-4-5` |
 | --- | --- | --- |
 | parse_ok | 100.0% | 100.0% |
-| pattern_match | 93.5% | **100.0%** |
-| typo category | 66.7% | **100%** |
+| pattern_match | 83.9% | **100.0%** |
+| typo category | 16.7% | **100%** |
 | retries_mean | 0.000 | 0.000 |
+
+> The OpenAI figures reflect a 2026-08-01 baseline refresh
+> (`tests/nl2cypher/eval/baseline.json`); the April figures no longer reproduced
+> (provider drift, not a code change). The Anthropic column is unchanged.
 
 ### 10.1 Local learning (feedback loops)
 
