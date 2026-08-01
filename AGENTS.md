@@ -3,6 +3,13 @@
 Canonical instructions for AI coding agents (Cursor, Claude, Gemini, etc.) working
 in this repo. This file consolidates the former `CLAUDE.md` and `GEMINI.md`.
 
+## Identity
+
+- PROJECT_ID: arango-cypher-py
+- PROJECT_TYPE: service
+- PRD_FILE: docs/PRD.md
+- TECH_STACK: Python (ANTLR4 Cypher→AQL transpiler + FastAPI service), Vite/React/TS UI, ArangoDB
+
 ## Project overview
 
 **arango-cypher-py** is a Python-native **NL → Cypher → AQL** stack for ArangoDB.
