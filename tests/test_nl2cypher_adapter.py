@@ -43,6 +43,39 @@ class TestProtocolConformance:
         assert CypherAdapter().language == "cypher"
 
 
+class TestGroundingSeams:
+    """Seams 6–7 (grounding / predicate) — Cypher runs ungrounded.
+
+    These seams were added to QueryLanguageAdapter after arango-query-core
+    0.1.0 for the SPARQL/IRI-grounding path. Cypher grounds via its own
+    EntityResolver inside nl_to_cypher, so the engine-level seams return
+    None (index) / "" (renderer), leaving the engine prompt unchanged.
+    """
+
+    def test_grounding_index_is_none(self) -> None:
+        assert CypherAdapter().grounding_index() is None
+
+    def test_predicate_index_is_none(self) -> None:
+        assert CypherAdapter().predicate_index() is None
+
+    def test_grounding_renderer_yields_nothing(self) -> None:
+        # Never reached by the engine (index is None), but must be a
+        # well-behaved no-op for protocol conformance.
+        assert CypherAdapter().grounding_prompt_section("q", index=None) == ""  # type: ignore[arg-type]
+
+    def test_predicate_renderer_yields_nothing(self) -> None:
+        assert CypherAdapter().predicate_prompt_section("q", index=None) == ""  # type: ignore[arg-type]
+
+    def test_grounding_adds_no_prompt_block(self) -> None:
+        """The assembled engine system prompt carries no grounding section."""
+        provider = FakeProvider(["```cypher\nMATCH (n:Person) RETURN n\n```"])
+        engine = NLQueryEngine(provider=provider, adapter=CypherAdapter())
+        engine.generate("find people", schema_context="Nodes:\n  (:Person {name})\n")
+        system = provider.calls[0][0]
+        assert "EXACT IRI" not in system  # SPARQL grounding wording never appears
+        assert "predicate" not in system.lower().split("## examples")[0]
+
+
 class TestGrammarSeam:
     def test_matches_zero_shot_prompt_builder_byte_for_byte(self) -> None:
         """Seam 1 must render exactly what the legacy pipeline renders.
