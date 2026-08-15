@@ -9,7 +9,8 @@ cases:
     expected:
       aql: |
         FOR n IN @@collection
-          COLLECT AGGREGATE names = PUSH(n.name)
+          COLLECT _collect_group = 1 INTO _collect_rows = {names: n.name}
+          LET names = _collect_rows[*].names
           RETURN names
       bind_vars:
         "@collection": persons
@@ -23,7 +24,8 @@ cases:
     expected:
       aql: |
         FOR n IN @@collection
-          COLLECT city = n.city AGGREGATE names = PUSH(n.name)
+          COLLECT city = n.city INTO _collect_rows = {names: n.name}
+          LET names = _collect_rows[*].names
           RETURN {city: city, names: names}
       bind_vars:
         "@collection": persons
@@ -38,7 +40,8 @@ cases:
       aql: |
         FOR m IN @@collection
           FILTER m[@typeField] == @typeValue
-          COLLECT AGGREGATE titles = PUSH(m.title)
+          COLLECT _collect_group = 1 INTO _collect_rows = {titles: m.title}
+          LET titles = _collect_rows[*].titles
           RETURN titles
       bind_vars:
         "@collection": nodes
@@ -55,7 +58,8 @@ cases:
       aql: |
         FOR m IN @@collection
           FILTER m[@typeField] == @typeValue
-          COLLECT released = m.released AGGREGATE titles = PUSH(m.title)
+          COLLECT released = m.released INTO _collect_rows = {titles: m.title}
+          LET titles = _collect_rows[*].titles
           RETURN {released: released, titles: titles}
       bind_vars:
         "@collection": nodes

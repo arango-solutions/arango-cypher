@@ -7,6 +7,7 @@ split without a core <-> writes import cycle at module import time.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,6 +15,179 @@ from arango_query_core import AqlQuery, CoreError, MappingResolver
 
 from .._antlr.CypherParser import CypherParser
 from .naming import _aql_collection_ref, _pick_bind_key, _strip_label_backticks
+
+# Pipeline scanners used by WITH … SET/DELETE/REMOVE tails.  ``FOR x IN @@coll``
+# binds ``x`` to collection bind-key ``@coll``; traversal ``FOR v, r IN … @@edge``
+# binds the relationship variable ``r``; plain ``LET alias = src`` copies that
+# binding so renamed WITH projections stay writable.
+_FOR_COLLECTION_RE = re.compile(r"^\s*FOR\s+(\w+)\s+IN\s+@@(\w+)\s*$")
+_FOR_TRAVERSAL_RE = re.compile(
+    r"^\s*FOR\s+(\w+),\s*(\w+)\s+IN\s+\d+\.\.\d+\s+(?:OUTBOUND|INBOUND|ANY)\s+\w+\s+@@(\w+)\s*$"
+)
+_LET_ALIAS_RE = re.compile(r"^\s*LET\s+(\w+)\s+=\s+(\w+)\s*$")
+
+
+def _infer_var_collections_from_pipeline(lines: list[str]) -> dict[str, str]:
+    """Map AQL document variables to their collection bind keys.
+
+    Only identity aliases are tracked (``LET x = p``).  Computed projections
+    such as ``LET born = p.born`` are intentionally omitted so SET/DELETE on a
+    non-document value fails closed instead of mutating the wrong collection.
+    """
+    out: dict[str, str] = {}
+    for line in lines:
+        m = _FOR_COLLECTION_RE.match(line)
+        if m is not None:
+            out[m.group(1)] = f"@{m.group(2)}"
+            continue
+        m = _FOR_TRAVERSAL_RE.match(line)
+        if m is not None:
+            # Vertex collection is not always a @@ bind on this line (LPG often
+            # filters with IS_SAME_COLLECTION).  The edge variable is.
+            out[m.group(2)] = f"@{m.group(3)}"
+            continue
+        m = _LET_ALIAS_RE.match(line)
+        if m is not None and m.group(2) in out:
+            out[m.group(1)] = out[m.group(2)]
+    return out
+
+
+def _append_multipart_mutate_tail(
+    *,
+    set_clauses: list[CypherParser.OC_SetContext],
+    delete_clauses: list[CypherParser.OC_DeleteContext],
+    remove_clauses: list,
+    tail: CypherParser.OC_SinglePartQueryContext,
+    lines: list[str],
+    var_env: dict[str, str],
+    bind_vars: dict[str, Any],
+    resolver: MappingResolver,
+) -> AqlQuery:
+    """Emit SET / DELETE / REMOVE after a WITH pipeline.
+
+    Handles ``MATCH … WITH … SET/DELETE/REMOVE … [RETURN …]``.  Collection
+    targets are recovered from the already-built MATCH/WITH AQL so aliased
+    document projections (``WITH p AS x``) stay bound to the source collection.
+    """
+    if not (set_clauses or delete_clauses or remove_clauses):
+        raise CoreError(
+            "SET/DELETE/REMOVE after WITH requires at least one mutating clause",
+            code="UNSUPPORTED",
+        )
+
+    var_collections = _infer_var_collections_from_pipeline(lines)
+    if not var_collections:
+        raise CoreError(
+            "SET/DELETE/REMOVE after WITH requires a document variable from MATCH",
+            code="NOT_IMPLEMENTED",
+        )
+
+    def _coll_ref_for(target_var: str) -> str:
+        aql_var = var_env.get(target_var, target_var)
+        key = var_collections.get(aql_var) or var_collections.get(target_var)
+        if key is None:
+            raise CoreError(
+                f"SET/DELETE/REMOVE after WITH targets {target_var!r}, which is not a "
+                "MATCH-bound document variable",
+                code="NOT_IMPLEMENTED",
+            )
+        if key not in bind_vars:
+            raise CoreError(
+                f"Missing collection bind for SET/DELETE/REMOVE target {target_var!r}",
+                code="UNSUPPORTED",
+            )
+        return _aql_collection_ref(key)
+
+    def _rewrite_target(name: str) -> str:
+        return var_env.get(name, name)
+
+    for sc in set_clauses:
+        update_fields: dict[str, dict[str, str]] = {}
+        for si in sc.oC_SetItem() or []:
+            prop_expr = si.oC_PropertyExpression()
+            if prop_expr is not None:
+                atom = prop_expr.oC_Atom()
+                if atom is None or atom.oC_Variable() is None:
+                    raise CoreError("SET requires a property expression", code="UNSUPPORTED")
+                target_var = _rewrite_target(atom.oC_Variable().getText().strip())
+                lookups = prop_expr.oC_PropertyLookup() or []
+                if not lookups:
+                    raise CoreError("SET requires a property expression", code="UNSUPPORTED")
+                prop_name = lookups[-1].oC_PropertyKeyName().getText().strip()
+                val = _compile_expression(si.oC_Expression(), bind_vars)
+                if var_env:
+                    val = _rewrite_vars(val, var_env)
+                update_fields.setdefault(target_var, {})[prop_name] = val
+            else:
+                si_var = si.oC_Variable()
+                if si_var is None:
+                    raise CoreError("Unsupported SET item after WITH", code="UNSUPPORTED")
+                target_var = _rewrite_target(si_var.getText().strip())
+                val = _compile_expression(si.oC_Expression(), bind_vars)
+                if var_env:
+                    val = _rewrite_vars(val, var_env)
+                ref = _coll_ref_for(target_var)
+                if "+=" in si.getText():
+                    lines.append(f"  UPDATE {target_var} WITH MERGE({target_var}, {val}) IN {ref}")
+                else:
+                    lines.append(f"  REPLACE {target_var} WITH {val} IN {ref}")
+
+        for target_var, fields in update_fields.items():
+            pairs = ", ".join(f"{k}: {v}" for k, v in fields.items())
+            lines.append(f"  UPDATE {target_var} WITH {{{pairs}}} IN {_coll_ref_for(target_var)}")
+
+    for dc in delete_clauses:
+        is_detach = dc.DETACH() is not None
+        for de in dc.oC_Expression() or []:
+            del_var = _compile_expression(de, bind_vars)
+            if var_env:
+                del_var = _rewrite_vars(del_var, var_env)
+            # Expression must resolve to a simple variable for collection lookup.
+            simple = del_var.strip()
+            if not re.fullmatch(r"\w+", simple):
+                raise CoreError(
+                    "DELETE after WITH only supports a simple MATCH-bound variable",
+                    code="NOT_IMPLEMENTED",
+                )
+            if is_detach:
+                for idx, ec in enumerate(resolver.all_edge_collections()):
+                    ec_key = _pick_bind_key("@detachEdge", bind_vars)
+                    bind_vars[ec_key] = ec
+                    ec_ref = _aql_collection_ref(ec_key)
+                    de_edge = f"_de{idx}"
+                    lines.append(
+                        f"  LET _edgeRm{idx} = (FOR {de_edge} IN 1..1 ANY {simple} {ec_ref} "
+                        f"REMOVE {de_edge} IN {ec_ref})"
+                    )
+            lines.append(f"  REMOVE {simple} IN {_coll_ref_for(simple)}")
+
+    for rc in remove_clauses:
+        for ri in rc.oC_RemoveItem() or []:
+            prop_expr = ri.oC_PropertyExpression()
+            if prop_expr is None:
+                continue
+            atom = prop_expr.oC_Atom()
+            if atom is None or atom.oC_Variable() is None:
+                raise CoreError("REMOVE requires a property expression", code="UNSUPPORTED")
+            target_var = _rewrite_target(atom.oC_Variable().getText().strip())
+            lookups = prop_expr.oC_PropertyLookup() or []
+            if not lookups:
+                raise CoreError("REMOVE requires a property expression", code="UNSUPPORTED")
+            prop_name = lookups[-1].oC_PropertyKeyName().getText().strip()
+            lines.append(
+                f'  UPDATE {target_var} WITH UNSET({target_var}, "{prop_name}") IN {_coll_ref_for(target_var)}'
+            )
+
+    ret = tail.oC_Return()
+    if ret is not None:
+        _append_return(
+            ret.oC_ProjectionBody(),
+            lines=lines,
+            bind_vars=bind_vars,
+            var_env=var_env,
+        )
+
+    return AqlQuery(text="\n".join(lines), bind_vars=bind_vars)
 
 
 def _core_helper(name: str):

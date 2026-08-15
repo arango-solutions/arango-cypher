@@ -112,9 +112,68 @@ class TestWithCreateTail:
         assert "COLLECT AGGREGATE c = COUNT(p)" in out.aql
         assert "INSERT {released: c} INTO" in out.aql
 
-    def test_with_set_rejected(self, pg):
+
+class TestWithMutateTail:
+    """``MATCH … WITH … SET/DELETE/REMOVE …`` — mutations nested in the WITH
+    pipeline (WP-V1e follow-up). Collection targets are recovered from the
+    MATCH ``FOR`` lines so aliased document projections stay writable."""
+
+    def test_with_set(self, pg):
+        out = translate("MATCH (p:Person) WITH p SET p.born = 1970", mapping=pg)
+        assert "FOR p IN " in out.aql
+        assert "UPDATE p WITH {born: 1970} IN" in out.aql
+
+    def test_with_set_return(self, pg):
+        out = translate(
+            "MATCH (p:Person) WITH p SET p.born = 1970 RETURN p",
+            mapping=pg,
+        )
+        assert "UPDATE p WITH {born: 1970} IN" in out.aql
+        assert "RETURN p" in out.aql
+
+    def test_with_set_aliased(self, pg):
+        out = translate(
+            "MATCH (p:Person) WITH p AS x SET x.born = 1970 RETURN x",
+            mapping=pg,
+        )
+        assert "LET x = p" in out.aql
+        assert "UPDATE x WITH {born: 1970} IN" in out.aql
+        assert out.bind_vars.get("@collection") == "persons"
+
+    def test_with_remove(self, pg):
+        out = translate("MATCH (p:Person) WITH p REMOVE p.born", mapping=pg)
+        assert 'UPDATE p WITH UNSET(p, "born") IN' in out.aql
+
+    def test_with_delete(self, pg):
+        out = translate("MATCH (p:Person) WITH p DELETE p", mapping=pg)
+        assert "REMOVE p IN" in out.aql
+
+    def test_with_detach_delete(self, pg):
+        out = translate("MATCH (p:Person) WITH p DETACH DELETE p", mapping=pg)
+        assert "LET _edgeRm" in out.aql
+        assert "REMOVE p IN" in out.aql
+
+    def test_with_delete_relationship(self, pg):
+        out = translate(
+            "MATCH (:Person)-[r:ACTED_IN]->(:Movie) WITH r DELETE r",
+            mapping=pg,
+        )
+        assert "REMOVE r IN" in out.aql
+
+    def test_with_delete_relationship_and_projection(self, pg):
+        out = translate(
+            "MATCH (:Person)-[r:ACTED_IN]->(:Movie) WITH r, r.roles AS roles DELETE r RETURN roles",
+            mapping=pg,
+        )
+        assert "REMOVE r IN" in out.aql
+        assert "RETURN" in out.aql
+
+    def test_with_set_on_computed_projection_rejected(self, pg):
         with pytest.raises(CoreError) as exc:
-            translate("MATCH (p:Person) WITH p SET p.born = 1970", mapping=pg)
+            translate(
+                "MATCH (p:Person) WITH p.born AS born SET born = 1970",
+                mapping=pg,
+            )
         assert exc.value.code == "NOT_IMPLEMENTED"
 
 

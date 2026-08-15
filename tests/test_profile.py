@@ -17,6 +17,11 @@ def test_get_cypher_profile_json_serializable():
     assert p["translator_id"] == "arango_cypher.translate_v0"
     assert "supported" in p and "not_yet_supported" in p
     assert "MATCH" in p["supported"]["reading_clauses"]
+    assert {"CREATE", "MERGE", "SET", "REMOVE", "DELETE", "FOREACH"} <= set(
+        p["supported"]["updating_clauses"]
+    )
+    assert "complex_write_clause_pipelines" in p["not_yet_supported"]
+    assert "write_clauses_create_merge_set_delete_remove" not in p["not_yet_supported"]
 
 
 def test_validate_empty_cypher():

@@ -1500,7 +1500,7 @@ def _translate_multi_part_query(
             tail_parts.extend(tm.oC_Pattern().oC_PatternPart() or [])
         _set_user_vars_from_parts(tail_parts)
 
-    # A tail write after WITH (e.g. MATCH … WITH … CREATE/MERGE …). The WITH
+    # A tail write after WITH (e.g. MATCH … WITH … CREATE/MERGE/SET …). The WITH
     # pipeline is already in ``lines`` with ``var_env`` bound; the write nests
     # inside it, referencing the bound variables.
     tail_updating = tail.oC_UpdatingClause() or []
@@ -1515,12 +1515,39 @@ def _translate_multi_part_query(
                 resolver=resolver,
                 bind_vars=bind_vars,
             )
-        return _append_multipart_create_tail(
-            tail_updating,
-            tail=tail,
-            lines=lines,
-            var_env=var_env,
-            bind_vars=bind_vars,
+        create_clauses = [uc.oC_Create() for uc in tail_updating if uc.oC_Create() is not None]
+        if create_clauses:
+            return _append_multipart_create_tail(
+                tail_updating,
+                tail=tail,
+                lines=lines,
+                var_env=var_env,
+                bind_vars=bind_vars,
+            )
+        set_clauses = [uc.oC_Set() for uc in tail_updating if uc.oC_Set() is not None]
+        delete_clauses = [uc.oC_Delete() for uc in tail_updating if uc.oC_Delete() is not None]
+        remove_clauses = [uc.oC_Remove() for uc in tail_updating if uc.oC_Remove() is not None]
+        if set_clauses or delete_clauses or remove_clauses:
+            if tail_reading:
+                raise CoreError(
+                    "MATCH after WITH before SET/DELETE/REMOVE is not supported",
+                    code="NOT_IMPLEMENTED",
+                )
+            from .writes import _append_multipart_mutate_tail
+
+            return _append_multipart_mutate_tail(
+                set_clauses=set_clauses,
+                delete_clauses=delete_clauses,
+                remove_clauses=remove_clauses,
+                tail=tail,
+                lines=lines,
+                var_env=var_env,
+                bind_vars=bind_vars,
+                resolver=resolver,
+            )
+        raise CoreError(
+            "Unsupported write clause after WITH",
+            code="NOT_IMPLEMENTED",
         )
 
     ret = tail.oC_Return()
@@ -1598,9 +1625,9 @@ def _append_multipart_create_tail(
     Handles ``MATCH … WITH … CREATE …`` (and ``UNWIND … WITH … CREATE …``):
     the CREATE reuses the pipeline's ``var_env`` so it can reference / connect
     already-bound variables (``CREATE (a)-[:R]->(b)`` with ``a``/``b`` bound).
-    Non-CREATE writes after WITH (MERGE / SET / DELETE / standalone) still need
-    the standalone builders' append-mode support and are refused with a
-    specific error rather than mis-compiled.
+    Trailing SET/REMOVE on the created variables are supported.  Standalone
+    SET/DELETE/REMOVE after WITH are handled by ``_append_multipart_mutate_tail``
+    before this helper is called.
     """
     from .writes import _apply_create_writes, _compile_create, _compile_return_for_create
 
@@ -1622,8 +1649,8 @@ def _append_multipart_create_tail(
 
     if not create_clauses:
         raise CoreError(
-            "MERGE/SET/DELETE after WITH are not yet supported; only CREATE is",
-            code="NOT_IMPLEMENTED",
+            "CREATE after WITH requires at least one CREATE clause",
+            code="UNSUPPORTED",
         )
 
     ret = tail.oC_Return()
@@ -2829,6 +2856,29 @@ def _parse_collect(expr_text: str) -> dict[str, Any] | None:
     return {"inner": inner, "distinct": distinct, "slice": slice_spec}
 
 
+def _compile_collect_inner(spec: dict[str, Any], bind_vars: dict[str, Any]) -> dict[str, Any]:
+    """Compile a parsed ``collect`` argument through the expression compiler.
+
+    Aggregates are recognized from projection text because their result changes
+    the AQL pipeline shape.  Their argument must still use the normal AST
+    compiler: passing its raw Cypher text to ``PUSH`` leaves operators such as
+    ``=`` and ``<>`` invalid in AQL (notably in precedence test cases).
+    """
+    inner = spec["inner"]
+    parsed = parse_cypher(f"RETURN {inner}")
+    single_query = parsed.tree.oC_Statement().oC_Query().oC_RegularQuery().oC_SingleQuery()
+    projection_item = (
+        single_query.oC_SinglePartQuery()
+        .oC_Return()
+        .oC_ProjectionBody()
+        .oC_ProjectionItems()
+        .oC_ProjectionItem(0)
+    )
+    compiled = dict(spec)
+    compiled["inner"] = _compile_expression(projection_item.oC_Expression(), bind_vars)
+    return compiled
+
+
 def _collect_post_expr(raw_var: str, spec: dict[str, Any]) -> str:
     """Build the AQL value expression for a parsed collect projection.
 
@@ -2853,6 +2903,25 @@ def _collect_post_expr(raw_var: str, spec: dict[str, Any]) -> str:
             elif end is not None:
                 e = f"SLICE({e}, 0, {end})"
     return e
+
+
+def _aggregate_from_collected_rows(agg_expr: str, rows_var: str, field: str | None) -> str:
+    """Rebuild a supported Cypher aggregate from an AQL COLLECT INTO group."""
+    match = re.fullmatch(r"(COUNT|COUNT_DISTINCT|AVG|SUM|MIN|MAX)\((.*)\)", agg_expr.strip())
+    if match is None:
+        raise CoreError(f"Unsupported aggregate expression: {agg_expr}", code="UNSUPPORTED")
+    fn, inner = match.group(1), match.group(2).strip()
+    if fn == "COUNT" and inner == "1":
+        return f"LENGTH({rows_var})"
+    if field is None:
+        raise CoreError(f"Aggregate {agg_expr} requires an input field", code="UNSUPPORTED")
+
+    values = f"FOR _agg_row IN {rows_var} FILTER _agg_row.{field} != null RETURN _agg_row.{field}"
+    if fn == "COUNT":
+        return f"LENGTH({values})"
+    if fn == "COUNT_DISTINCT":
+        return f"LENGTH(UNIQUE({values}))"
+    return f"{fn}({rows_var}[*].{field})"
 
 
 def _apply_with(
@@ -2924,6 +2993,7 @@ def _apply_with(
 
         collect_spec = _parse_collect(expr_txt_for_agg)
         if collect_spec is not None:
+            collect_spec = _compile_collect_inner(collect_spec, bind_vars)
             cypher_var = alias or f"collected{len(compiled_collects) + 1}"
             aql_var = pick_name(cypher_var)
             forbidden_vars.add(aql_var)
@@ -2977,6 +3047,42 @@ def _apply_with(
 
     env: dict[str, str] = {cy: aql for cy, aql, _ in compiled_nonagg}
     env.update({cy: aql for cy, aql, _ in compiled_agg})
+
+    # AQL 3.11 does not accept PUSH()/UNIQUE() as COLLECT AGGREGATE
+    # expressions. For collect-only projections, preserve each collect input
+    # in the INTO projection and derive its list after grouping instead.
+    if compiled_collects:
+        group_parts = ", ".join(f"{aql} = {expr}" for _, aql, expr in compiled_nonagg)
+        rows_var = pick_name("_collect_rows")
+        forbidden_vars.add(rows_var)
+        projection_parts = [f"{aql}: {spec['inner']}" for _, aql, spec in compiled_collects]
+        aggregate_fields: list[tuple[str, str, str | None]] = []
+        for cypher_var, aql_var, agg_expr in compiled_agg:
+            field: str | None = None
+            if agg_expr != "COUNT(1)":
+                field = f"_{aql_var}_input"
+                inner = agg_expr[agg_expr.find("(") + 1 : -1]
+                projection_parts.append(f"{field}: {inner}")
+            aggregate_fields.append((cypher_var, aql_var, field))
+        collect_line = f"  COLLECT {group_parts or '_collect_group = 1'} INTO {rows_var}"
+        collect_line += f" = {{{', '.join(projection_parts)}}}"
+        lines.append(collect_line)
+        for cypher_var, aql_var, spec in compiled_collects:
+            lines.append(f"  LET {aql_var} = {_collect_post_expr(f'{rows_var}[*].{aql_var}', spec)}")
+            env[cypher_var] = aql_var
+        for cypher_var, aql_var, field in aggregate_fields:
+            agg_expr = next(expr for cy, aql, expr in compiled_agg if (cy, aql) == (cypher_var, aql_var))
+            lines.append(f"  LET {aql_var} = {_aggregate_from_collected_rows(agg_expr, rows_var, field)}")
+            env[cypher_var] = aql_var
+
+        with_filter = _rewrite_vars(with_filter_raw, env) if with_filter_raw else None
+        if with_filter:
+            lines.append(f"  FILTER {with_filter}")
+        if order_ctx is not None:
+            lines.append("  " + _compile_order_by(order_ctx, bind_vars, var_env=env))
+        _append_skip_limit(lines, skip_value, limit_value)
+        _active_user_vars.set(list(env.keys()))
+        return env
 
     # Aggregation path (AGGREGATE and/or collect). Each collect() lowers to an
     # AGGREGATE PUSH (UNIQUE for DISTINCT); a trailing slice/index becomes a
@@ -3308,6 +3414,7 @@ def _append_return_aggregation(
 
         collect_spec = _parse_collect(expr_txt)
         if collect_spec is not None:
+            collect_spec = _compile_collect_inner(collect_spec, bind_vars)
             idx = len(compiled_nonagg) + len(compiled_agg) + len(compiled_collects) + 1
             key = alias or f"expr{idx}"
             compiled_collects.append((key, _alloc(key), collect_spec))
@@ -3340,30 +3447,38 @@ def _append_return_aggregation(
 
     group_parts = ", ".join(f"{aql} = {e}" for _k, aql, e in compiled_nonagg)
 
-    # collect() → AGGREGATE PUSH (UNIQUE for DISTINCT); a trailing slice/index
-    # becomes a post-COLLECT LET over a PUSH temp. Multiple collect() coexist as
-    # multiple AGGREGATE parts.
-    agg_pieces = [f"{aql} = {e}" for _k, aql, e in compiled_agg]
-    post_lets: list[tuple[str, str]] = []
-    for _k, aql, spec in compiled_collects:
-        if spec.get("slice") is not None:
-            temp = f"_{aql}_grp"
-            agg_pieces.append(f"{temp} = PUSH({spec['inner']})")
-            post_lets.append((aql, _collect_post_expr(temp, spec)))
-        else:
-            fn = "UNIQUE" if spec.get("distinct") else "PUSH"
-            agg_pieces.append(f"{aql} = {fn}({spec['inner']})")
-    agg_parts = ", ".join(agg_pieces)
+    if compiled_collects and not compiled_agg:
+        rows_var = _alloc("_collect_rows")
+        projection_parts = ", ".join(f"{aql}: {spec['inner']}" for _k, aql, spec in compiled_collects)
+        collect_line = f"  COLLECT {group_parts or '_collect_group = 1'} INTO {rows_var}"
+        lines.append(f"{collect_line} = {{{projection_parts}}}")
+        for _key, aql, spec in compiled_collects:
+            lines.append(f"  LET {aql} = {_collect_post_expr(f'{rows_var}[*].{aql}', spec)}")
+    else:
+        # AQL supports aggregate functions such as COUNT/SUM directly. ``collect``
+        # is handled by the INTO-projection path above because PUSH/UNIQUE are
+        # not valid COLLECT AGGREGATE expressions in ArangoDB 3.11.
+        agg_pieces = [f"{aql} = {e}" for _k, aql, e in compiled_agg]
+        post_lets: list[tuple[str, str]] = []
+        for _k, aql, spec in compiled_collects:
+            if spec.get("slice") is not None:
+                temp = f"_{aql}_grp"
+                agg_pieces.append(f"{temp} = PUSH({spec['inner']})")
+                post_lets.append((aql, _collect_post_expr(temp, spec)))
+            else:
+                fn = "UNIQUE" if spec.get("distinct") else "PUSH"
+                agg_pieces.append(f"{aql} = {fn}({spec['inner']})")
+        agg_parts = ", ".join(agg_pieces)
 
-    collect_line = "  COLLECT"
-    if group_parts:
-        collect_line += f" {group_parts}"
-    if agg_parts:
-        collect_line += f" AGGREGATE {agg_parts}"
+        collect_line = "  COLLECT"
+        if group_parts:
+            collect_line += f" {group_parts}"
+        if agg_parts:
+            collect_line += f" AGGREGATE {agg_parts}"
 
-    lines.append(collect_line)
-    for pk, pe in post_lets:
-        lines.append(f"  LET {pk} = {pe}")
+        lines.append(collect_line)
+        for pk, pe in post_lets:
+            lines.append(f"  LET {pk} = {pe}")
 
     # ORDER BY / RETURN env: map both the projection key and the original grouped
     # expression to the (possibly reallocated) AQL variable. After
@@ -4682,19 +4797,27 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
         parts = ctx.oC_XorExpression()
         if len(parts) == 1:
             return _compile_expression(parts[0], bind_vars)
-        return "(" + " OR ".join(_compile_expression(p, bind_vars) for p in parts) + ")"
+        _reject_obvious_non_boolean_literals(parts, "OR")
+        return _compile_cypher_boolean_fold([_compile_expression(part, bind_vars) for part in parts], "OR")
 
     if isinstance(ctx, CypherParser.OC_XorExpressionContext):
         parts = ctx.oC_AndExpression()
         if len(parts) == 1:
             return _compile_expression(parts[0], bind_vars)
-        return "(" + " XOR ".join(_compile_expression(p, bind_vars) for p in parts) + ")"
-
+        # AQL has no XOR operator.  Preserve Cypher's three-valued semantics:
+        # an XOR with a null operand is null; otherwise it is boolean inequality.
+        _reject_obvious_non_boolean_literals(parts, "XOR")
+        compiled = [_compile_expression(part, bind_vars) for part in parts]
+        result = compiled[0]
+        for right in compiled[1:]:
+            result = f"((({result}) == null OR ({right}) == null) ? null : (({result}) != ({right})))"
+        return result
     if isinstance(ctx, CypherParser.OC_AndExpressionContext):
         parts = ctx.oC_NotExpression()
         if len(parts) == 1:
             return _compile_expression(parts[0], bind_vars)
-        return "(" + " AND ".join(_compile_expression(p, bind_vars) for p in parts) + ")"
+        _reject_obvious_non_boolean_literals(parts, "AND")
+        return _compile_cypher_boolean_fold([_compile_expression(part, bind_vars) for part in parts], "AND")
 
     if isinstance(ctx, CypherParser.OC_NotExpressionContext):
         # Grammar: (NOT SP?)* comparison
@@ -5185,3 +5308,47 @@ def _compile_expression(ctx: Any, bind_vars: dict[str, Any]) -> str:
         raise CoreError(f"Unsupported function in v0: {fn}", code="UNSUPPORTED")
 
     raise CoreError(f"Unsupported expression node: {type(ctx).__name__}", code="UNSUPPORTED")
+
+
+def _is_obvious_non_boolean_literal(expr: str) -> bool:
+    """Return whether *expr* is a literal Cypher cannot use with ``XOR``.
+
+    Variables and compound expressions are deliberately left to runtime because
+    their type depends on graph data. Literal arguments are statically known,
+    and rejecting them matches the TCK's invalid-argument contract.
+    """
+    text = expr.strip()
+    if text.lower() in {"true", "false", "null"}:
+        return False
+    return bool(
+        re.fullmatch(r"[+-]?\d+(?:\.\d+)?", text)
+        or (len(text) >= 2 and text[0] in {"'", '"'} and text[-1] == text[0])
+        or (text.startswith("[") and text.endswith("]"))
+        or (text.startswith("{") and text.endswith("}"))
+    )
+
+
+def _reject_obvious_non_boolean_literals(parts: list[Any], operator: str) -> None:
+    """Reject literal operands that Cypher type-checks before evaluation."""
+    for part in parts:
+        if _is_obvious_non_boolean_literal(part.getText().strip()):
+            raise CoreError(f"{operator} requires boolean operands", code="UNSUPPORTED")
+
+
+def _compile_cypher_boolean_fold(parts: list[str], operator: str) -> str:
+    """Fold boolean operands while preserving Cypher's three-valued logic."""
+    result = parts[0]
+    for right in parts[1:]:
+        if operator == "AND":
+            result = (
+                f"((({result}) == false OR ({right}) == false) ? false : "
+                f"((({result}) == true AND ({right}) == true) ? true : null))"
+            )
+        elif operator == "OR":
+            result = (
+                f"((({result}) == true OR ({right}) == true) ? true : "
+                f"((({result}) == false AND ({right}) == false) ? false : null))"
+            )
+        else:  # pragma: no cover - internal fixed call sites
+            raise ValueError(f"Unsupported boolean operator: {operator}")
+    return result

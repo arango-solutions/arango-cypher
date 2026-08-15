@@ -145,8 +145,13 @@ cases:
 
     '
   expected:
-    aql: "WITH docs, persons, places, users\nFOR u IN @@uCollection\n  FOR v, r IN 1..1 OUTBOUND u @@edgeCollection\n    FILTER IS_SAME_COLLECTION(@vCollection, v)\n    FILTER ((u.active == true) AND (v.active\
-      \ == true))\n    RETURN {u: u, v: v}"
+    aql: |-
+      WITH docs, persons, places, users
+      FOR u IN @@uCollection
+        FOR v, r IN 1..1 OUTBOUND u @@edgeCollection
+          FILTER IS_SAME_COLLECTION(@vCollection, v)
+          FILTER ((((u.active == true)) == false OR ((v.active == true)) == false) ? false : ((((u.active == true)) == true AND ((v.active == true)) == true) ? true : null))
+          RETURN {u: u, v: v}
     bind_vars:
       '@uCollection': users
       '@edgeCollection': follows

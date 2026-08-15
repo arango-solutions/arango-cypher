@@ -15,11 +15,11 @@ from tests.helpers.mapping_fixtures import mapping_bundle_for
         # `WITH 1 AS x RETURN x` are now supported — see
         # test_translate_computational_pipeline.py.)
         (
-            # WITH → CREATE is now supported (WP-V1e); WITH → SET is still
-            # deferred but rejected with a specific NOT_IMPLEMENTED code.
-            "MATCH (n:User)\nWITH n\nSET n.x = 1\nRETURN n",
+            # WITH → SET is supported; SET on a computed (non-document) WITH
+            # projection still fails closed.
+            "MATCH (n:User)\nWITH n.id AS id\nSET id = 1\nRETURN id",
             "NOT_IMPLEMENTED",
-            "MERGE/SET/DELETE after WITH are not yet supported",
+            "not a MATCH-bound document variable",
         ),
         (
             "MATCH (n:User)\nWITH n\nUNWIND [1] AS x\nRETURN n",

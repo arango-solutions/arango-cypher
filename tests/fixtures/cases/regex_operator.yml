@@ -30,9 +30,9 @@ cases:
 
     '
   expected:
-    aql: "FOR n IN @@collection\n  FILTER (REGEX_TEST(n.name, '^A') AND (n.age != null AND n.age > 20))\n  RETURN n\n"
+    aql: "FOR n IN @@collection\n  FILTER (((REGEX_TEST(n.name, '^A')) == false OR ((n.age != null AND n.age > 20)) == false) ? false : (((REGEX_TEST(n.name, '^A')) == true AND ((n.age != null AND n.age > 20)) == true) ? true : null))\n  RETURN n\n"
     bind_vars:
-      '@collection': persons
+      "@collection": persons
 - id: C303
   name: regex with lpg mapping
   mapping_fixture: movies_lpg
