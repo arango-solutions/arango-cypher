@@ -484,7 +484,13 @@ def _execute_setup_cypher(
         list(AqlExecutor(db).execute(out.to_aql_query()))
     except Exception as e:
         err_str = str(e)
-        if "1579" in err_str or "access after data-modification" in err_str:
+        can_seed_directly = bool(re.search(r"\bCREATE\b", cypher, flags=re.IGNORECASE))
+        if can_seed_directly and (
+            "1579" in err_str
+            or "access after data-modification" in err_str
+            or "1511" in err_str
+            or "assigned multiple times" in err_str
+        ):
             return _execute_create_directly(db, cypher)
         return ScenarioOutcome(status="failed", reason=f"setup execute failed: {e}")
     return None

@@ -1,29 +1,36 @@
 #!/usr/bin/env python3
-"""Analyze TCK coverage by attempting translation only (no DB needed).
+"""Measure TCK parse and translation coverage without a database.
 
 Parses all .feature files, extracts the main Cypher query from each scenario,
 checks step compatibility with the harness, and attempts to translate.
 
 Reports:
-  - Total scenarios (full + core)
-  - Translatable (parse + translate succeeds)
-  - Error-expected (correctly rejected)
+  - Total scenarios (full + core-minus-temporal-and-call)
+  - Parseable, translatable, and correctly rejected scenarios
   - Skipped categories and reasons
-  - Projected pass rate (full and core)
+  - Projected translation pass rate (full and core)
+
+This is deliberately a dry-run measurement.  ``execute`` and
+``semantically_equivalent`` outcomes require the live TCK harness and are
+reported by ``tests/tck/analyze_execution.py``.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import re
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from arango_query_core import CoreError
 
 from arango_cypher import translate
+from arango_cypher.parser import parse_cypher
 from tests.tck.gherkin import Scenario, Step, parse_feature
 from tests.tck.runner import _build_mapping_for_scenario  # noqa: PLC2701
 
@@ -32,7 +39,6 @@ _FEATURES_DIR = Path(__file__).resolve().parent / "features"
 _OUT_OF_SCOPE_CATS = frozenset(
     {
         "expressions/temporal",
-        "expressions/quantifier",
         "clauses/call",
     }
 )
@@ -127,11 +133,22 @@ def _get_main_query(sc: Scenario) -> str | None:
     return None
 
 
-def analyze() -> None:
+def _counter_dict(counter: Counter[str]) -> dict[str, int]:
+    return dict(sorted(counter.items()))
+
+
+def analyze() -> dict[str, Any]:
+    """Return structured dry-run coverage metrics for the bundled TCK."""
     full_total = 0
     core_total = 0
     full_passable = 0
     core_passable = 0
+    full_parseable = 0
+    core_parseable = 0
+    full_translatable = 0
+    core_translatable = 0
+    full_correct_rejections = 0
+    core_correct_rejections = 0
 
     harness_skip_reasons: Counter = Counter()
     translate_fail_reasons: Counter = Counter()
@@ -167,72 +184,163 @@ def analyze() -> None:
             expects_error = _scenario_expects_error(sc)
 
             try:
+                parse_cypher(query)
+            except CoreError as e:
+                by_category[category]["parse_rejected"] += 1
+                if expects_error:
+                    full_passable += 1
+                    full_correct_rejections += 1
+                    by_category[category]["correct_rejection"] += 1
+                    if is_core:
+                        core_passable += 1
+                        core_correct_rejections += 1
+                    continue
+                translate_fail_reasons[str(e)[:60]] += 1
+                by_category[category]["translate_fail"] += 1
+                continue
+
+            full_parseable += 1
+            by_category[category]["parseable"] += 1
+            if is_core:
+                core_parseable += 1
+
+            try:
                 mapping = _build_mapping_for_scenario(sc, "lpg")
                 translate(query, mapping=mapping)
                 full_passable += 1
+                full_translatable += 1
                 by_category[category]["translatable"] += 1
                 if is_core:
                     core_passable += 1
+                    core_translatable += 1
             except CoreError as e:
                 if expects_error:
                     full_passable += 1
-                    by_category[category]["error_ok"] += 1
+                    full_correct_rejections += 1
+                    by_category[category]["correct_rejection"] += 1
                     if is_core:
                         core_passable += 1
+                        core_correct_rejections += 1
                 else:
                     translate_fail_reasons[str(e)[:60]] += 1
                     by_category[category]["translate_fail"] += 1
             except Exception:
                 if expects_error:
                     full_passable += 1
-                    by_category[category]["error_ok"] += 1
+                    full_correct_rejections += 1
+                    by_category[category]["correct_rejection"] += 1
                     if is_core:
                         core_passable += 1
+                        core_correct_rejections += 1
                 else:
                     by_category[category]["translate_fail"] += 1
 
     full_rate = (full_passable / full_total * 100) if full_total else 0
     core_rate = (core_passable / core_total * 100) if core_total else 0
+    categories = {
+        category: {
+            "total": counts["total"],
+            "parseable": counts["parseable"],
+            "translatable": counts["translatable"],
+            "correct_rejections": counts["correct_rejection"],
+            "passable": counts["translatable"] + counts["correct_rejection"],
+            "harness_skips": counts["harness_skip"],
+            "translation_failures": counts["translate_fail"],
+        }
+        for category, counts in sorted(by_category.items())
+    }
 
+    return {
+        "measurement": {
+            "kind": "translation_dry_run",
+            "execution_available": False,
+            "equivalence_available": False,
+            "core_exclusions": sorted(_OUT_OF_SCOPE_CATS),
+        },
+        "full": {
+            "total": full_total,
+            "parseable": full_parseable,
+            "translatable": full_translatable,
+            "correct_rejections": full_correct_rejections,
+            "passable": full_passable,
+            "pass_rate": full_rate,
+        },
+        "core": {
+            "total": core_total,
+            "parseable": core_parseable,
+            "translatable": core_translatable,
+            "correct_rejections": core_correct_rejections,
+            "passable": core_passable,
+            "pass_rate": core_rate,
+        },
+        "harness_skip_reasons": _counter_dict(harness_skip_reasons),
+        "translation_failure_reasons": _counter_dict(translate_fail_reasons),
+        "categories": categories,
+    }
+
+
+def _print_text_report(metrics: dict[str, Any]) -> None:
+    full = metrics["full"]
+    core = metrics["core"]
     print("=" * 72)
     print("TCK DRY-RUN COVERAGE ANALYSIS")
     print("=" * 72)
     print()
-    print(f"FULL TCK (all {full_total} scenarios):")
-    print(f"  Passable:          {full_passable:5d} / {full_total}")
-    print(f"  Pass rate:         {full_rate:5.1f}%")
+    print(f"FULL TCK (all {full['total']} scenarios):")
+    print(f"  Parseable:         {full['parseable']:5d} / {full['total']}")
+    print(f"  Translatable:      {full['translatable']:5d} / {full['total']}")
+    print(f"  Correct rejections:{full['correct_rejections']:5d} / {full['total']}")
+    print(f"  Passable:          {full['passable']:5d} / {full['total']}")
+    print(f"  Pass rate:         {full['pass_rate']:5.1f}%")
     print()
-    print(f"CORE TCK (excl. temporal+quantifier — {core_total} scenarios):")
-    print(f"  Passable:          {core_passable:5d} / {core_total}")
-    print(f"  Pass rate:         {core_rate:5.1f}%")
+    print(
+        "CORE TCK (excl. "
+        + "+".join(metrics["measurement"]["core_exclusions"])
+        + f" — {core['total']} scenarios):"
+    )
+    print(f"  Parseable:         {core['parseable']:5d} / {core['total']}")
+    print(f"  Translatable:      {core['translatable']:5d} / {core['total']}")
+    print(f"  Correct rejections:{core['correct_rejections']:5d} / {core['total']}")
+    print(f"  Passable:          {core['passable']:5d} / {core['total']}")
+    print(f"  Pass rate:         {core['pass_rate']:5.1f}%")
     print()
 
     print("-" * 72)
     print("TOP HARNESS SKIP REASONS")
     print("-" * 72)
-    for reason, count in harness_skip_reasons.most_common(10):
+    for reason, count in sorted(
+        metrics["harness_skip_reasons"].items(), key=lambda item: item[1], reverse=True
+    )[:10]:
         print(f"  {count:4d}  {reason}")
     print()
 
     print("-" * 72)
     print("TOP TRANSLATE FAILURE REASONS")
     print("-" * 72)
-    for reason, count in translate_fail_reasons.most_common(15):
+    for reason, count in sorted(
+        metrics["translation_failure_reasons"].items(), key=lambda item: item[1], reverse=True
+    )[:15]:
         print(f"  {count:4d}  {reason}")
     print()
 
     print("-" * 72)
     print("BREAKDOWN BY CATEGORY")
     print("-" * 72)
-    for cat in sorted(by_category):
-        c = by_category[cat]
-        t = c["total"]
-        p = c["translatable"] + c["error_ok"]
-        r = (p / t * 100) if t else 0
+    for cat, category in metrics["categories"].items():
+        total = category["total"]
+        passable = category["passable"]
+        r = (passable / total * 100) if total else 0
         oos = " [OUT OF SCOPE]" if cat in _OUT_OF_SCOPE_CATS else ""
-        print(f"  {cat:45s}  {p:3d}/{t:3d}  ({r:5.1f}%){oos}")
+        print(f"  {cat:45s}  {passable:3d}/{total:3d}  ({r:5.1f}%){oos}")
     print()
 
 
 if __name__ == "__main__":
-    analyze()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--json", action="store_true", help="Emit structured JSON instead of text.")
+    args = parser.parse_args()
+    metrics = analyze()
+    if args.json:
+        print(json.dumps(metrics, indent=2, sort_keys=True))
+    else:
+        _print_text_report(metrics)

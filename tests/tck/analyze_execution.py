@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Measure parse, translation, execution, and TCK-assertion outcomes.
+
+This command requires a live ArangoDB configured with the same ``ARANGO_*``
+environment variables used by the TCK tests.  It deliberately treats the TCK
+expected result as the equivalence oracle; it does not claim a per-scenario
+Neo4j comparison.  The separately marked ``cross`` suites provide that
+reference-engine comparison for checked-in Movies and Northwind corpora.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from collections import Counter
+from pathlib import Path
+from typing import Any
+
+from arango_query_core import CoreError
+
+from arango_cypher import translate
+from arango_cypher.parser import parse_cypher
+from tests.tck.analyze_coverage import (
+    _get_main_query,
+    _scenario_expects_error,
+    _scenario_steps_supported,
+)
+from tests.tck.gherkin import parse_feature
+from tests.tck.runner import _build_mapping_for_scenario, run_scenario
+
+_FEATURES_DIR = Path(__file__).resolve().parent / "features"
+
+
+def _empty_counts() -> Counter[str]:
+    return Counter(
+        {
+            "total": 0,
+            "parseable": 0,
+            "translatable": 0,
+            "correct_rejections": 0,
+            "executed": 0,
+            "tck_assertion_passed": 0,
+            "skipped": 0,
+            "translation_failures": 0,
+            "execution_failures": 0,
+        }
+    )
+
+
+def analyze_execution(*, db_name: str, mapping_fixture: str) -> dict[str, Any]:
+    """Run every harness-compatible TCK scenario and return staged metrics."""
+    totals = _empty_counts()
+    categories: dict[str, Counter[str]] = {}
+    skipped: Counter[str] = Counter()
+    failures: Counter[str] = Counter()
+
+    for feature_path in sorted(_FEATURES_DIR.rglob("*.feature")):
+        if feature_path.name == "sample.feature":
+            continue
+        category = str(feature_path.relative_to(_FEATURES_DIR).parent)
+        counts = categories.setdefault(category, _empty_counts())
+        for scenario in parse_feature(feature_path).scenarios:
+            for counter in (totals, counts):
+                counter["total"] += 1
+
+            steps_ok, reason = _scenario_steps_supported(scenario)
+            if not steps_ok:
+                for counter in (totals, counts):
+                    counter["skipped"] += 1
+                skipped[reason] += 1
+                continue
+
+            query = _get_main_query(scenario)
+            if not query:
+                for counter in (totals, counts):
+                    counter["skipped"] += 1
+                skipped["no query"] += 1
+                continue
+
+            expects_error = _scenario_expects_error(scenario)
+            try:
+                parse_cypher(query)
+            except CoreError:
+                if expects_error:
+                    for counter in (totals, counts):
+                        counter["correct_rejections"] += 1
+                    continue
+                for counter in (totals, counts):
+                    counter["translation_failures"] += 1
+                failures["parse rejected"] += 1
+                continue
+
+            for counter in (totals, counts):
+                counter["parseable"] += 1
+
+            try:
+                translate(query, mapping=_build_mapping_for_scenario(scenario, mapping_fixture))
+            except CoreError:
+                if expects_error:
+                    for counter in (totals, counts):
+                        counter["correct_rejections"] += 1
+                    continue
+                for counter in (totals, counts):
+                    counter["translation_failures"] += 1
+                failures["translation rejected"] += 1
+                continue
+
+            for counter in (totals, counts):
+                counter["translatable"] += 1
+
+            outcome = run_scenario(scenario, db_name=db_name, mapping_fixture=mapping_fixture)
+            if outcome.status == "skipped":
+                for counter in (totals, counts):
+                    counter["skipped"] += 1
+                skipped[outcome.reason or "execution skipped"] += 1
+            elif outcome.status == "passed":
+                for counter in (totals, counts):
+                    counter["executed"] += 1
+                    counter["tck_assertion_passed"] += 1
+            else:
+                for counter in (totals, counts):
+                    counter["executed"] += 1
+                    counter["execution_failures"] += 1
+                failures[outcome.reason or "execution failed"] += 1
+
+    return {
+        "measurement": {
+            "kind": "arango_tck_execution",
+            "equivalence_oracle": "TCK expected rows and error assertions",
+            "reference_engine_comparison": "not per-scenario; run pytest -m cross separately",
+        },
+        "totals": dict(totals),
+        "categories": {category: dict(counts) for category, counts in sorted(categories.items())},
+        "skip_reasons": dict(sorted(skipped.items())),
+        "failure_reasons": dict(sorted(failures.items())),
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--db-name", default="tck_coverage_db")
+    parser.add_argument("--mapping-fixture", default="lpg")
+    args = parser.parse_args()
+    print(
+        json.dumps(
+            analyze_execution(db_name=args.db_name, mapping_fixture=args.mapping_fixture),
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+if __name__ == "__main__":
+    main()

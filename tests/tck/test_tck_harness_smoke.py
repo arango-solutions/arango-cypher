@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.tck import runner
 from tests.tck.gherkin import parse_feature
 from tests.tck.normalize import (
     normalize_actual_value,
@@ -467,6 +468,39 @@ class TestGherkinDocStringAndTable:
         assert given_step.data_table is not None
         assert len(given_step.data_table) == 2
         assert given_step.data_table[0] == ["name", "value"]
+
+
+# ---------------------------------------------------------------------------
+# Setup fallback regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_setup_create_falls_back_for_aql_variable_collision(monkeypatch: pytest.MonkeyPatch):
+    class Translated:
+        def to_aql_query(self):
+            return object()
+
+    class FailingExecutor:
+        def __init__(self, _db):
+            pass
+
+        def execute(self, _query):
+            raise RuntimeError("[HTTP 400][ERR 1511] AQL: variable '_c0' is assigned multiple times")
+
+    seeded: list[str] = []
+
+    monkeypatch.setattr(runner, "translate", lambda *_args, **_kwargs: Translated())
+    monkeypatch.setattr(runner, "AqlExecutor", FailingExecutor)
+    monkeypatch.setattr(
+        runner,
+        "_execute_create_directly",
+        lambda _db, cypher: seeded.append(cypher) or None,
+    )
+
+    outcome = runner._execute_setup_cypher(object(), "CREATE (n:Node {name: 'A'})", "lpg")
+
+    assert outcome is None
+    assert seeded == ["CREATE (n:Node {name: 'A'})"]
 
 
 # ---------------------------------------------------------------------------
