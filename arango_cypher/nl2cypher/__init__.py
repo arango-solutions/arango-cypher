@@ -67,6 +67,12 @@ from ._core import (
 )
 from .adapter import CypherAdapter
 from .entity_resolution import EntityResolver, IndexAdvisory, ResolvedEntity
+from .postconditions import (
+    Postcondition,
+    PostconditionContext,
+    PostconditionViolation,
+    run_postconditions,
+)
 from .tenant_guardrail import (
     TenantContext,
     TenantScopeViolation,
@@ -81,6 +87,10 @@ from .tenant_scope import (
 )
 
 __all__ = [
+    "run_postconditions",
+    "PostconditionViolation",
+    "PostconditionContext",
+    "Postcondition",
     "AnthropicProvider",
     "BM25Retriever",
     "CypherAdapter",

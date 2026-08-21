@@ -8,10 +8,12 @@ model can emit efficient AQL without going through Cypher.
 
 from __future__ import annotations
 
+from .postconditions import Postcondition
+
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Sequence
 
 from arango_query_core.mapping import MappingBundle
 from arango_query_core.nl.providers import LLMProvider, _get_default_provider
@@ -669,6 +671,7 @@ def nl_to_aql(
     max_retries: int = 2,
     tenant_context: TenantContext | None = None,
     cypher: str | None = None,
+    postconditions: Sequence[Postcondition] | None = None,
 ) -> NL2AqlResult:
     """Translate a natural language question directly to AQL.
 
@@ -692,6 +695,18 @@ def nl_to_aql(
             fallback for Cypher that the deterministic transpiler cannot
             handle. ``question`` may still be passed for logging/context.
     """
+    if postconditions:
+        # This path generates AQL directly, so there is no Cypher for a
+        # postcondition to inspect. Refusing is deliberate: silently accepting
+        # a safety check and then not running it is strictly worse than not
+        # offering the parameter at all. Callers who need postconditions want
+        # nl_to_cypher(), which has the retry loop they enforce through.
+        raise ValueError(
+            "postconditions are not supported by nl_to_aql(): this path bypasses "
+            "Cypher generation, so there is nothing for a Cypher postcondition to "
+            "check. Use nl_to_cypher(..., postconditions=[...]) instead."
+        )
+
     if mapping is None:
         return NL2AqlResult(
             aql="",
