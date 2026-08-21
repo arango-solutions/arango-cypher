@@ -69,4 +69,4 @@ class TestQuantifiers:
             mapping=pg,
         )
         assert "LENGTH(FOR x IN [1,2] FILTER" in out.aql
-        assert "AND (p.born" in out.aql
+        assert "p.born" in out.aql

@@ -151,11 +151,10 @@ cases:
     expected:
       aql: |
         FOR n IN @@collection
-          FILTER ((n.city == "SF") OR (n.city == "NYC"))
+          FILTER ((((n.city == "SF")) == true OR ((n.city == "NYC")) == true) ? true : ((((n.city == "SF")) == false AND ((n.city == "NYC")) == false) ? false : null))
           RETURN n.id
       bind_vars:
         "@collection": users
-
   - id: C049
     name: not expression
     mapping_fixture: pg
@@ -179,11 +178,10 @@ cases:
     expected:
       aql: |
         FOR n IN @@collection
-          FILTER ((n.active == true) XOR (n.city == "SF"))
+          FILTER ((((n.active == true)) == null OR ((n.city == "SF")) == null) ? null : (((n.active == true)) != ((n.city == "SF"))))
           RETURN n.id
       bind_vars:
         "@collection": users
-
   - id: C051
     name: return object key collision
     mapping_fixture: pg
@@ -206,11 +204,10 @@ cases:
     expected:
       aql: |
         FOR n IN @@collection
-          FILTER (((n.city == "SF") OR (n.city == "NYC")) AND (n.active == true))
+          FILTER (((((((n.city == "SF")) == true OR ((n.city == "NYC")) == true) ? true : ((((n.city == "SF")) == false AND ((n.city == "NYC")) == false) ? false : null))) == false OR ((n.active == true)) == false) ? false : (((((((n.city == "SF")) == true OR ((n.city == "NYC")) == true) ? true : ((((n.city == "SF")) == false AND ((n.city == "NYC")) == false) ? false : null))) == true AND ((n.active == true)) == true) ? true : null))
           RETURN n.id
       bind_vars:
         "@collection": users
-
   - id: C054
     name: double not cancels
     mapping_fixture: pg

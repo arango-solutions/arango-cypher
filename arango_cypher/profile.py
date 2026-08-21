@@ -53,7 +53,11 @@ def build_cypher_profile() -> dict[str, Any]:
         },
         "supported": {
             "reading_clauses": ["MATCH", "OPTIONAL_MATCH", "MULTIPLE_MATCH", "UNWIND", "CALL_YIELD"],
-            "updating_clauses": [],
+            # These are intentionally listed despite partial coverage: callers
+            # need to know that ordinary forms are accepted.  The precise
+            # unsupported multi-part shapes are declared below instead of
+            # incorrectly claiming that all writes are unavailable.
+            "updating_clauses": ["CREATE", "MERGE", "SET", "REMOVE", "DELETE", "FOREACH"],
             "pipeline_clauses": ["WITH", "RETURN"],
             "set_operations": ["UNION", "UNION_ALL"],
             "match_features": [
@@ -139,9 +143,13 @@ def build_cypher_profile() -> dict[str, Any]:
         },
         "not_yet_supported": [
             "multiple_relationship_types_per_hop",
-            "write_clauses_create_merge_set_delete_remove",
+            "complex_write_clause_pipelines",
+            "unwind_with_write_pipelines",
+            "same_collection_multi_write_transactions",
             "positional_parameters",
             "multi_label_nodes_without_label_mapping",
+            "temporal_types_and_functions",
+            "neo4j_procedures_and_generic_call",
         ],
         "validation": {
             "validate_cypher_profile_behavior": (

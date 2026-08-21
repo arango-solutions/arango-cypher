@@ -44,9 +44,9 @@ Baselines are committed at [`tests/nl2cypher/eval/baseline.json`](tests/nl2cyphe
 
 ## Status
 
-> **Active development (v0.1.x).**
+> **Active development (v0.2.x).**
 >
-> - **Cypher → AQL transpiler** — broad read/write subset across PG, LPG, and hybrid mappings (see [Supported Cypher subset](#supported-cypher-subset)). Neo4j cross-validation and openCypher TCK harness in CI; translation-only TCK pass rate ~66% on the clause-focused subset.
+> - **Cypher → AQL transpiler** — broad read/write subset across PG, LPG, and hybrid mappings (see [Supported Cypher subset](#supported-cypher-subset)). The current translation-only openCypher TCK result is 2,676 / 3,861 (69.3%); see the generated [TCK report](tests/tck/COVERAGE_REPORT.md) and [capability matrix](docs/cypher_capability_matrix.md) for scope and semantic caveats.
 > - **NL → Cypher pipeline** — WP-25 closed 2026-04-20. Dynamic few-shot, entity resolution, EXPLAIN-grounded retry, prompt caching, eval harness + nightly regression gate. NL corrections feed back into few-shot retrieval (Wave 4o).
 > - **Multi-tenant safety** — Phase 1 shipped (Wave 7): session-bound tenant on connect, EXPLAIN-plan validator, `safe_execute` on execute paths. Algorithmic Cypher/AQL tenant injection (Layers 3–4) remains planned — see [`docs/multitenant_prd.md`](docs/multitenant_prd.md).
 
@@ -89,7 +89,12 @@ The v0 translator supports:
 
 - `EXISTS { }` subqueries, regex `=~`, `FOREACH`, `COUNT { }` subqueries
 
-**Not yet supported:** multiple relationship types in one hop (`[:A|B]`), typeless relationships `-[r]-`, leading clauses other than `MATCH` at query start (blocks many TCK scenarios).
+**Important limits:** multiple relationship types in one hop (`[:A|B]`),
+general Neo4j `CALL` procedures, temporal values/functions, and complex
+multi-part write pipelines remain unsupported. Typeless relationships and
+leading `WITH`/`UNWIND` pipelines have constrained support; see the
+[capability matrix](docs/cypher_capability_matrix.md) for requirements and
+known semantic differences.
 
 ## Quick start
 

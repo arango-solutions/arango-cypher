@@ -18,11 +18,21 @@ invert the dependency direction the extraction established.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from arango_query_core.mapping import MappingBundle
 from arango_query_core.nl.fewshot import FewShotIndex
 from arango_query_core.nl.seams import GuardrailVerdict, ValidationResult
+
+if TYPE_CHECKING:
+    # Seams 6–7 (grounding / predicate) were added to
+    # QueryLanguageAdapter after arango-query-core 0.1.0. These types
+    # only exist in that later engine; import them under TYPE_CHECKING
+    # so this module still loads against the published 0.1.0 (which has
+    # neither the types nor the 9-seam protocol) — the annotations stay
+    # lazy strings via ``from __future__ import annotations`` and the
+    # seam bodies never touch the types at runtime.
+    from arango_query_core.nl.grounding import LabelIndex, PredicateIndex
 
 from ._core import (
     _SYSTEM_PROMPT,
@@ -118,3 +128,38 @@ class CypherAdapter:
         if violation.suggested_hint:
             reasons.append(violation.suggested_hint)
         return GuardrailVerdict(allowed=False, reasons=reasons)
+
+    def grounding_index(self) -> LabelIndex | None:
+        """Seam 6 — engine-level instance/label grounding: not used by Cypher.
+
+        The engine's :class:`LabelIndex` grounding (SPARQL-style "use
+        these EXACT IRIs" injection) is orthogonal to the Cypher path,
+        which grounds user string literals through its own pre-flight
+        :class:`~arango_cypher.nl2cypher.EntityResolver` (WP-25.2) inside
+        ``nl_to_cypher`` rather than via a prompt block. Returning
+        ``None`` runs the engine ungrounded and leaves that behavior
+        untouched.
+        """
+        return None
+
+    def grounding_prompt_section(self, question: str, index: LabelIndex, k: int = 20) -> str:
+        """Seam 6 renderer — unreachable for Cypher.
+
+        The engine only calls this when :meth:`grounding_index` returns a
+        non-``None`` index; Cypher always returns ``None``, so this exists
+        for protocol conformance and yields nothing if ever invoked.
+        """
+        return ""
+
+    def predicate_index(self) -> PredicateIndex | None:
+        """Seam 7 — engine-level TBox predicate grounding: not used by Cypher.
+
+        Cypher's grammar prompt (seam 1) already carries the conceptual
+        schema (labels, relationship types, properties), so there is no
+        separate predicate cheat-sheet to inject. Returns ``None``.
+        """
+        return None
+
+    def predicate_prompt_section(self, question: str, index: PredicateIndex, k: int = 20) -> str:
+        """Seam 7 renderer — unreachable for Cypher (see :meth:`predicate_index`)."""
+        return ""

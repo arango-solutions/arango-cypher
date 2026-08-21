@@ -1,143 +1,105 @@
-# openCypher TCK coverage — measured
+# openCypher TCK coverage
 
-> Headline re-measured 2026-07-05 after single-node `EXISTS`/`COUNT`
-> subquery support (WP-V1c). The per-category tables below were last
-> refreshed 2026-07-01 and are stale for several categories (a full
-> `analyze_coverage.py` re-run now reports materially higher numbers in
-> `expressions/{list,map,null,precedence,…}` and `useCases/countingSubgraphMatches`);
-> treat the live analyzer output as source of truth until the tables are
-> regenerated. The `expressions/existentialSubqueries` line is updated below.
+> Generated: 2026-08-06
+> Command: `./.venv/bin/python tests/tck/render_coverage_report.py --write`
 
-> Measurement date: 2026-07-01 (was 2026-04-20)
-> Methodology: translation-only dry run (`python tests/tck/analyze_coverage.py`). Each scenario's main Cypher query is parsed and translated; scenarios that translate successfully (or correctly reject an error-expected input) count as passable. No DB execution — this is an upper bound on what the runner could achieve with a live ArangoDB.
+## Scope and limitations
 
-## Headline numbers
+Dry-run results measure parse and translation feasibility for the bundled TCK corpus.
+When execution data is supplied, the report also records AQL execution and whether it
+satisfies the TCK's declared result/error assertion. That assertion is not a direct
+per-scenario Neo4j comparison; use the Neo4j cross-validation suites for that evidence.
 
-| Subset | Passable | Pass rate | (was 2026-04-20) |
-|--------|----------|-----------|------------------|
-| **Full TCK** (all 3,861 scenarios) | 2,676 / 3,861 | **69.3 %** | 32.2 % |
-| **Core TCK** (excludes out-of-scope: `expressions/temporal`, `expressions/quantifier`, `clauses/call` — 2,201 scenarios) | 1,983 / 2,201 | **90.1 %** | 54.8 % |
+A scenario that is expected by the TCK to fail counts as a correct rejection when the parser
+or translator rejects it. The Core subset excludes only `clauses/call`, `expressions/temporal`; list quantifiers are included because they are substantially implemented.
 
-> 2026-07-07: WP-V1i (chained comparisons, `a < b < c`) added +10
-> (Full 2,666→2,676, Core 1,973→1,983); `expressions/comparison` 69→83%.
+## Four-outcome dashboard
 
-> 2026-07-07: WP-V1h (`any`/`all`/`none`/`single` list quantifiers) added
-> **+574 Full** (2,092→2,666) — `expressions/quantifier` 12→544 (90%), no
-> longer meaningfully out-of-scope — and **+42 Core** (1,931→1,973), since
-> quantifiers also appear in boolean / match-where scenarios.
+| Population | Parses | Translates | Correctly rejects | Executes | TCK assertion passed (executed) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Full (3861 scenarios) | 3709 (96.1%) | 2409 (62.4%) | 267 (6.9%) | 2408 (62.4%) | 1296 (33.6%) |
+| Core (2805 scenarios) | 2703 (96.4%) | 2262 (80.6%) | 265 (9.4%) | 2261 (80.6%) | 1288 (45.9%) |
 
-> 2026-07-05: WP-V1e/V1f (write-tail combos — `UNWIND … CREATE`/`MERGE`,
-> `MATCH … WITH … CREATE`, `MATCH … WITH … MERGE`) added +8 (Full 2,068→2,076,
-> Core 1,907→1,915); `clauses/create` 74→82%, `clauses/unwind` 50→71%,
-> `clauses/merge` 55→59%. WP-V1g (`RETURN *` / `WITH *` star projection) added
-> +16 (Full 2,076→2,092, Core 1,915→1,931).
-
-> 2026-07-05: WP-V1c (single-node `EXISTS`/`COUNT` subquery bodies) took
-> `expressions/existentialSubqueries` from 6/10 → 9/10; WP-V1d
-> (`WITH`+aggregation counting existentials, via an ANTLR grammar change) took
-> it to **10/10**. Combined headline +4 (Full 2,064→2,068, Core 1,903→1,907).
-
-The jump (Core 54.8 % → 86.4 %) came from relaxing the leading-clause
-constraint: no-MATCH computational pipelines (leading `WITH`-constants / `UNWIND`
-over literals) now translate instead of failing "MATCH is required before WITH"
-(that bucket fell 475 → 22). Earlier Wave-8 fixes (unlabeled-endpoint inference,
-`EXISTS`/`COUNT` pattern shorthand, COLLECT/ORDER-BY hygiene) contributed the
-rest. The remaining full-TCK gap is dominated by the two out-of-scope expression
-categories (`temporal`: 1,004 scenarios; `quantifier`: 604) and the
-`Unsupported atom` bucket (largely temporal/quantifier expression atoms).
-
-## Top translation-failure reasons (actionable)
-
-Measured 2026-07-01:
-
-| Count | Reason | Implication |
-|------:|--------|-------------|
-| 539 | `Unsupported atom in v0` | Largely temporal/quantifier expression atoms (out of scope); the rest are `any()`/`all()`/`none()` list predicates and other complex atoms. |
-| 372 / 112 / 110 / 66 / 64 / 46 / 34 | `Unsupported function in v0: datetime / time / localtime / *.truncate / duration` | `expressions/temporal` — out of scope. |
-| 46 | `Updating clauses are not supported in v0` | Largely closed 2026-07-05 (WP-V1e/V1f): `UNWIND … CREATE/MERGE`, `MATCH … WITH … CREATE`, and `MATCH … WITH … MERGE` now translate. Remaining: `WITH … SET`/`DELETE` (need append-mode mutating builders) + `UNWIND … WITH … <write>`. |
-| 36 | `Only one collect(...) is supported in v0` | Multiple `collect()` in one projection. |
-| 22 | `MATCH is required before WITH in v0 subset` | Remaining are write-tail combos (need read+write pipeline integration). |
-| 20 | `Cypher syntax error … no viable alternative` | ANTLR grammar gaps. |
-| 15 | `Unsupported function in v0: count` | Standalone `count()` in a not-yet-accepted context. |
-| 13 | `RETURN items required` / `Unsupported expression node: NoneType` | Misc projection edge cases. |
+The headline dry-run passability (translation or correct rejection) is **2676 / 3861 (69.3%)** for Full and **2527 / 2805 (90.1%)** for Core.
 
 ## Category breakdown
 
-### High-coverage (≥ 70 % passable)
-| Category | Passable | Pass rate |
-|----------|----------|-----------|
-| clauses/return-skip-limit | 30 / 31 | 96.8 % |
-| expressions/boolean | 130 / 150 | 86.7 % |
-| expressions/string | 27 / 32 | 84.4 % |
-| clauses/match | 302 / 381 | 79.3 % |
-| expressions/graph | 47 / 61 | 77.0 % |
-| expressions/pattern | 38 / 50 | 76.0 % |
-| clauses/create | 58 / 78 | 74.4 % |
-| expressions/aggregation | 26 / 35 | 74.3 % |
-| clauses/with-orderBy | 211 / 292 | 72.3 % |
+| Category | Parseable | Translates | Correct rejections | Passable | Rate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `clauses/call` (out of Core) | 2 / 52 | 0 / 52 | 2 / 52 | 2 / 52 | 3.8% |
+| `clauses/create` | 78 / 78 | 61 / 78 | 3 / 78 | 64 / 78 | 82.1% |
+| `clauses/delete` | 41 / 41 | 25 / 41 | 2 / 41 | 27 / 41 | 65.9% |
+| `clauses/match` | 379 / 381 | 271 / 381 | 100 / 381 | 371 / 381 | 97.4% |
+| `clauses/match-where` | 34 / 34 | 31 / 34 | 1 / 34 | 32 / 34 | 94.1% |
+| `clauses/merge` | 75 / 75 | 33 / 75 | 11 / 75 | 44 / 75 | 58.7% |
+| `clauses/remove` | 33 / 33 | 27 / 33 | 0 / 33 | 27 / 33 | 81.8% |
+| `clauses/return` | 63 / 63 | 46 / 63 | 6 / 63 | 52 / 63 | 82.5% |
+| `clauses/return-orderby` | 35 / 35 | 25 / 35 | 3 / 35 | 28 / 35 | 80.0% |
+| `clauses/return-skip-limit` | 31 / 31 | 31 / 31 | 0 / 31 | 31 / 31 | 100.0% |
+| `clauses/set` | 53 / 53 | 34 / 53 | 0 / 53 | 34 / 53 | 64.2% |
+| `clauses/union` | 12 / 12 | 10 / 12 | 0 / 12 | 10 / 12 | 83.3% |
+| `clauses/unwind` | 14 / 14 | 12 / 14 | 0 / 14 | 12 / 14 | 85.7% |
+| `clauses/with` | 29 / 29 | 19 / 29 | 2 / 29 | 21 / 29 | 72.4% |
+| `clauses/with-orderBy` | 292 / 292 | 215 / 292 | 39 / 292 | 254 / 292 | 87.0% |
+| `clauses/with-skip-limit` | 9 / 9 | 8 / 9 | 0 / 9 | 8 / 9 | 88.9% |
+| `clauses/with-where` | 19 / 19 | 12 / 19 | 0 / 19 | 12 / 19 | 63.2% |
+| `expressions/aggregation` | 35 / 35 | 22 / 35 | 7 / 35 | 29 / 35 | 82.9% |
+| `expressions/boolean` | 150 / 150 | 81 / 150 | 69 / 150 | 150 / 150 | 100.0% |
+| `expressions/comparison` | 64 / 72 | 60 / 72 | 0 / 72 | 60 / 72 | 83.3% |
+| `expressions/conditional` | 13 / 13 | 13 / 13 | 0 / 13 | 13 / 13 | 100.0% |
+| `expressions/existentialSubqueries` | 9 / 10 | 9 / 10 | 1 / 10 | 10 / 10 | 100.0% |
+| `expressions/graph` | 61 / 61 | 60 / 61 | 0 / 61 | 60 / 61 | 98.4% |
+| `expressions/list` | 185 / 185 | 172 / 185 | 1 / 185 | 173 / 185 | 93.5% |
+| `expressions/literals` | 101 / 131 | 101 / 131 | 19 / 131 | 120 / 131 | 91.6% |
+| `expressions/map` | 44 / 44 | 44 / 44 | 0 / 44 | 44 / 44 | 100.0% |
+| `expressions/mathematical` | 5 / 6 | 5 / 6 | 1 / 6 | 6 / 6 | 100.0% |
+| `expressions/null` | 44 / 44 | 44 / 44 | 0 / 44 | 44 / 44 | 100.0% |
+| `expressions/path` | 7 / 7 | 5 / 7 | 0 / 7 | 5 / 7 | 71.4% |
+| `expressions/pattern` | 50 / 50 | 48 / 50 | 0 / 50 | 48 / 50 | 96.0% |
+| `expressions/precedence` | 104 / 104 | 104 / 104 | 0 / 104 | 104 / 104 | 100.0% |
+| `expressions/quantifier` | 544 / 604 | 544 / 604 | 0 / 604 | 544 / 604 | 90.1% |
+| `expressions/string` | 32 / 32 | 32 / 32 | 0 / 32 | 32 / 32 | 100.0% |
+| `expressions/temporal` (out of Core) | 1004 / 1004 | 147 / 1004 | 0 / 1004 | 147 / 1004 | 14.6% |
+| `expressions/typeConversion` | 47 / 47 | 47 / 47 | 0 / 47 | 47 / 47 | 100.0% |
+| `useCases/countingSubgraphMatches` | 11 / 11 | 11 / 11 | 0 / 11 | 11 / 11 | 100.0% |
 
-### Medium-coverage (40 – 70 %)
-| Category | Passable | Pass rate |
-|----------|----------|-----------|
-| clauses/return-orderby | 24 / 35 | 68.6 % |
-| expressions/typeConversion | 28 / 47 | 59.6 % |
-| expressions/path | 4 / 7 | 57.1 % |
-| clauses/with-skip-limit | 5 / 9 | 55.6 % |
-| clauses/merge | 41 / 75 | 54.7 % |
-| clauses/return | 34 / 63 | 54.0 % |
-| clauses/union | 6 / 12 | 50.0 % |
-| clauses/unwind | 7 / 14 | 50.0 % |
-| clauses/set | 24 / 53 | 45.3 % |
-| clauses/with | 12 / 29 | 41.4 % |
-| clauses/match-where | 14 / 34 | 41.2 % |
+## Top dry-run blockers
 
-### Low-coverage (< 40 %) — biggest room for improvement
-| Category | Passable | Pass rate | Notes |
-|----------|----------|-----------|-------|
-| clauses/remove | 12 / 33 | 36.4 % | `REMOVE` is partial; additional patterns needed. |
-| expressions/list | 62 / 185 | 33.5 % | List operators; list comprehension edge cases. |
-| expressions/mathematical | 2 / 6 | 33.3 % | Small category, check what's missing. |
-| clauses/delete | 11 / 41 | 26.8 % | Advanced `DELETE` patterns. |
-| expressions/map | 9 / 44 | 20.5 % | Map constructors in various positions. |
-| expressions/literals | 25 / 131 | 19.1 % | Numeric/string literal edge cases. |
-| expressions/null | 8 / 44 | 18.2 % | `null`-in-context handling. |
-| expressions/existentialSubqueries | 10 / 10 | 100.0 % | Relationship, multi-hop, trailing-`RETURN`, single-node (WP-V1c), and `WITH`+aggregation counting existentials (WP-V1d, ANTLR grammar change) all supported. |
-| expressions/comparison | 6 / 72 | 8.3 % | Chained comparisons + type-coercion corners. |
-| expressions/conditional | 1 / 13 | 7.7 % | `CASE` expressions in edge-case contexts. |
-| clauses/with-where | 1 / 19 | 5.3 % | `WITH` + `WHERE` filter placement edge cases. |
-| useCases/countingSubgraphMatches | 0 / 11 | 0.0 % | Specialized subgraph-counting queries. |
-| expressions/precedence | 0 / 104 | 0.0 % | Operator-precedence torture tests — systematic gap. |
+| Count | Failure reason |
+| ---: | --- |
+| 372 | `Unsupported function in v0: datetime` |
+| 112 | `Unsupported function in v0: time` |
+| 110 | `Unsupported function in v0: localtime` |
+| 66 | `Unsupported function in v0: datetime.truncate` |
+| 64 | `Unsupported function in v0: duration` |
+| 46 | `Unsupported function in v0: localdatetime.truncate` |
+| 34 | `Unsupported function in v0: date.truncate` |
+| 33 | `Updating clauses are not supported in v0` |
+| 22 | `MATCH is required before WITH in v0 subset` |
+| 20 | `Cypher syntax error at 11:31: no viable alternative at input` |
+| 15 | `Unsupported function in v0: count` |
+| 13 | `Unsupported expression node: NoneType` |
+| 13 | `Unsupported function in v0: time.truncate` |
+| 12 | `Unsupported function in v0: localtime.truncate` |
+| 11 | `Unsupported function in v0: collect` |
 
-### Out of scope (excluded from Core TCK)
-| Category | Passable | Pass rate | Reason |
-|----------|----------|-----------|--------|
-| expressions/temporal | 25 / 1,004 | 2.5 % | TCK temporal types not implemented. |
-| expressions/quantifier | 544 / 604 | 90.1 % | **Implemented 2026-07-07 (WP-V1h)** — `any`/`all`/`none`/`single(x IN list WHERE …)` lower to count-subquery tests; no longer out-of-scope. Remaining ~60 are `null`-list three-valued-logic edge cases (AQL treats a null predicate as false). |
-| clauses/call | 2 / 52 | 3.8 % | `CALL` procedure syntax not implemented (handled via `arango.*` extensions, not TCK `CALL`). |
+## Harness exclusions
 
-## How to reproduce
+| Count | Reason |
+| ---: | --- |
+| 50 | procedure step |
+
+## Reproduce
 
 ```bash
-python tests/tck/analyze_coverage.py
+# Translation-only metrics and checked-in report
+./.venv/bin/python tests/tck/analyze_coverage.py
+./.venv/bin/python tests/tck/render_coverage_report.py --write
+
+# Execution + TCK assertion outcomes (requires ArangoDB)
+RUN_INTEGRATION=1 ./.venv/bin/python tests/tck/analyze_execution.py > tck-execution.json
+./.venv/bin/python tests/tck/render_coverage_report.py --execution-json tck-execution.json --write
+
+# Reference-engine comparison for fixture corpora (requires ArangoDB + Neo4j)
+RUN_INTEGRATION=1 RUN_CROSS=1 pytest -m cross
 ```
-
-No DB needed; takes ~10 seconds over 220 feature files.
-
-For an end-to-end measurement (requires live ArangoDB):
-
-```bash
-docker compose up -d
-RUN_INTEGRATION=1 RUN_TCK=1 pytest -m tck
-```
-
-End-to-end numbers will be lower than translation-only numbers because the runner still has to seed the graph from the `Given` steps and normalize results against Neo4j conventions (see `tests/tck/normalize.py`). Translation-only is the primary metric tracked here because it isolates the transpiler from the surrounding harness.
-
-## Prioritized follow-ups (if/when TCK uplift is prioritized again)
-
-1. **Accept non-MATCH leading clauses** (≈ +1,560 scenarios now blocked at the leading-clause guard). Standalone `CREATE`, `WITH`, `UNWIND` at top of query. Single largest unlock.
-2. **Multi-type relationships** `-[:A|B]->` (≈ +84 scenarios). Minor translator change — emit a multi-collection traversal or filtered `ANY`.
-3. **Typeless relationships** `-[r]-` (≈ +102 scenarios). Requires iterating all edge collections or using a union subquery — non-trivial but tractable.
-4. **Operator-precedence corpus** (104 scenarios at 0 %). Likely a targeted cluster of grammar rules; investigate whether ANTLR grammar fidelity is the issue.
-5. **Map / literal / null / comparison expression edges** (≈ 230 scenarios combined under 20 %). Long tail; each is a small translator fix.
-
-None of these are currently on the v0.4 plan. They are listed here purely as a triage-ready backlog for a future TCK-uplift sprint.

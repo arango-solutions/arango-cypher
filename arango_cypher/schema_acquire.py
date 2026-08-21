@@ -66,6 +66,23 @@ def _default_cache_ttl_seconds() -> int:
 
 CACHE_TTL_SECONDS = _default_cache_ttl_seconds()
 
+
+# LPG full-label-set floor for analyzer-backed mappings. A labeled property
+# graph keeps its entire label vocabulary in one discriminator field, so the
+# analyzer's default top-K value cap silently drops real labels and disables
+# label-rooted queries. Set ``ARANGO_CYPHER_MIN_TYPE_VALUE_COUNT`` to a positive
+# floor to keep every discriminator value at/above that document count.
+# 0 / unset = analyzer default (top-K), i.e. unchanged behaviour.
+def _default_min_type_value_count() -> int:
+    raw = os.environ.get("ARANGO_CYPHER_MIN_TYPE_VALUE_COUNT")
+    if raw is None or raw.strip() == "":
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        logger.warning("Invalid ARANGO_CYPHER_MIN_TYPE_VALUE_COUNT=%r; ignoring", raw)
+        return 0
+
 # In-memory fast path: (bundle, ts, shape_fp, full_fp) keyed by db name + cache key.
 _mapping_cache: dict[str, tuple[MappingBundle, float, str, str]] = {}
 
@@ -1729,11 +1746,18 @@ def _build_heuristic_mapping(db: StandardDatabase, schema_type: str) -> MappingB
     )
 
 
-def acquire_mapping_bundle(db: StandardDatabase, *, include_owl: bool = False) -> MappingBundle:
+def acquire_mapping_bundle(
+    db: StandardDatabase, *, include_owl: bool = False, min_type_value_count: int | None = None
+) -> MappingBundle:
     """Call arangodb-schema-analyzer to produce a MappingBundle from a live database.
 
     Uses AgenticSchemaAnalyzer with baseline inference (no LLM required).
     If arangodb-schema-analyzer is not installed, raises ImportError.
+
+    ``min_type_value_count`` > 0 requests LPG full-label-set mode from the
+    analyzer (keep every ``type`` value at/above that document count, not just
+    the top-K), so an LPG's full label vocabulary reaches the resolver. ``None``
+    falls back to ``ARANGO_CYPHER_MIN_TYPE_VALUE_COUNT`` (0 = analyzer default).
     """
     try:
         from schema_analyzer import AgenticSchemaAnalyzer, export_mapping
@@ -1745,7 +1769,13 @@ def acquire_mapping_bundle(db: StandardDatabase, *, include_owl: bool = False) -
         ) from None
 
     analyzer = AgenticSchemaAnalyzer()
-    analysis_result = analyzer.analyze_physical_schema(db)
+    floor = min_type_value_count if min_type_value_count is not None else _default_min_type_value_count()
+    if floor and floor > 0:
+        # Only pass the kwarg when opted in, so older analyzer builds without the
+        # parameter keep working when full-label-set mode is off.
+        analysis_result = analyzer.analyze_physical_schema(db, min_type_value_count=floor)
+    else:
+        analysis_result = analyzer.analyze_physical_schema(db)
 
     analysis_dict = {
         "conceptualSchema": analysis_result.conceptual_schema,

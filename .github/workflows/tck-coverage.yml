@@ -1,0 +1,60 @@
+name: TCK Coverage
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "20 5 * * 1"
+
+jobs:
+  measure:
+    name: Translation, execution, and cross-validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    services:
+      arangodb:
+        image: arangodb/arangodb:3.11
+        env:
+          ARANGO_ROOT_PASSWORD: openSesame
+        ports:
+          - 8529:8529
+        options: >-
+          --health-cmd "wget -qO- --header='Content-Type: application/json' --post-data '{\"username\":\"root\",\"password\":\"openSesame\"}' http://127.0.0.1:8529/_open/auth >/dev/null 2>&1"
+          --health-interval 3s
+          --health-timeout 2s
+          --health-retries 40
+      neo4j:
+        image: neo4j:5-community
+        env:
+          NEO4J_AUTH: neo4j/openSesame
+        ports:
+          - 7687:7687
+        options: >-
+          --health-cmd "cypher-shell -u neo4j -p openSesame 'RETURN 1' >/dev/null"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      ARANGO_URL: http://localhost:${{ job.services.arangodb.ports[8529] }}
+      ARANGO_USER: root
+      ARANGO_PASS: openSesame
+      ARANGO_DB: _system
+      NEO4J_URI: bolt://localhost:${{ job.services.neo4j.ports[7687] }}
+      NEO4J_USER: neo4j
+      NEO4J_PASS: openSesame
+      RUN_INTEGRATION: "1"
+      RUN_CROSS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev,neo4j]"
+      - run: python tests/tck/analyze_coverage.py --json > tck-translation.json
+      - run: python tests/tck/analyze_execution.py > tck-execution.json
+      - run: pytest -m cross --tb=short -q
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tck-coverage-${{ github.run_id }}
+          path: |
+            tck-translation.json
+            tck-execution.json

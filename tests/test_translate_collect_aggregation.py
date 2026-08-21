@@ -21,12 +21,13 @@ def bundle():
     return mapping_bundle_for("finreflectkg")
 
 
-def test_plain_collect_uses_push(bundle) -> None:
+def test_plain_collect_uses_into_projection(bundle) -> None:
     out = translate(
         "MATCH (o:ORG)-[:Operates_In]->(g:GPE) WITH o, collect(g.name) AS names RETURN o.name, names",
         mapping=bundle,
     )
-    assert "AGGREGATE names = PUSH(g.name)" in out.aql
+    assert "COLLECT o_1 = o INTO _collect_rows = {names: g.name}" in out.aql
+    assert "LET names = _collect_rows[*].names" in out.aql
     assert "UNIQUE(" not in out.aql  # no DISTINCT
 
 
@@ -36,7 +37,7 @@ def test_collect_distinct_wraps_unique(bundle) -> None:
         "RETURN o.name, names",
         mapping=bundle,
     )
-    assert "AGGREGATE names = UNIQUE(g.name)" in out.aql
+    assert "LET names = UNIQUE(_collect_rows[*].names)" in out.aql
 
 
 def test_collect_slice_uses_slice(bundle) -> None:
@@ -58,8 +59,8 @@ def test_collect_mixed_with_count(bundle) -> None:
         "RETURN o.name, c, names",
         mapping=bundle,
     )
-    assert "AGGREGATE" in out.aql
-    assert "COUNT_DISTINCT(" in out.aql
+    assert "INTO _collect_rows" in out.aql
+    assert "LENGTH(UNIQUE(FOR _agg_row IN _collect_rows" in out.aql
     assert "SLICE(" in out.aql
 
 
@@ -68,14 +69,31 @@ def test_collect_in_return(bundle) -> None:
         "MATCH (o:ORG)-[:Operates_In]->(g:GPE) RETURN o.name AS org, collect(DISTINCT g.name) AS names",
         mapping=bundle,
     )
-    assert "AGGREGATE names = UNIQUE(g.name)" in out.aql
+    assert "INTO _collect_rows = {names: g.name}" in out.aql
+    assert "LET names = UNIQUE(_collect_rows[*].names)" in out.aql
 
 
 def test_two_collects_supported(bundle) -> None:
-    # Multiple collect() in one projection → multiple AGGREGATE PUSH parts.
+    # Multiple collect() share one INTO projection, then derive their lists.
     out = translate(
         "MATCH (o:ORG)-[:Operates_In]->(g:GPE) "
         "WITH o, collect(g.name) AS a, collect(g.type) AS b RETURN o.name, a, b",
         mapping=bundle,
     )
-    assert "AGGREGATE a = PUSH(g.name), b = PUSH(g.type)" in out.aql
+    assert "INTO _collect_rows = {a: g.name, b: g.type}" in out.aql
+    assert "LET a = _collect_rows[*].a" in out.aql
+    assert "LET b = _collect_rows[*].b" in out.aql
+
+
+def test_collect_compiles_nested_comparison_expression(bundle) -> None:
+    out = translate(
+        "UNWIND [true, false] AS a "
+        "UNWIND [true, false] AS b "
+        "WITH collect((a OR b) = (a OR b)) AS equalities "
+        "RETURN equalities",
+        mapping=bundle,
+    )
+
+    assert "INTO _collect_rows = {equalities:" in out.aql
+    assert "==" in out.aql
+    assert "PUSH((a OR b) = (a OR b))" not in out.aql

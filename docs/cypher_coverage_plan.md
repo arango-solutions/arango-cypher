@@ -351,12 +351,13 @@ Two read+write pipeline gaps closed (TCK +6 overall: Full 2068→2074, Core
   standalone MERGE UPSERT after it (the UPSERT already renders against bound
   vars by name), so the existing MERGE translator is reused unchanged.
 
-Still deferred (refused with a specific error, never mis-compiled): `WITH …
-SET` / `WITH … DELETE` (need the mutating builders refactored to append-mode),
+Still deferred (refused with a specific error, never mis-compiled):
 `UNWIND … WITH … CREATE`/`MERGE` (leading-UNWIND multi-part routing), and a
-tail MATCH before a MERGE (would double-compile). Tests:
-`tests/test_translate_write_clause_gaps.py` (`TestUnwindWriteTail`,
-`TestWithCreateTail`, `TestWithMergeTail`).
+tail MATCH before a MERGE (would double-compile). **`WITH … SET`/`DELETE`/
+`REMOVE`** landed as a follow-up (`_append_multipart_mutate_tail`) — document
+variables from MATCH (including `WITH p AS x` aliases) mutate in-place;
+computed projections still reject. Tests: `TestWithMutateTail` in
+`tests/test_translate_write_clause_gaps.py`.
 
 #### WP-V1g — `RETURN *` / `WITH *` star projection · *done 2026-07-05*
 
