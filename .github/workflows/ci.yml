@@ -14,7 +14,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install ruff
+      # Pinned deliberately: an unpinned `pip install ruff` always fetches the
+      # newest release, so a ruff that changes formatting rules turns the gate
+      # red on unrelated PRs (0.16 began formatting Python inside Markdown
+      # fences and re-aligned trailing comments, which reformatted 12 files).
+      # Keep this in lockstep with the `dev` extra in pyproject.toml, and bump
+      # both together in one `style:` commit that reformats the tree.
+      - run: pip install ruff==0.16.4
       - run: ruff check .
       # `ruff format .` was applied repo-wide in audit-v2 batch 2
       # (commit `b0a3241`, 102 files reformatted, zero behaviour change),

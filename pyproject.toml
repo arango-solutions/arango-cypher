@@ -67,7 +67,9 @@ owl = [
 dev = [
   "pytest>=8.0.0",
   "pytest-cov>=5.0.0",
-  "ruff>=0.6.0",
+  # Pinned to match the CI lint gate exactly (.github/workflows/ci.yml);
+  # bump both together. A floor-only spec lets local and CI format differently.
+  "ruff==0.16.4",
   "antlr4-tools",
   "PyYAML>=6.0.0",
   "httpx>=0.24.0",
