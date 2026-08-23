@@ -56,12 +56,14 @@ from typing import Any, Literal, Mapping, Optional
 
 Json = Mapping[str, Any]
 
+
 @dataclass(frozen=True)
 class MappingSource:
     kind: Literal["explicit", "heuristic", "schema_analyzer_export"]
     fingerprint: Optional[str] = None
     generated_at_iso: Optional[str] = None
     notes: Optional[str] = None
+
 
 @dataclass(frozen=True)
 class MappingBundle:
@@ -102,8 +104,7 @@ def acquire_mapping_bundle(
     analyzer_options: dict[str, Any] | None = None,
     include_owl: bool = False,
     cache: "MappingCache | None" = None,
-) -> MappingBundle:
-    ...
+) -> MappingBundle: ...
 ```
 
 Notes:
@@ -126,6 +127,7 @@ Notes:
 from dataclasses import dataclass, field
 from typing import Any
 
+
 @dataclass
 class AqlFragment:
     text: str
@@ -133,6 +135,7 @@ class AqlFragment:
 
     def __add__(self, other: "AqlFragment") -> "AqlFragment":
         """Concatenate text with newline; merge bind vars with collision checks."""
+
 
 @dataclass(frozen=True)
 class AqlQuery:
@@ -165,7 +168,9 @@ Core should expose helper builders that use the analyzer’s mapping styles:
 
 ```python
 def aql_match_entity(*, resolver: MappingResolver, var: str, entity: str) -> AqlFragment: ...
-def aql_expand_relationship(*, resolver: MappingResolver, from_var: str, rel_type: str, to_var: str, direction: str) -> AqlFragment: ...
+def aql_expand_relationship(
+    *, resolver: MappingResolver, from_var: str, rel_type: str, to_var: str, direction: str
+) -> AqlFragment: ...
 ```
 
 These provide the building blocks for both:
@@ -187,17 +192,20 @@ These provide the building blocks for both:
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
+
 @dataclass(frozen=True)
 class CompileContext:
     mapping: MappingResolver
     aql: AqlBuilder
     options: dict[str, Any]
 
+
 @dataclass(frozen=True)
 class CompiledExpr:
     expr: str
     bind_vars: dict[str, Any]
     warnings: list[dict[str, Any]] = ()
+
 
 @dataclass(frozen=True)
 class CompiledProcedure:
@@ -206,8 +214,10 @@ class CompiledProcedure:
     yields: list[str]
     warnings: list[dict[str, Any]] = ()
 
+
 FunctionCompiler = Callable[[Any, CompileContext], CompiledExpr]
 ProcedureCompiler = Callable[[Any, CompileContext], CompiledProcedure]
+
 
 class ExtensionRegistry:
     def register_function(self, name: str, compiler: FunctionCompiler) -> None: ...

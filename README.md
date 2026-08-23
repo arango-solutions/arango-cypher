@@ -125,17 +125,13 @@ from arango_query_core import MappingBundle
 mapping = MappingBundle(
     conceptual_schema={"entityTypes": ["Person"], "relationshipTypes": ["KNOWS"]},
     physical_mapping={
-        "entities": {
-            "Person": {"style": "COLLECTION", "collectionName": "persons"}
-        },
-        "relationships": {
-            "KNOWS": {"style": "DEDICATED_COLLECTION", "edgeCollectionName": "knows"}
-        },
+        "entities": {"Person": {"style": "COLLECTION", "collectionName": "persons"}},
+        "relationships": {"KNOWS": {"style": "DEDICATED_COLLECTION", "edgeCollectionName": "knows"}},
     },
 )
 
 result = translate("MATCH (n:Person) RETURN n.name", mapping=mapping)
-print(result.aql)        # generated AQL
+print(result.aql)  # generated AQL
 print(result.bind_vars)  # bind parameters
 ```
 
@@ -146,20 +142,22 @@ from arango import ArangoClient
 from arango_cypher.nl2cypher import nl_to_cypher, get_llm_provider
 
 db = ArangoClient(hosts="http://localhost:28529").db(
-    "movies_pg", username="root", password="openSesame",
+    "movies_pg",
+    username="root",
+    password="openSesame",
 )
 
 result = nl_to_cypher(
-    "who acted in 'Forest Gump'?",      # typo is intentional
+    "who acted in 'Forest Gump'?",  # typo is intentional
     mapping=mapping,
-    llm_provider=get_llm_provider(),    # auto-picks OpenAI / Anthropic / OpenRouter from env
-    use_fewshot=True,                   # WP-25.1 — BM25 dynamic few-shot
-    use_entity_resolution=True,         # WP-25.2 — pre-flight fuzzy resolution
-    db=db,                              # enables WP-25.2 (needs live DB) and WP-25.3 EXPLAIN-grounded retry
+    llm_provider=get_llm_provider(),  # auto-picks OpenAI / Anthropic / OpenRouter from env
+    use_fewshot=True,  # WP-25.1 — BM25 dynamic few-shot
+    use_entity_resolution=True,  # WP-25.2 — pre-flight fuzzy resolution
+    db=db,  # enables WP-25.2 (needs live DB) and WP-25.3 EXPLAIN-grounded retry
 )
 
-print(result.cypher)         # MATCH (p:Person)-[:ACTED_IN]->(m:Movie {title: "Forrest Gump"}) ...
-print(result.aql)            # FOR p IN persons ...
+print(result.cypher)  # MATCH (p:Person)-[:ACTED_IN]->(m:Movie {title: "Forrest Gump"}) ...
+print(result.aql)  # FOR p IN persons ...
 print(result.cached_tokens)  # provider-agnostic cache-hit count
 ```
 
@@ -241,7 +239,9 @@ ctx = TenantContext(property="TENANT_HEX_ID", value="abc123", display="Dagster L
 
 result = nl_to_cypher(
     "list all GSuiteUsers in the Marketing department",
-    mapping=mapping, llm_provider=get_llm_provider(), db=db,
+    mapping=mapping,
+    llm_provider=get_llm_provider(),
+    db=db,
     tenant_context=ctx,
 )
 ```
@@ -303,14 +303,16 @@ register_all_extensions(registry)  # search + vector + geo + document + procedur
 
 result = translate(
     "MATCH (n:Person) RETURN arango.bm25(n) AS score",
-    mapping=mapping, registry=registry,
+    mapping=mapping,
+    registry=registry,
 )
 print(result.aql)  # ... BM25(n) ...
 
 # CALL arango.* procedures
 result = translate(
     "CALL arango.fulltext('persons', 'name', 'Alice') YIELD doc RETURN doc",
-    mapping=mapping, registry=registry,
+    mapping=mapping,
+    registry=registry,
 )
 print(result.aql)  # FOR doc IN FULLTEXT(...) RETURN doc
 ```

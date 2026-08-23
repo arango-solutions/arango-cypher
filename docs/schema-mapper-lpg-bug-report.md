@@ -271,17 +271,20 @@ Sample documents:
 from arango import ArangoClient
 from schema_analyzer import AgenticSchemaAnalyzer, export_mapping
 
-client = ArangoClient(hosts='http://localhost:28529')
+client = ArangoClient(hosts="http://localhost:28529")
 analyzer = AgenticSchemaAnalyzer()
 
-for db_name in ['neo4j_movies_pg_test', 'neo4j_movies_lpg_test']:
-    db = client.db(db_name, username='root', password='openSesame')
+for db_name in ["neo4j_movies_pg_test", "neo4j_movies_lpg_test"]:
+    db = client.db(db_name, username="root", password="openSesame")
     result = analyzer.analyze_physical_schema(db)
-    export = export_mapping({
-        "conceptualSchema": result.conceptual_schema,
-        "physicalMapping": result.physical_mapping,
-        "metadata": result.metadata.model_dump(by_alias=True),
-    }, target="cypher")
+    export = export_mapping(
+        {
+            "conceptualSchema": result.conceptual_schema,
+            "physicalMapping": result.physical_mapping,
+            "metadata": result.metadata.model_dump(by_alias=True),
+        },
+        target="cypher",
+    )
     print(f"\n--- {db_name} ---")
     print(f"Entities: {[e['name'] for e in export['conceptualSchema']['entities']]}")
     print(f"Relationships: {[r['type'] for r in export['conceptualSchema']['relationships']]}")
@@ -393,23 +396,26 @@ Specifically:
 from arango import ArangoClient
 from schema_analyzer import AgenticSchemaAnalyzer, export_mapping
 
-client = ArangoClient(hosts='http://localhost:28529')
-db = client.db('cypher_hybrid_fixture', username='root', password='openSesame')
+client = ArangoClient(hosts="http://localhost:28529")
+db = client.db("cypher_hybrid_fixture", username="root", password="openSesame")
 
 analyzer = AgenticSchemaAnalyzer()
 result = analyzer.analyze_physical_schema(db)
-export = export_mapping({
-    "conceptualSchema": result.conceptual_schema,
-    "physicalMapping": result.physical_mapping,
-    "metadata": result.metadata.model_dump(by_alias=True),
-}, target="cypher")
+export = export_mapping(
+    {
+        "conceptualSchema": result.conceptual_schema,
+        "physicalMapping": result.physical_mapping,
+        "metadata": result.metadata.model_dump(by_alias=True),
+    },
+    target="cypher",
+)
 
-rels = export['conceptualSchema']['relationships']
+rels = export["conceptualSchema"]["relationships"]
 print(f"Relationship types: {[r['type'] for r in rels]}")
 # Actual:   ['EDGES']
 # Expected: ['FOLLOWS']
 
-pm_rels = export['physicalMapping']['relationships']
+pm_rels = export["physicalMapping"]["relationships"]
 for k, v in pm_rels.items():
     print(f"  {k}: style={v.get('style')}")
 # Actual:   EDGES: style=DEDICATED_COLLECTION

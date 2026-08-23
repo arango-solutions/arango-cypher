@@ -21,8 +21,8 @@ None of these omissions are visible to the caller — they just silently disappe
 LLM path, simplified:
 
 ```python
-snapshot = snapshot_physical_schema(db)           # complete: every collection
-data    = run_generate_validate_repair(...)       # may drop collections
+snapshot = snapshot_physical_schema(db)  # complete: every collection
+data = run_generate_validate_repair(...)  # may drop collections
 return AnalysisResult(
     conceptual_schema=data["conceptualSchema"],
     physical_mapping=data["physicalMapping"],
@@ -85,8 +85,9 @@ def infer_mapping_for_collection(
     snapshot_entry: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Baseline inference for a single collection.
-    Returns (physical_mapping_entry, conceptual_schema_entry). """
+    Returns (physical_mapping_entry, conceptual_schema_entry)."""
     ...
+
 
 # In analyzer.py, after run_generate_validate_repair returns `data`:
 covered = _referenced_collections(data["physicalMapping"])

@@ -35,6 +35,7 @@ def fingerprint_physical_shape(db: StandardDatabase) -> str:
     has its (type, fields, unique, sparse, vci, deduplicate) changed.
     """
 
+
 def fingerprint_physical_counts(db: StandardDatabase) -> str:
     """Shape fingerprint + per-collection row counts.
 
@@ -87,19 +88,22 @@ Both functions read *only* python-arango primitives — `db.collections()`, `col
 ```python
 # snapshot.py
 
+
 def _stable_index_digest(idx: dict[str, Any]) -> str:
     if idx.get("type") == "primary":
         return ""
     fields = idx.get("fields")
     fields_part = ",".join(str(f) for f in fields) if isinstance(fields, list) else ""
-    return "|".join([
-        str(idx.get("type") or ""),
-        fields_part,
-        "u" if idx.get("unique") else "",
-        "s" if idx.get("sparse") else "",
-        "v" if idx.get("vci") else "",
-        "d" if idx.get("deduplicate") is False else "",
-    ])
+    return "|".join(
+        [
+            str(idx.get("type") or ""),
+            fields_part,
+            "u" if idx.get("unique") else "",
+            "s" if idx.get("sparse") else "",
+            "v" if idx.get("vci") else "",
+            "d" if idx.get("deduplicate") is False else "",
+        ]
+    )
 
 
 def _iter_user_collections(

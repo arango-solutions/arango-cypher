@@ -91,9 +91,10 @@ right fields — `reason`, `suggested_hint`, `code` — so lift a base out of it
 @dataclass(frozen=True)
 class PostconditionViolation:
     """Why an otherwise-valid Cypher statement was rejected."""
-    reason: str           # what is wrong — goes into the retry prompt
-    suggested_hint: str   # how to fix it — also goes into the retry prompt
-    code: str             # stable identifier for logging and tests
+
+    reason: str  # what is wrong — goes into the retry prompt
+    suggested_hint: str  # how to fix it — also goes into the retry prompt
+    code: str  # stable identifier for logging and tests
 ```
 
 `TenantScopeViolation` becomes a subclass, keeping `tenant_property`,
@@ -304,11 +305,15 @@ class AnalogConditional:
         if "correlatesWith" in cypher and "Event" not in _aggregation_scope(cypher):
             return PostconditionViolation(
                 code=self.code,
-                reason=("The query aggregates over theme-level `correlatesWith` "
-                        "statistics rather than the retrieved analog events, so the "
-                        "answer would be identical for any question."),
-                suggested_hint=("Aggregate over the Event nodes matched as analogs and "
-                                "compute the outcome from PriceSeries at those dates."),
+                reason=(
+                    "The query aggregates over theme-level `correlatesWith` "
+                    "statistics rather than the retrieved analog events, so the "
+                    "answer would be identical for any question."
+                ),
+                suggested_hint=(
+                    "Aggregate over the Event nodes matched as analogs and "
+                    "compute the outcome from PriceSeries at those dates."
+                ),
             )
         return None
 ```

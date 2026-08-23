@@ -181,7 +181,7 @@ This WP has four parts. They can be implemented in any order, but the recommende
        raise TenantScopeViolation(
            code="TENANT_BIND_MISMATCH",
            message=f"bind_vars['tenantId']={bind_vars.get('tenantId')!r} "
-                   f"does not match session={session.tenant_id!r}",
+           f"does not match session={session.tenant_id!r}",
        )
    ```
 
@@ -206,8 +206,12 @@ This WP has four parts. They can be implemented in any order, but the recommende
    ```python
    logger.warning(
        "TENANT_SCOPE_VIOLATION code=%s session=%s tenant=%s aql_digest=%s plan_digest=%s message=%s",
-       violation.code, session.token[:8], session.tenant_id,
-       violation.aql_digest[:16], violation.plan_digest[:16], violation.message,
+       violation.code,
+       session.token[:8],
+       session.tenant_id,
+       violation.aql_digest[:16],
+       violation.plan_digest[:16],
+       violation.message,
    )
    ```
    Every pass: `logger.info("TENANT_SCOPE_OK ...same fields...")`. Both lines are required for audit replay; do not skip the OK line for performance reasons.
@@ -232,8 +236,12 @@ def safe_execute(
         "tenantKey": session.tenant_key,
     }
     validate_plan(
-        db=db, aql=aql, bind_vars=bind_vars,
-        manifest=manifest, sharding_profile=sharding_profile, session=session,
+        db=db,
+        aql=aql,
+        bind_vars=bind_vars,
+        manifest=manifest,
+        sharding_profile=sharding_profile,
+        session=session,
     )
     return db.aql.execute(aql, bind_vars=bind_vars)
 ```
@@ -361,13 +369,16 @@ from .tenant_scope import TenantScopeManifest, EntityTenantRole
 TENANT_ID_BIND = "tenantId"
 TENANT_KEY_BIND = "tenantKey"
 
+
 @dataclass(frozen=True)
 class TenantPredicateShape:
     """How a tenant predicate is rendered, regardless of layer."""
+
     style: str  # "property_map" | "where_eq" | "traversal_path" | "prune"
-    field: str | None       # smartGraphAttribute or denormField; None for traversal_path
-    bind_name: str          # "tenantId" or "tenantKey" — never a literal
+    field: str | None  # smartGraphAttribute or denormField; None for traversal_path
+    bind_name: str  # "tenantId" or "tenantKey" — never a literal
     scoping_path: list[str] | None  # for style == "traversal_path"
+
 
 def predicate_for_entity(
     label: str,
@@ -384,6 +395,7 @@ def predicate_for_entity(
       role missing            → raise UnknownEntityScope (caller decides: refuse vs. fall-through)
     """
 
+
 def predicate_for_collection(
     collection: str,
     manifest: TenantScopeManifest,
@@ -393,10 +405,12 @@ def predicate_for_collection(
     Layer 4 (AQL) consumes this; Layer 3 (Cypher) consumes predicate_for_entity.
     """
 
+
 def is_bindvar_reference(node: object, *, name: str) -> bool:
     """Plan-walk helper: True iff `node` is a `Reference` to bind variable `name`.
     Used by Layer 5 today and by Layer 4's preflight check for already-injected predicates.
     """
+
 
 def is_literal_tenant_value(node: object, manifest: TenantScopeManifest) -> bool:
     """True iff `node` is a literal whose value matches a known tenant key
@@ -406,6 +420,7 @@ def is_literal_tenant_value(node: object, manifest: TenantScopeManifest) -> bool
     Manifest must carry a `_known_tenant_keys: frozenset[str]` populated at acquire
     time. If unset, default to refusing all literal tenant comparisons (fail-closed).
     """
+
 
 class UnknownEntityScope(Exception):
     """Raised when a label/collection has no manifest entry. Caller decides
@@ -523,7 +538,7 @@ None. MT-3 and MT-4 do not consume MT-2's behaviour.
 def inject_tenant_scope(
     *,
     cypher: str,
-    parse_tree: Any,                  # ANTLR4 ParseTree from arango_cypher.parser.parse_cypher
+    parse_tree: Any,  # ANTLR4 ParseTree from arango_cypher.parser.parse_cypher
     manifest: TenantScopeManifest,
     tenant_id: str,
     tenant_key: str,
@@ -756,13 +771,15 @@ None. Wave 9 (MT-6 plan-shape LRU) keys off `(rewritten_aql_hash, manifest_hash)
 from collections import OrderedDict
 from hashlib import sha256
 
+
 @dataclass(frozen=True)
 class PlanCertification:
     aql_hash: str
     mapping_fingerprint: str
-    verdict: str          # "ok" or "violation"
+    verdict: str  # "ok" or "violation"
     violation_code: str | None
     plan_digest: str
+
 
 class PlanLRU:
     def __init__(self, capacity: int = 1024):

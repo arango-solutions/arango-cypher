@@ -123,7 +123,7 @@ class TestPostconditions:
         pc = _RequireReturn("LIMIT")
         provider = _Provider(
             [
-                _cypher("MATCH (p:Person) RETURN p"),          # rejected
+                _cypher("MATCH (p:Person) RETURN p"),  # rejected
                 _cypher("MATCH (p:Person) RETURN p LIMIT 10"),  # accepted
             ]
         )
@@ -160,9 +160,9 @@ class TestPostconditions:
         pc = _RequireReturn("LIMIT")
         provider = _Provider(
             [
-                "this is not cypher at all",                     # attempt 0: parse fail
-                _cypher("MATCH (p:Person) RETURN p"),            # attempt 1: pc fail
-                _cypher("MATCH (p:Person) RETURN p LIMIT 10"),   # attempt 2: ok
+                "this is not cypher at all",  # attempt 0: parse fail
+                _cypher("MATCH (p:Person) RETURN p"),  # attempt 1: pc fail
+                _cypher("MATCH (p:Person) RETURN p LIMIT 10"),  # attempt 2: ok
             ]
         )
         res = nl_to_cypher(
