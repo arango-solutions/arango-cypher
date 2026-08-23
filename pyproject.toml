@@ -10,10 +10,12 @@ dependencies = [
   # language-agnostic NL engine (providers/fewshot/seams) — carved out of
   # this repo into its own distribution (step 2 of the nl-engine
   # extraction; see arango-sparql-py/docs/architecture/proposals/).
-  # Published on PyPI (0.1.0, 2026-07-18). For co-development against the
-  # sibling checkout, `pip install -e ../arango-query-core` first — pip
-  # skips index resolution when the requirement is already satisfied.
-  "arango-query-core>=0.1.0,<0.2.0",
+  # Published on PyPI (0.2.0, 2026-08-22; adds nl.postconditions, the
+  # shared mechanism `nl2cypher.postconditions` re-exports). For
+  # co-development against the sibling checkout, `pip install -e
+  # ../arango-query-core` first — pip skips index resolution when the
+  # requirement is already satisfied.
+  "arango-query-core>=0.2.0,<0.3.0",
   "python-arango>=8.1.1",
   "antlr4-python3-runtime",
   "fastapi>=0.100.0",

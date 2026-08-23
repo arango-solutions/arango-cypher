@@ -83,6 +83,7 @@ def _default_min_type_value_count() -> int:
         logger.warning("Invalid ARANGO_CYPHER_MIN_TYPE_VALUE_COUNT=%r; ignoring", raw)
         return 0
 
+
 # In-memory fast path: (bundle, ts, shape_fp, full_fp) keyed by db name + cache key.
 _mapping_cache: dict[str, tuple[MappingBundle, float, str, str]] = {}
 

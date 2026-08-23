@@ -105,7 +105,7 @@ requires-dist = [
     { name = "antlr4-tools", marker = "extra == 'dev'" },
     { name = "arango-cypher-py", extras = ["analyzer"], marker = "extra == 'dev'" },
     { name = "arango-cypher-py", extras = ["analyzer"], marker = "extra == 'service'" },
-    { name = "arango-query-core", specifier = ">=0.1.0,<0.2.0" },
+    { name = "arango-query-core", specifier = ">=0.2.0,<0.3.0" },
     { name = "arangodb-schema-analyzer", marker = "extra == 'analyzer'", specifier = ">=0.9.0,<0.10.0" },
     { name = "fastapi", specifier = ">=0.100.0" },
     { name = "fastapi", marker = "extra == 'dev'", specifier = ">=0.100.0" },
@@ -130,11 +130,11 @@ provides-extras = ["analyzer", "service", "cli", "owl", "dev", "neo4j"]
 
 [[package]]
 name = "arango-query-core"
-version = "0.1.0"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/30/d9/81a4c5a846899e7255e7099cda7c998d8ffb7c624af9e8dc4f660b851625/arango_query_core-0.1.0.tar.gz", hash = "sha256:0d37ea6a4707e6f330c7c7ac3f2900c6726c96309ea5b39d71895f94cb42d18b", size = 43665, upload-time = "2026-07-18T01:39:42.945Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d1/1a/2f4e183e963fef036180bad454348c401c1863361d10c25bd419823bd1f8/arango_query_core-0.2.0.tar.gz", hash = "sha256:9f81366eded22167a2a04bce3d918f25f1b7fa59b8bfddd32d86cb4a3665b970", size = 79434, upload-time = "2026-08-23T02:45:37.98Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/09/33/27f9d790f90be8bda4990fe792fd1b9bc319525852cd0fcbad2e83769e51/arango_query_core-0.1.0-py3-none-any.whl", hash = "sha256:d7996c3c03a8c547b87d5004e2f1254231bd70b4813b9d0636d519677f031884", size = 35647, upload-time = "2026-07-18T01:39:41.76Z" },
+    { url = "https://files.pythonhosted.org/packages/cb/d2/82266793d0ee2876c5b751622d0fe599b35da5e2b97e7f3f8b38fa938b73/arango_query_core-0.2.0-py3-none-any.whl", hash = "sha256:428c754f0b563a42828b55fa42c7a63b6b307e5099dcc6d0971d0d901f215d14", size = 59804, upload-time = "2026-08-23T02:45:36.89Z" },
 ]
 
 [[package]]

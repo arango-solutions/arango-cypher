@@ -1250,9 +1250,11 @@ examples from a curated seed corpus and inject them into the prompt.
      class Retriever(Protocol):
          def retrieve(self, question: str, k: int = 3) -> list[tuple[str, str]]: ...
 
+
      class BM25Retriever(Retriever):
          def __init__(self, examples: list[tuple[str, str]]): ...
          def retrieve(self, question: str, k: int = 3) -> list[tuple[str, str]]: ...
+
 
      class FewShotIndex:
          def __init__(self, retriever: Retriever): ...
@@ -1746,10 +1748,22 @@ Tight rewrite of `_detect_type_field` and the fallback behaviour in `_build_heur
 2. Add a helper:
    ```python
    _FILE_EXTENSION_SUFFIXES = (
-       ".rst", ".md", ".pdf", ".asciidoc", ".txt", ".rtf",
-       ".docx", ".html", ".json", ".xml", ".yaml", ".yml",
-       ".ttl", ".owl",
+       ".rst",
+       ".md",
+       ".pdf",
+       ".asciidoc",
+       ".txt",
+       ".rtf",
+       ".docx",
+       ".html",
+       ".json",
+       ".xml",
+       ".yaml",
+       ".yml",
+       ".ttl",
+       ".owl",
    )
+
 
    def _looks_class_like(value: str) -> bool:
        if not value or not value.strip():
@@ -1869,15 +1883,18 @@ Full problem analysis: [`docs/schema_inference_bugfix_prd.md`](./schema_inferenc
 1. **Structured warnings on the bundle.**
    Add to `arango_cypher/schema_acquire.py`:
    ```python
-   def _attach_warning(bundle: MappingBundle, *, code: str, message: str,
-                       install_hint: str | None = None) -> MappingBundle:
+   def _attach_warning(
+       bundle: MappingBundle, *, code: str, message: str, install_hint: str | None = None
+   ) -> MappingBundle:
        meta = dict(bundle.metadata or {})
        warnings = list(meta.get("warnings") or [])
-       warnings.append({
-           "code": code,
-           "message": message,
-           **({"install_hint": install_hint} if install_hint else {}),
-       })
+       warnings.append(
+           {
+               "code": code,
+               "message": message,
+               **({"install_hint": install_hint} if install_hint else {}),
+           }
+       )
        meta["warnings"] = warnings
        return MappingBundle(
            conceptual_schema=bundle.conceptual_schema,
@@ -1908,6 +1925,7 @@ Full problem analysis: [`docs/schema_inference_bugfix_prd.md`](./schema_inferenc
                "ARANGO_CYPHER_ALLOW_HEURISTIC=1 to accept degraded mappings."
            ) from exc
 
+
    _require_analyzer_unless_opted_out()
    ```
    Call it at import time, not in an `on_event("startup")` hook — this ensures the fail is visible at process startup, not deferred until the first request.
@@ -1921,6 +1939,7 @@ Full problem analysis: [`docs/schema_inference_bugfix_prd.md`](./schema_inferenc
            return False
        try:
            import schema_analyzer  # noqa: F401
+
            return True
        except ImportError:
            return False
@@ -1932,6 +1951,7 @@ Full problem analysis: [`docs/schema_inference_bugfix_prd.md`](./schema_inferenc
    @app.post("/schema/force-reacquire")
    def schema_force_reacquire(session: _Session = Depends(_get_session)):
        from .schema_acquire import get_mapping as _get_mapping
+
        bundle = _get_mapping(session.db, force_refresh=True, strategy="analyzer")
        return {
            "source": {"kind": bundle.source.kind, "notes": bundle.source.notes},
@@ -2036,6 +2056,7 @@ Full problem analysis: [`docs/schema_inference_bugfix_prd.md`](./schema_inferenc
    ```python
    _SYMBOLIC_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+
    def _escape_label(name: str) -> str:
        return name if _SYMBOLIC_NAME_RE.match(name or "") else f"`{name}`"
    ```
@@ -2084,7 +2105,8 @@ Add a WARN log immediately before the return:
 ```python
 logger.warning(
     "NL2Cypher validation_failed after %d attempts; last error: %s",
-    1 + max_retries, builder.retry_context,
+    1 + max_retries,
+    builder.retry_context,
 )
 ```
 

@@ -191,10 +191,22 @@ _TIER1_TYPE_FIELDS = ["type", "_type", "entityType"]
 _TIER2_TYPE_FIELDS = ["label", "labels", "kind"]
 
 _FILE_EXTENSION_SUFFIXES = (
-    ".rst", ".md", ".pdf", ".asciidoc", ".txt", ".rtf",
-    ".docx", ".html", ".json", ".xml", ".yaml", ".yml",
-    ".ttl", ".owl",
+    ".rst",
+    ".md",
+    ".pdf",
+    ".asciidoc",
+    ".txt",
+    ".rtf",
+    ".docx",
+    ".html",
+    ".json",
+    ".xml",
+    ".yaml",
+    ".yml",
+    ".ttl",
+    ".owl",
 )
+
 
 def _looks_class_like(value: str) -> bool:
     """True when a candidate discriminator value plausibly names a class."""
@@ -206,6 +218,7 @@ def _looks_class_like(value: str) -> bool:
     if any(lv.endswith(suf) for suf in _FILE_EXTENSION_SUFFIXES):
         return False
     return True
+
 
 def _detect_type_field(db, collection_name, *, candidates=None) -> str | None:
     # ... existing 80%-coverage sampling ...
@@ -239,6 +252,7 @@ except ImportError:
 ```python
 # arango_cypher/service.py (app startup)
 
+
 @app.on_event("startup")
 def _require_analyzer_unless_opted_out():
     if os.environ.get("ARANGO_CYPHER_ALLOW_HEURISTIC") == "1":
@@ -260,9 +274,11 @@ def _require_analyzer_unless_opted_out():
 
 _SYMBOLIC_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+
 def _escape_label(name: str) -> str:
     """Return `name` wrapped in backticks if it's not a bare symbolic name."""
     return name if _SYMBOLIC_NAME_RE.match(name) else f"`{name}`"
+
 
 # ... in _format_entity and relationship rendering in _build_schema_summary:
 #   Node :{name}        → Node :{_escape_label(name)}
@@ -288,10 +304,12 @@ Replace the fall-through at `_core.py:604–617` with a new closed-failure branc
 ```python
 # arango_cypher/translate_v0.py (_pick_primary_entity_label and siblings)
 
+
 def _strip_label_backticks(name: str) -> str:
     if len(name) >= 2 and name.startswith("`") and name.endswith("`"):
         return name[1:-1]
     return name
+
 
 # at each resolver call site:
 primary = resolver.resolve_entity(_strip_label_backticks(lab))

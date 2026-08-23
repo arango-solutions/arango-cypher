@@ -42,18 +42,20 @@ Minimal repro:
 ```python
 from schema_analyzer.tool import run_tool
 
-resp = run_tool({
-  "contractVersion": "1",
-  "operation": "analyze",
-  "connection": {
-    "url": "http://localhost:28529",
-    "database": "cypher_pg_fixture",
-    "username": "root",
-    "password": "openSesame"
-  },
-  "analysisOptions": {"timeoutMs": 60000, "sampleLimitPerCollection": 2, "useCache": False},
-  "outputOptions": {"pretty": False, "includeSnapshot": False}
-})
+resp = run_tool(
+    {
+        "contractVersion": "1",
+        "operation": "analyze",
+        "connection": {
+            "url": "http://localhost:28529",
+            "database": "cypher_pg_fixture",
+            "username": "root",
+            "password": "openSesame",
+        },
+        "analysisOptions": {"timeoutMs": 60000, "sampleLimitPerCollection": 2, "useCache": False},
+        "outputOptions": {"pretty": False, "includeSnapshot": False},
+    }
+)
 print(resp)
 ```
 

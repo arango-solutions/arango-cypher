@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -13,6 +14,12 @@ from arango_query_core.nl.providers import (
     _get_default_provider,
 )
 
+from .postconditions import (
+    Postcondition,
+    PostconditionContext,
+    postcondition_prompt_sections,
+    run_postconditions,
+)
 from .tenant_guardrail import (
     TenantContext,
     check_tenant_scope,
@@ -551,6 +558,7 @@ class PromptBuilder:
     tenant_manifest: TenantScopeManifest | None = None
     retry_context: str = ""
     graph_intent: bool = False
+    postconditions: tuple[Postcondition, ...] = ()
 
     def render_system(self) -> str:
         base = _SYSTEM_PROMPT.replace("{schema}", self.schema_summary)
@@ -566,6 +574,11 @@ class PromptBuilder:
             # a tenant-scoped example in the corpus, may otherwise
             # dominate the output shape).
             extensions.append(tenant_block)
+        # Caller invariants sit with the tenant block: both are rules the model
+        # must satisfy, as opposed to examples or resolved entities. Rendered
+        # once per call — PromptBuilder is constructed outside the retry loop,
+        # so the prefix stays byte-stable across attempts.
+        extensions.extend(postcondition_prompt_sections(self.postconditions))
         if self.graph_intent:
             # Appended (not baked into the cacheable prefix) so it only costs
             # tokens when the question actually asks for a graph.
@@ -778,6 +791,7 @@ def _call_llm_with_retry(
     tenant_manifest: TenantScopeManifest | None = None,
     retry_context: str | None = None,
     graph_intent: bool = False,
+    postconditions: Sequence[Postcondition] | None = None,
 ) -> NL2CypherResult | None:
     """Call the LLM provider with parse + execution-grounded validation and retry.
 
@@ -806,6 +820,7 @@ def _call_llm_with_retry(
         tenant_manifest=tenant_manifest,
         retry_context=retry_context or "",
         graph_intent=graph_intent,
+        postconditions=tuple(postconditions or ()),
     )
     # Resolve once per call: passed through to every check_tenant_scope
     # invocation so the resulting violation carries the upstream
@@ -865,6 +880,22 @@ def _call_llm_with_retry(
                         manifest=tenant_manifest,
                         physical_enforcement=physical_enforcement,
                     )
+                    if violation is None and postconditions:
+                        # Caller invariants run after the tenant guardrail: a
+                        # statement violating both reports the tenant failure,
+                        # because a cross-tenant leak is a security problem and
+                        # a domain-correctness one is not. Shares the same
+                        # ``max_retries`` budget as parse and EXPLAIN failures.
+                        violation = run_postconditions(
+                            cypher,
+                            postconditions,
+                            PostconditionContext(
+                                schema_summary=schema_summary,
+                                question=question,
+                                attempt=attempt,
+                                mapping=mapping,
+                            ),
+                        )
                     if violation is None:
                         return NL2CypherResult(
                             cypher=cypher,
@@ -881,7 +912,8 @@ def _call_llm_with_retry(
                     best_cypher = cypher
                     builder.retry_context = f"{violation.reason} {violation.suggested_hint}"
                     logger.warning(
-                        "Tenant-scoping violation (attempt %d/%d): %s",
+                        "Postcondition violation [%s] (attempt %d/%d): %s",
+                        getattr(violation, "code", "tenant_scope"),
                         attempt + 1,
                         1 + max_retries,
                         violation.reason,
@@ -1572,6 +1604,7 @@ def nl_to_cypher(
     db: Any | None = None,
     tenant_context: TenantContext | None = None,
     retry_context: str | None = None,
+    postconditions: Sequence[Postcondition] | None = None,
 ) -> NL2CypherResult:
     """Translate a natural language question to Cypher.
 
@@ -1703,6 +1736,7 @@ def nl_to_cypher(
                 tenant_manifest=tenant_manifest,
                 retry_context=retry_context,
                 graph_intent=graph_intent,
+                postconditions=postconditions,
             )
             # Fail-closed methods (`tenant_guardrail_blocked` for tenant
             # scope violations, `validation_failed` for retry-budget
