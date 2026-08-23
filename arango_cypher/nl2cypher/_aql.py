@@ -8,17 +8,17 @@ model can emit efficient AQL without going through Cypher.
 
 from __future__ import annotations
 
-from .postconditions import Postcondition
-
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any
 
 from arango_query_core.mapping import MappingBundle
 from arango_query_core.nl.providers import LLMProvider, _get_default_provider
 
 from ._core import _escape_label, _property_quality_hint
+from .postconditions import Postcondition
 from .tenant_guardrail import TenantContext
 from .tenant_guardrail import prompt_section as _tenant_prompt_section
 from .tenant_scope import (

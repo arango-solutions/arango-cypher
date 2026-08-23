@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any
 
 from arango_query_core.mapping import MappingBundle
 from arango_query_core.nl.providers import (
@@ -13,16 +14,16 @@ from arango_query_core.nl.providers import (
     _get_default_provider,
 )
 
-from .tenant_guardrail import (
-    TenantContext,
-    check_tenant_scope,
-    multitenancy_physical_enforcement,
-)
 from .postconditions import (
     Postcondition,
     PostconditionContext,
     postcondition_prompt_sections,
     run_postconditions,
+)
+from .tenant_guardrail import (
+    TenantContext,
+    check_tenant_scope,
+    multitenancy_physical_enforcement,
 )
 from .tenant_guardrail import (
     prompt_section as _tenant_prompt_section,
