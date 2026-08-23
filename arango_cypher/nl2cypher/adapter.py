@@ -25,14 +25,14 @@ from arango_query_core.nl.fewshot import FewShotIndex
 from arango_query_core.nl.seams import GuardrailVerdict, ValidationResult
 
 if TYPE_CHECKING:
-    # Seams 6–7 (grounding / predicate) were added to
-    # QueryLanguageAdapter after arango-query-core 0.1.0. These types
-    # only exist in that later engine; import them under TYPE_CHECKING
-    # so this module still loads against the published 0.1.0 (which has
-    # neither the types nor the 9-seam protocol) — the annotations stay
-    # lazy strings via ``from __future__ import annotations`` and the
-    # seam bodies never touch the types at runtime.
+    # Seams 6–8 (grounding / predicate / path) were added to
+    # QueryLanguageAdapter over the 0.2.0 line. Imported under
+    # TYPE_CHECKING purely to keep them out of the runtime import graph —
+    # the annotations stay lazy strings via
+    # ``from __future__ import annotations`` and the seam bodies never
+    # touch the types at runtime. The pin (>=0.2.0) guarantees they exist.
     from arango_query_core.nl.grounding import LabelIndex, PredicateIndex
+    from arango_query_core.nl.pathindex import ClassPathIndex
 
 from ._core import (
     _SYSTEM_PROMPT,
@@ -162,4 +162,19 @@ class CypherAdapter:
 
     def predicate_prompt_section(self, question: str, index: PredicateIndex, k: int = 20) -> str:
         """Seam 7 renderer — unreachable for Cypher (see :meth:`predicate_index`)."""
+        return ""
+
+    def path_index(self) -> ClassPathIndex | None:
+        """Seam 8 — engine-level class-connectivity grounding: not used by Cypher.
+
+        The navigation hints this seam injects (which class-to-class paths
+        exist) are already carried by the Cypher grammar prompt (seam 1),
+        which lists the conceptual relationship types and their endpoints.
+        Mirroring seams 6/7, returning ``None`` runs the engine ungrounded
+        and leaves the existing Cypher behavior untouched.
+        """
+        return None
+
+    def path_prompt_section(self, question: str, index: ClassPathIndex, k: int = 5) -> str:
+        """Seam 8 renderer — unreachable for Cypher (see :meth:`path_index`)."""
         return ""
