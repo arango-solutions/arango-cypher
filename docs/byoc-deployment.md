@@ -113,6 +113,23 @@ leaving two services on one instance name.
 the pod launches, but the entrypoint then installs dependencies — roughly 45
 seconds before the first 200. `verify` is the real check; expect 404s before it.
 
+**Platform login: what the pod gets, and how to check it.** Users are signed in
+by the platform, not by the app. The gateway forwards each request with the
+user's JWT (`Authorization: bearer`), and the operator injects:
+
+| Variable | What it is |
+| --- | --- |
+| `ARANGO_DEPLOYMENT_ENDPOINT` | the in-cluster coordinator URL |
+| `ARANGO_DEPLOYMENT_CA` | the CA that signs that endpoint's certificate; verify TLS against it |
+| `INTEGRATION_HTTP_ADDRESS_FULL` / `INTEGRATION_HTTP_ADDRESS` | the integration sidecar: `GET /_integration/authn/v1/identity` names a token's user, `POST /_integration/authn/v1/createToken` mints one for a named user (for work that outlives a request; never mint without a user, the sidecar defaults to root) |
+
+`GET <mount>/connect/platform/diagnostics` reports what the pod received and
+whether each piece works, never a token. To open it in a browser, sign in to
+the platform at `https://<host>/ui/` first, in the same browser; without that
+the gateway answers `{"message":"Unauthorized"}` before the request reaches
+the app. Checked on prod.demo IAM (0.2.0-14): CA injected and verifying,
+sidecar naming the user, minted token accepted.
+
 ## Package-specific notes
 
 **The `[service]` extra is mandatory.** `arango_cypher.service` calls
